@@ -14,6 +14,7 @@ use crate::layout::Layout;
 use crate::read::{Field, ReferenceTypes, Visitor, read_object};
 use crate::serialized::{External, ReferencedName, SerializedFile};
 use crate::source::ByteSource;
+use crate::value::{Value, read_value};
 
 const MONO_SCRIPT: i32 = 115;
 
@@ -90,6 +91,26 @@ impl OpenFile<'_> {
             visitor,
         )
     }
+
+    /// Reads object `index` of the file into a value tree.
+    pub fn value(&self, index: usize) -> Result<Value> {
+        let object = &self.file.objects[index];
+        let layout = self.layouts.get(object.type_index)?;
+        let data = self.file.object_bytes(self.source, object)?;
+        read_value(layout, &data, self.file.header.endian, self.layouts)
+    }
+}
+
+/// An object of a version: its bundle and file, by their positions in the [`VersionIndex`],
+/// and its path ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ObjectId {
+    /// The bundle.
+    pub bundle: usize,
+    /// The file in the bundle.
+    pub file: usize,
+    /// The path ID.
+    pub path_id: i64,
 }
 
 /// A reference as stored: a file index and a path ID.
@@ -309,6 +330,22 @@ pub enum Target<'a> {
     },
 }
 
+/// The object a reference points to, by [`VersionIndex::resolve`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// Null.
+    Null,
+    /// An object of an indexed file. The file may still lack an object with that path ID.
+    Object(ObjectId),
+    /// An object in an external file that is in no indexed bundle.
+    Missing {
+        /// The external path.
+        external: &'a str,
+        /// The path ID.
+        path_id: i64,
+    },
+}
+
 /// The indexes of every bundle of a version, with references resolved across bundles.
 #[derive(Debug)]
 pub struct VersionIndex {
@@ -378,40 +415,71 @@ impl VersionIndex {
         self.files.get(name).copied()
     }
 
+    /// The file a reference stored in `bundle`/`file` points into: an indexed file, or the
+    /// path of an external file that is in no indexed bundle.
+    fn file_of(
+        &self,
+        bundle: usize,
+        file: usize,
+        file_id: i32,
+    ) -> Result<std::result::Result<(usize, usize), &str>> {
+        if file_id == 0 {
+            return Ok(Ok((bundle, file)));
+        }
+        let index = usize::try_from(file_id).unwrap_or(usize::MAX);
+        let externals = &self.bundles[bundle].files[file].externals;
+        let Some(external) = index.checked_sub(1).and_then(|i| externals.get(i)) else {
+            return Err(Error::malformed(
+                "reference",
+                format!("file index {file_id} is not in the list of external files"),
+            ));
+        };
+        Ok(self
+            .external(bundle, file, index)
+            .ok_or(external.path.as_str()))
+    }
+
     /// Where a reference stored in a file points.
     pub fn target(&self, bundle: usize, file: usize, p: PPtr) -> Result<Target<'_>> {
         if p.file_id == 0 && p.path_id == 0 {
             return Ok(Target::Null);
         }
-        let (b, f) = if p.file_id == 0 {
-            (bundle, file)
-        } else {
-            let index = usize::try_from(p.file_id).unwrap_or(usize::MAX);
-            let externals = &self.bundles[bundle].files[file].externals;
-            let Some(external) = index.checked_sub(1).and_then(|i| externals.get(i)) else {
-                return Err(Error::malformed(
-                    "reference",
-                    format!(
-                        "file index {} is not in the list of external files",
-                        p.file_id
-                    ),
-                ));
-            };
-            match self.external(bundle, file, index) {
-                Some(found) => found,
-                None => {
-                    return Ok(Target::External {
-                        path: &external.path,
-                        path_id: p.path_id,
-                    });
-                }
-            }
-        };
-        Ok(Target::Object {
-            bundle: &self.bundles[b].name,
-            file: &self.bundles[b].files[f].path,
-            path_id: p.path_id,
+        Ok(match self.file_of(bundle, file, p.file_id)? {
+            Ok((b, f)) => Target::Object {
+                bundle: &self.bundles[b].name,
+                file: &self.bundles[b].files[f].path,
+                path_id: p.path_id,
+            },
+            Err(path) => Target::External {
+                path,
+                path_id: p.path_id,
+            },
         })
+    }
+
+    /// The object a reference stored in object `from` points to. `Ok(None)` is a null
+    /// reference; a reference into a file that no indexed bundle contains is
+    /// [`Resolved::Missing`].
+    pub fn resolve(&self, from: ObjectId, p: PPtr) -> Result<Resolved<'_>> {
+        if p.file_id == 0 && p.path_id == 0 {
+            return Ok(Resolved::Null);
+        }
+        Ok(match self.file_of(from.bundle, from.file, p.file_id)? {
+            Ok((bundle, file)) => Resolved::Object(ObjectId {
+                bundle,
+                file,
+                path_id: p.path_id,
+            }),
+            Err(path) => Resolved::Missing {
+                external: path,
+                path_id: p.path_id,
+            },
+        })
+    }
+
+    /// The position of an object in its file's object table, if the file contains it.
+    pub fn position(&self, id: ObjectId) -> Option<usize> {
+        self.objects.get(&(id.bundle, id.file, id.path_id)).copied()
     }
 
     /// The script name of an object that refers to a script: `None` when it has no script,

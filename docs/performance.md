@@ -14,7 +14,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 |---|---|---|
 | **Avoid work** | Reuse any derivation whose fingerprint already has an output; share downloads, conversions and storage across regions by content hash; evaluate only the bindings that are requested; treat the index of a bundle as a derivation that is reused while the bundle is unchanged | Evaluator and store |
 | **Read less** | The index stage extracts references, names and content hashes only, and skips large arrays (pixels, vertices, audio blocks) by length; payloads are read when a conversion needs them; external streams are read by byte range | `sekai-unity` |
-| **Copy less** | Decompressed blocks are kept in a cache bounded by the memory budget, and readers borrow slices from it; frequently used classes have typed readers that read directly from the bytes; the general value tree is used only for object documents | `sekai-unity` |
+| **Copy less** | Decompressed blocks are kept in a cache bounded by the memory budget, and readers borrow slices from it; object documents are written while the object is read, without a value tree; converters read objects as value trees, and typed readers that read directly from the bytes are added for classes where measurement shows the value tree is costly | `sekai-unity` |
 | **Run in parallel** | One scheduler, described below | `sekai-pipeline` |
 
 ## Reading

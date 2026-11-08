@@ -167,3 +167,51 @@ fn documents_are_the_expected_ones_for_every_variant_and_cache() {
         }
     }
 }
+
+#[test]
+fn value_trees_read_every_object() {
+    use sekai_unity::Value;
+    let cache = NoBlockCache;
+    let mut checked = 0;
+    for name in BUNDLES {
+        let loaded = Loaded::new(&fixtures().join("lzma").join(name), &cache);
+        loaded.with_files(&cache, |files| {
+            for file in files {
+                for (i, object) in file.file.objects.iter().enumerate() {
+                    let value = file.value(i).unwrap();
+                    assert!(matches!(value, Value::Struct(_)));
+                    match object.class_id {
+                        142 => {
+                            let container = value.get("m_Container").unwrap().as_map().unwrap();
+                            assert!(!container.is_empty());
+                            assert!(container[0].0.as_str().unwrap().starts_with("assets/"));
+                            checked += 1;
+                        }
+                        114 => {
+                            assert_eq!(
+                                value.get("longValue").unwrap().as_i64(),
+                                Some(-9007199254740993)
+                            );
+                            assert_eq!(value.get("unsignedLong").unwrap(), &Value::UInt(u64::MAX));
+                            assert_eq!(value.get("flag").unwrap().as_u64(), Some(1));
+                            let texture = value.get("texture").unwrap().as_pptr().unwrap();
+                            assert_eq!(texture.file_id, 0);
+                            checked += 1;
+                        }
+                        49 => {
+                            let bytes = value.get("m_Script").unwrap();
+                            assert_eq!(
+                                bytes,
+                                &Value::Bytes(vec![0x66, 0x69, 0x78, 0xff, 0xfe, 0x00, 0x01])
+                            );
+                            checked += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
+    // Two AssetBundle objects, the MonoBehaviour and the TextAsset.
+    assert_eq!(checked, 4);
+}

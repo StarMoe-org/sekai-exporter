@@ -1,3 +1,5 @@
 {
-  "dependencies": {}
+  "dependencies": {
+    "com.unity.modules.assetbundle": "1.0.0"
+  }
 }

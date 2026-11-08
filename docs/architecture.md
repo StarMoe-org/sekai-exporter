@@ -77,7 +77,7 @@ A converter declares:
 - the asset form it produces, and the specification in [`docs/spec/`](spec/) that defines that form;
 - its version and cost class.
 
-It receives a root object and a context through which it reads referenced objects, payload bytes and table rows. It returns an asset document and file bytes. It does not read files, choose output paths or write to the catalog; the evaluator does all of that.
+It receives a root object and a context through which it reads referenced objects, payload bytes and table rows. It returns the asset's members, each with its role: decoded content (image surfaces, PCM samples), which the evaluator encodes, or finished bytes. The evaluator writes the asset document. It does not read files, choose output paths or write to the catalog; the evaluator does all of that.
 
 When a converter cannot produce a correct asset, it reports a named error for that asset and the run continues with other assets. An asset whose converter is not compiled into the build is reported as `not_compiled`.
 

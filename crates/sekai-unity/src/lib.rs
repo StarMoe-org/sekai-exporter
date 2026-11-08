@@ -15,6 +15,7 @@ pub mod read;
 pub mod serialized;
 pub mod source;
 pub mod typetree;
+pub mod value;
 
 pub use bundle::{Bundle, Entry};
 pub use cache::{BlockCache, BoundedBlockCache, NoBlockCache};
@@ -25,3 +26,4 @@ pub use read::{Field, Scalar, Visitor, read_object};
 pub use serialized::SerializedFile;
 pub use source::{ByteSource, Chunk};
 pub use typetree::{TypeTree, TypeTreeNode};
+pub use value::Value;

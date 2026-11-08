@@ -42,8 +42,7 @@ public static class BuildFixtures
         {
             var build = Path.Combine("Temp", "fixtures", variant.Key);
             Directory.CreateDirectory(build);
-            var options = variant.Value | BuildAssetBundleOptions.DeterministicAssetBundle;
-            if (BuildPipeline.BuildAssetBundles(build, bundles, options, BuildTarget.Android) == null)
+            if (BuildPipeline.BuildAssetBundles(build, bundles, variant.Value, BuildTarget.Android) == null)
                 throw new Exception("building the " + variant.Key + " bundles failed");
             var target = Path.Combine(output, variant.Key);
             Directory.CreateDirectory(target);

@@ -1,6 +1,18 @@
 //! The converter interface, the writers and the general-purpose converters.
 //!
-//! A converter is a pure function from a root object, its closure and the table rows it reads to an asset. It does not read files, choose output paths or write to the catalog.
+//! A converter is a pure function from a root object, its closure and the table rows it reads to
+//! an asset. It does not read files, choose output paths or write to the catalog: it reads
+//! through a [`Context`] and returns an [`Asset`], and the evaluator does the rest.
+//!
+//! An asset is a list of members. A member is decoded content (a [`Surface`] or [`Pcm`]),
+//! which the evaluator encodes in the forms the run needs, or finished bytes such as a JSON
+//! document or a GLB file.
+
+use std::fmt;
+
+pub use sekai_codec::{DecodeError, Pcm, Surface};
+pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
+pub use sekai_unity::{Chunk, Value};
 
 #[cfg(feature = "animation")]
 pub mod animation;
@@ -22,3 +34,128 @@ pub mod timeline;
 pub mod ugui;
 #[cfg(feature = "video")]
 pub mod video;
+
+/// A converter: the code that produces one asset form.
+pub trait Converter: Send + Sync {
+    /// The converter name. It is part of every fingerprint the converter produces.
+    fn name(&self) -> &'static str;
+
+    /// The converter version. It changes only when the converter's output changes.
+    fn version(&self) -> u32;
+
+    /// Whether `object` is the root of an asset of this form. `container_paths` are the paths
+    /// under which bundles list the object.
+    fn is_root(&self, object: &ObjectIndex, container_paths: &[String]) -> bool;
+
+    /// Produces the asset whose root is `root`.
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Asset, ConvertError>;
+}
+
+/// What a converter reads through.
+pub trait Context {
+    /// An object with its fields.
+    fn object(&self, id: ObjectId) -> Result<Object, ConvertError>;
+
+    /// The object a reference stored in object `from` points to, or `None` for a null
+    /// reference. A reference to an object that is not available is a `missing_object` error.
+    fn resolve(&self, from: ObjectId, reference: PPtr) -> Result<Option<ObjectId>, ConvertError>;
+
+    /// Bytes that object `from` stores outside itself, such as the image data of a texture
+    /// (`m_StreamData`) or the samples of an audio clip (`m_Resource`). `path` is the stored
+    /// path, which names a resource file of the object's bundle.
+    fn resource(
+        &self,
+        from: ObjectId,
+        path: &str,
+        offset: u64,
+        size: u64,
+    ) -> Result<Chunk<'_>, ConvertError>;
+}
+
+/// An object as a converter sees it.
+#[derive(Debug, Clone)]
+pub struct Object {
+    /// The object.
+    pub id: ObjectId,
+    /// The class ID.
+    pub class_id: i32,
+    /// The class name.
+    pub class: String,
+    /// For objects that refer to a script: `"<assembly>/<namespace>.<class>"`, or `None` when
+    /// the object refers to no script or the script does not resolve.
+    pub script: Option<String>,
+    /// The fields. The root is a [`Value::Struct`].
+    pub fields: Value,
+}
+
+/// The result of a conversion.
+#[derive(Debug, Clone)]
+pub struct Asset {
+    /// The members, in a fixed order that the converter defines.
+    pub members: Vec<Member>,
+}
+
+/// One member of an asset.
+#[derive(Debug, Clone)]
+pub struct Member {
+    /// What the member is to the asset, such as `"image"` or `"base_color"`. Roles are defined
+    /// by the specification of the asset form and are unique within an asset.
+    pub role: String,
+    /// The content.
+    pub content: Content,
+}
+
+/// The content of a member.
+#[derive(Debug, Clone)]
+pub enum Content {
+    /// An image, encoded by the evaluator.
+    Image(Surface),
+    /// Audio, encoded by the evaluator.
+    Audio(Pcm),
+    /// Finished bytes, written as they are.
+    File {
+        /// The file extension, without the dot.
+        extension: String,
+        /// The bytes.
+        bytes: Vec<u8>,
+    },
+}
+
+/// Why an asset could not be produced: a named error, written with the asset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvertError {
+    /// A fixed code, such as `missing_object` or `unsupported`.
+    pub code: &'static str,
+    /// A description for people.
+    pub message: String,
+}
+
+impl ConvertError {
+    /// An error with a code and a message.
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<sekai_unity::Error> for ConvertError {
+    fn from(e: sekai_unity::Error) -> Self {
+        Self::new(e.code(), e.to_string())
+    }
+}
+
+impl From<DecodeError> for ConvertError {
+    fn from(e: DecodeError) -> Self {
+        Self::new(e.code(), e.to_string())
+    }
+}
+
+impl fmt::Display for ConvertError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for ConvertError {}

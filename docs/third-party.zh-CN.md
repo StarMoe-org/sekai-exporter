@@ -18,6 +18,7 @@
 | UnityFS 容器、SerializedFile、type tree | [UnityPy](https://github.com/K0lb3/UnityPy) | 参考：对象字段逐值比对 | MIT |
 | 类布局与读取顺序 | [AssetStudio](https://github.com/Perfare/AssetStudio)，及其维护分支 [AssetStudioMod](https://github.com/aelurum/AssetStudio) | 读取器结构的参考 | MIT |
 | 引擎序列化规则 | [UnityCsReference](https://github.com/Unity-Technologies/UnityCsReference) | 用于查阅序列化字段的语义，不复制代码 | Unity Reference-Only License |
+| type tree 公共字符串表 | Unity 编辑器 2022.3.62f2（`UnityFileSystemApi.dll`） | 复制：type tree 按偏移引用的引擎字段名与类型名清单，UnityPy 分发同一张表 | 标识符清单，不适用 |
 | LZ4 块解压 | [`lz4_flex`](https://crates.io/crates/lz4_flex) | 链接 | MIT |
 | LZMA 块解压 | [`lzma-rs`](https://crates.io/crates/lzma-rs) | 链接 | MIT |
 | 本游戏所用的资源包头部去混淆 | [sssekai](https://github.com/MetaSekaiLab/sssekai) | 参考：该变换在其中有公开说明 | MIT |

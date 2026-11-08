@@ -4,7 +4,7 @@
 
 Performance is a property of the evaluator, not of converters. A converter is a pure function from an object view and a context to asset bytes. Caching, incremental evaluation, sharing, laziness, parallelism, fused encoding and memory control all live in the evaluator, and no converter contains threads, caches or input and output. Optimizations are therefore kept in one place, contributors who write converters do not need to know them, and each optimization can be turned off to compare against evaluation without it.
 
-The check that holds this together: **optimized evaluation and plain evaluation produce identical bytes.** Plain evaluation runs on one thread with no derivation cache and no fused encoding. Continuous integration compares the two, as well as one thread against many and native against `wasm32`.
+The check that holds this together: **optimized evaluation and plain evaluation produce identical bytes.** Plain evaluation runs on one thread with no derivation cache and no fused encoding. Continuous integration compares one thread against many and a bounded block cache against none. Comparing optimized against plain evaluation, and native against `wasm32`, is planned for when the evaluator and the converters exist.
 
 ## Order of concerns
 
@@ -19,7 +19,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 
 ## Reading
 
-**Layout compilation.** A type tree is compiled into a flat reading program: read a fixed-size value, skip a fixed number of bytes, align, loop over an array, read a PPtr, read a string. Programs are cached by the hash of the type tree. Within one version, almost every class has one type tree, so each is compiled once. The reference extractor used by the index, the object document writer and the typed readers are interpretations of the same program, so there is one implementation of each layout. Layout tables for objects stored without type trees compile to the same kind of program.
+**Layout compilation.** A type tree is compiled into a flat reading program: read a fixed-size value, skip a fixed number of bytes, align, loop over an array, read a PPtr, read a string. Each type tree of a file is compiled once, when the file is opened. The reference extractor used by the index, the object document writer and the typed readers are interpretations of the same program, so there is one implementation of each layout. Layout tables for objects stored without type trees compile to the same kind of program.
 
 **Block cache.** UnityFS stores data in LZ4 or LZMA blocks. Decompressed blocks are cached under the key `(bundle content hash, block index)`, and the cache counts against the memory budget. Reading an object decompresses only the blocks that contain it.
 
@@ -44,7 +44,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 | Store writes | Content-addressed; content that already exists is skipped. A local store materializes path trees with hard links |
 | Catalog | SQLite in WAL mode with batched transactions; read-only queries use separate connections and do not wait for writes |
 
-Fused encoding does not change fingerprints: each output is the same bytes it would be without fusion, and continuous integration compares fused and unfused evaluation.
+Fused encoding does not change fingerprints: each output is the same bytes it would be without fusion, and comparing fused and unfused evaluation in continuous integration is planned together with fused encoding.
 
 ## Measurement
 

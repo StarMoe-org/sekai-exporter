@@ -55,7 +55,7 @@
 | `mp3` | MP3 | LAME，运行时加载 |
 | `aac` | MP4 中的 AAC 音轨 | libavcodec，运行时加载 |
 
-规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
+规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。默认构建包含 `mp3` 与 `aac`，因此运行时需要系统中安装 LAME 与 libavcodec；导出器在启动时检查二者，并指明缺失的库。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
 
 ## 来源与发布
 

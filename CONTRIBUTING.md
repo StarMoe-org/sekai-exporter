@@ -20,6 +20,7 @@ Contributions are welcome, from fixes to whole new asset forms. Start with [Obje
 - **Fail loudly.** If a converter cannot produce a correct asset, it reports a named error for that asset. It never writes a guessed value.
 - **No `#[cfg]` inside function bodies.** Features gate whole modules or optional dependencies.
 - **Deterministic output.** The same input gives the same bytes, whatever the thread count.
+- **No `unsafe` code** outside the modules that load LAME and libavcodec at run time. The workspace denies `unsafe_code`, and only those modules allow it.
 
 ## Checks
 

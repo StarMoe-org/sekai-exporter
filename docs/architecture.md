@@ -88,7 +88,7 @@ The workspace has fourteen crates in a flat `crates/` directory. A crate boundar
 | Layer | Crate | Contents |
 |---|---|---|
 | 0 | `sekai-unity` | Unpacking: UnityFS, SerializedFile, type trees, layout compilation, block cache. No procedural macros and no C dependencies |
-| 0 | `sekai-format` | Serde types of the published documents, for consumers to depend on directly |
+| 0 | `sekai-format` | Serde types of the published documents; consumers can use it directly as a git dependency |
 | 1 | `sekai-layouts` | Field layout tables for objects stored without type trees, and their loader |
 | 1 | `sekai-codec` | Texture and CRI decoding in pure Rust |
 | 1 | `sekai-catalog` | The content-addressed store and the catalog |

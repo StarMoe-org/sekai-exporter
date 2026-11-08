@@ -55,7 +55,7 @@ In `sekai-encode`:
 | `mp3` | MP3 | LAME, loaded at run time |
 | `aac` | AAC audio tracks in MP4 | libavcodec, loaded at run time |
 
-The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The licences of these libraries are listed in [Third-party sources](third-party.md).
+The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The default build includes `mp3` and `aac`, so it needs LAME and libavcodec installed at run time; the exporter checks for them when it starts and names the library that is missing. The licences of these libraries are listed in [Third-party sources](third-party.md).
 
 ## Sources and publishing
 

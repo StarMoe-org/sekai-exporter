@@ -18,13 +18,13 @@ The pipeline is the eager evaluator of the [derivation graph](architecture.md). 
 | P5 Convert | Evaluate convert and transform derivations under the scheduler | Asset documents and file bytes |
 | P6 Write | Write bytes to the store, skipping content that already exists; record derivations in the catalog | Store objects and catalog rows |
 | P7 Views | Each enabled view produces bindings; views that need other bytes produce transform derivations | Bindings |
-| P8 Commit | Verify that every bound object exists in the store with its recorded hash, then advance the version pointer | A complete or partial version |
+| P8 Commit | Verify that every bound object exists in the store with its recorded hash, then advance the version pointer | A committed version, with its asset errors listed |
 
 ## Invariants
 
 - **Increments follow object content, not bundles.** A bundle that is rebuilt without changing its objects leaves every object hash, and therefore every asset fingerprint, unchanged. P2 and P3 run only for bundles whose declared hash changed; the index of an unchanged bundle is reused.
 - **Fingerprints contain everything that determines the bytes:** the converter name and version, the content hash of each object in the closure, the hash of each table row the converter reads, and the encoder name, version and parameters. Configuration does not change output paths, formats or encoder parameters; those are defined by converters and views.
-- **Failures are recorded per asset.** A failed asset carries a named error and does not affect other assets. Because it has no successful output, the next run evaluates it again. Missing members, such as a referenced bundle that cannot be downloaded, are reported the same way.
+- **Asset errors and run failures are different things.** An asset error is the result of evaluating an asset: a named error that is as deterministic as a successful output. It does not affect other assets, it does not stop the version from being committed, and it is listed with the version. Because it has no successful output, the next run evaluates it again. Missing members, such as a bundle that the asset list names but the source does not serve, are asset errors. A run failure is a failed download, a failed write or a crash. Only run failures stop a commit.
 - **The order of work does not affect output.** Each output depends only on its inputs, and the catalog is written in key order at the end of each batch. Store contents and the catalog contents sorted by primary key are independent of thread count and scheduling.
 - **A commit is all or nothing per version.** P8 advances the pointer only after verification. When verification fails, the stage that failed is reported by its fixed name and the previous pointer stays in place.
 

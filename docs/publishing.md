@@ -38,9 +38,11 @@ The `storage` view reproduces the path tree served by the asset storage that the
 2. the listing of the new version is written;
 3. files that the new version no longer contains are deleted, one publication cycle later, so that readers of the previous version can finish.
 
+The consistency this gives is bounded as follows. Each file is replaced atomically. While a version is being written, a reader can see files of the previous and the new version side by side. Running the publication again after an interruption converges to the new version. A file whose asset has an error keeps its previous bytes until a conversion succeeds.
+
 ## The publication protocol
 
-1. A version is published only when its run completed without a failed download, conversion or write.
+1. A version is published only when its run completed without a run failure: a failed download, a failed write or a crash. Asset errors do not stop publication; they are listed with the version.
 2. Index shards are immutable and named by their SHA-256.
 3. The revision of a publication is the hash of its sorted records, so it does not depend on how the JSON is formatted.
 4. Before the pointer of a version is advanced, every object the publication refers to is checked to exist in the store with its recorded hash.

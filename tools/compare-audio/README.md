@@ -7,7 +7,7 @@ These scripts compare the CRI readers and the HCA decoder of `sekai-codec` with
 programs of the crate:
 
 ```bash
-cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams
+cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams --example usm_streams
 ```
 
 `compare.py` finds the HCA streams inside the files of a directory and compares each with
@@ -25,6 +25,13 @@ python compare_acb.py <acb_streams> <decode_hca_stream> <vgmstream-cli> <directo
 ```
 
 Both exit with status 1 if anything differs. The results were checked against vgmstream r2168.
+
+`compare_usm.py` compares the streams separated from USM files with
+[WannaCRI](https://github.com/donmai-me/WannaCRI), byte by byte:
+
+```bash
+python compare_usm.py <usm_streams> <directory>...
+```
 
 `make_fixtures.py` builds `crates/sekai-codec/tests/fixtures/hca` from generated audio. It needs
 [VGAudio](https://github.com/Thealexbarney/VGAudio) to encode:

@@ -8,10 +8,12 @@ mod acb;
 mod awb;
 mod hca;
 mod hca_tables;
+mod usm;
 mod utf;
 
 pub use acb::{Acb, Cue, Waveform, read_acb};
 pub use awb::{Awb, AwbStream, read_awb};
+pub use usm::{AudioStream, Usm, VideoFrame, VideoStream, read_usm};
 
 use crate::{DecodeError, Pcm};
 

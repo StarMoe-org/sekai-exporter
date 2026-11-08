@@ -6,7 +6,7 @@
 [vgmstream](https://github.com/vgmstream/vgmstream) 比对。脚本调用本 crate 的示例程序：
 
 ```bash
-cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams
+cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams --example usm_streams
 ```
 
 `compare.py` 找出目录中各文件里的 HCA 流，逐采样与 `vgmstream-cli` 比对：
@@ -22,6 +22,13 @@ python compare_acb.py <acb_streams> <decode_hca_stream> <vgmstream-cli> <目录>
 ```
 
 有任何差异时，两个脚本都以状态 1 退出。结果已与 vgmstream r2168 核对。
+
+`compare_usm.py` 把从 USM 文件分离出的流与
+[WannaCRI](https://github.com/donmai-me/WannaCRI) 逐字节比对：
+
+```bash
+python compare_usm.py <usm_streams> <目录>...
+```
 
 `make_fixtures.py` 用生成的音频构建 `crates/sekai-codec/tests/fixtures/hca`，编码需要
 [VGAudio](https://github.com/Thealexbarney/VGAudio)：

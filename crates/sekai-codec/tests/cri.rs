@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{HcaKey, decode_hca, read_acb, read_awb};
+use sekai_codec::cri::{HcaKey, decode_hca, read_acb, read_awb, read_usm};
 use sha2::{Digest, Sha256};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -316,6 +316,105 @@ fn cut_table_is_reported() {
     ));
     assert!(matches!(
         read_acb(b"@UTX0000000000000000000000000000"),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+fn usm_chunk(kind: &[u8; 4], channel: u8, data_type: u8, time: u32, payload: &[u8]) -> Vec<u8> {
+    let mut out = kind.to_vec();
+    out.extend((payload.len() as u32 + 0x18).to_be_bytes());
+    out.extend([0, 0x18, 0, 0, channel, 0, 0, data_type]);
+    out.extend(time.to_be_bytes());
+    out.extend(3000u32.to_be_bytes());
+    out.extend([0; 8]);
+    out.extend(payload);
+    out
+}
+
+fn movie() -> Vec<u8> {
+    use Cell::U32;
+    let video = utf(
+        "VIDEO_HDRINFO",
+        &[
+            "mpeg_codec",
+            "width",
+            "height",
+            "framerate_n",
+            "framerate_d",
+        ],
+        &[vec![U32(1), U32(640), U32(360), U32(30000), U32(1000)]],
+    );
+    let audio = utf(
+        "AUDIO_HDRINFO",
+        &["audio_codec", "sampling_rate", "num_channels"],
+        &[vec![U32(2), U32(48000), U32(2)]],
+    );
+    let seek = utf(
+        "VIDEO_SEEKINFO",
+        &["ofs_frmid"],
+        &[vec![U32(0)], vec![U32(2)]],
+    );
+    let directory = utf("CRIUSF_DIR_STREAM", &["fmtver"], &[vec![U32(1)]]);
+    [
+        usm_chunk(b"CRID", 0, 1, 0, &directory),
+        usm_chunk(b"@SFV", 0, 1, 0, &video),
+        usm_chunk(b"@SFA", 0, 1, 0, &audio),
+        usm_chunk(b"@SFV", 0, 3, 0, &seek),
+        usm_chunk(b"@SFV", 0, 2, 0, b"#HEADER END"),
+        usm_chunk(b"@SFV", 0, 0, 0, b"first"),
+        usm_chunk(b"@SFA", 0, 0, 0, b"AUDIO"),
+        usm_chunk(b"@SFV", 0, 0, 100, b"second"),
+        usm_chunk(b"@SFA", 0, 0, 100, b"MORE"),
+        usm_chunk(b"@SFV", 0, 0, 200, b"third"),
+    ]
+    .concat()
+}
+
+#[test]
+fn movie_separates_frames_and_audio() {
+    let data = movie();
+    let usm = read_usm(&data).expect("movie");
+    assert_eq!(usm.video.len(), 1);
+    let video = &usm.video[0];
+    assert_eq!(video.mpeg_codec, 1);
+    assert_eq!((video.width, video.height), (640, 360));
+    assert_eq!((video.framerate_n, video.framerate_d), (30000, 1000));
+    let frames: Vec<&[u8]> = video.frames.iter().map(|f| f.data).collect();
+    assert_eq!(frames, [&b"first"[..], b"second", b"third"]);
+    assert_eq!(video.frames[1].time, 100);
+    assert_eq!(video.frames[1].time_scale, 3000);
+    let seek: Vec<bool> = video.frames.iter().map(|f| f.seek_point).collect();
+    assert_eq!(seek, [true, false, true]);
+
+    assert_eq!(usm.audio.len(), 1);
+    let audio = &usm.audio[0];
+    assert_eq!(audio.audio_codec, 2);
+    assert_eq!((audio.sampling_rate, audio.num_channels), (48000, 2));
+    assert_eq!(audio.chunks.concat(), b"AUDIOMORE");
+}
+
+#[test]
+fn cut_movie_is_truncated() {
+    let data = movie();
+    assert!(matches!(
+        read_usm(&data[..data.len() - 1]),
+        Err(DecodeError::Truncated { .. })
+    ));
+    assert!(matches!(
+        read_usm(b"RIFFxxxx"),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn frame_before_its_header_is_malformed() {
+    let data = [
+        usm_chunk(b"CRID", 0, 1, 0, b""),
+        usm_chunk(b"@SFV", 0, 0, 0, b"frame"),
+    ]
+    .concat();
+    assert!(matches!(
+        read_usm(&data),
         Err(DecodeError::Malformed { .. })
     ));
 }

@@ -29,5 +29,9 @@ required-features = ["cri"]
 name = "acb_streams"
 required-features = ["cri"]
 
+[[example]]
+name = "usm_streams"
+required-features = ["cri"]
+
 [lints]
 workspace = true

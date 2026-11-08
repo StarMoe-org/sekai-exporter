@@ -39,8 +39,8 @@ An entry is added in the same change that adds the component, and removed in the
 
 | Component | Source | Use | Licence |
 |---|---|---|---|
-| HCA decoding | [vgmstream](https://github.com/vgmstream/vgmstream) clHCA | Ported: the decoder follows its structure and the constants are generated from it, with the notice kept in the generated file; decoded samples are compared sample by sample | ISC |
-| CRI ACB tables, AWB archives, ADX decoding | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: results are compared with what it reads and decodes | ISC |
+| HCA and ADX decoding | [vgmstream](https://github.com/vgmstream/vgmstream) (clHCA and its ADX decoder) | Ported: the decoders follow their structure and the constants are generated from it, with the notice kept in the generated file; decoded samples are compared sample by sample | ISC |
+| CRI ACB tables, AWB archives | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: results are compared with what it reads and decodes | ISC |
 | USM demultiplexing | [WannaCRI](https://github.com/donmai-me/WannaCRI) | Reference: separated streams are compared byte by byte | MIT |
 | HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |

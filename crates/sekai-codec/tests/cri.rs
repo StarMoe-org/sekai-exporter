@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{HcaKey, decode_hca, read_acb, read_awb, read_usm};
+use sekai_codec::cri::{HcaKey, decode_adx, decode_hca, read_acb, read_awb, read_usm};
 use sha2::{Digest, Sha256};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -26,7 +26,13 @@ fn decoded_samples_match_the_reference() {
         let key = u64::from_str_radix(key, 16).expect("hex");
         let subkey = u16::from_str_radix(subkey, 16).expect("hex");
         let key = (key != 0).then_some(HcaKey { key, subkey });
-        let pcm = decode_hca(&fixture(name), key).expect(name);
+        let data = fixture(name);
+        let decoded = if name.ends_with(".adx") {
+            decode_adx(&data)
+        } else {
+            decode_hca(&data, key)
+        };
+        let pcm = decoded.expect(name);
         assert_eq!(pcm.sample_rate().to_string(), rate, "{name}");
         assert_eq!(pcm.channels().to_string(), channels, "{name}");
         let samples: Vec<u8> = pcm.samples().iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -38,7 +44,7 @@ fn decoded_samples_match_the_reference() {
         assert_eq!(actual, digest, "{name}");
         count += 1;
     }
-    assert_eq!(count, 6);
+    assert_eq!(count, 9);
 }
 
 #[test]
@@ -416,5 +422,24 @@ fn frame_before_its_header_is_malformed() {
     assert!(matches!(
         read_usm(&data),
         Err(DecodeError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn cut_adx_is_truncated() {
+    let data = fixture("sine_mono.adx");
+    assert!(matches!(
+        decode_adx(&data[..data.len() - 40]),
+        Err(DecodeError::Truncated { .. })
+    ));
+}
+
+#[test]
+fn adx_of_another_encoding_type_is_unsupported() {
+    let mut data = fixture("sine_mono.adx");
+    data[4] = 4;
+    assert!(matches!(
+        decode_adx(&data),
+        Err(DecodeError::Unsupported { .. })
     ));
 }

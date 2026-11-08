@@ -1,7 +1,7 @@
 """Compare ACB reading with vgmstream, stream by stream.
 
 Usage:
-    python compare_acb.py <acb_streams> <decode_hca_stream> <vgmstream-cli> <directory>...
+    python compare_acb.py <acb_streams> <decode_audio_stream> <vgmstream-cli> <directory>...
 
 Each ACB file in the directories is read by both programs. For every stream of its memory bank
 the script compares the decoded samples and the names of the cues that play the stream. It prints

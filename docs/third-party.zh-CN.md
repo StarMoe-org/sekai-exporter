@@ -39,8 +39,8 @@
 
 | 组件 | 来源 | 使用方式 | 许可证 |
 |---|---|---|---|
-| HCA 解码 | [vgmstream](https://github.com/vgmstream/vgmstream) clHCA | 移植：解码器沿用其结构，常量由其生成，声明保留在生成的文件中；解码结果逐采样比对 | ISC |
-| CRI ACB 表、AWB 归档、ADX 解码 | [vgmstream](https://github.com/vgmstream/vgmstream) | 参考：与其读取和解码的结果比对 | ISC |
+| HCA 与 ADX 解码 | [vgmstream](https://github.com/vgmstream/vgmstream)（clHCA 与其 ADX 解码器） | 移植：解码器沿用其结构，常量由其生成，声明保留在生成的文件中；解码结果逐采样比对 | ISC |
+| CRI ACB 表、AWB 归档 | [vgmstream](https://github.com/vgmstream/vgmstream) | 参考：与其读取和解码的结果比对 | ISC |
 | USM 解复用 | [WannaCRI](https://github.com/donmai-me/WannaCRI) | 参考：分离出的流逐字节比对 | MIT |
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
 | FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |

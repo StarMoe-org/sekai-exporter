@@ -7,21 +7,21 @@ These scripts compare the CRI readers and the HCA decoder of `sekai-codec` with
 programs of the crate:
 
 ```bash
-cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams --example usm_streams
+cargo build -p sekai-codec --all-features --release --example decode_audio_stream --example acb_streams --example usm_streams
 ```
 
-`compare.py` finds the HCA streams inside the files of a directory and compares each with
-`vgmstream-cli`, sample by sample:
+`compare.py` finds the HCA streams inside the files of a directory, and reads files that are
+whole ADX streams, and compares each with `vgmstream-cli`, sample by sample:
 
 ```bash
-python compare.py <decode_hca_stream> <vgmstream-cli> <directory>...
+python compare.py <decode_audio_stream> <vgmstream-cli> <directory>...
 ```
 
 `compare_acb.py` reads ACB files and compares, for every stream of the memory bank, the samples and
 the names of the cues that play it:
 
 ```bash
-python compare_acb.py <acb_streams> <decode_hca_stream> <vgmstream-cli> <directory>...
+python compare_acb.py <acb_streams> <decode_audio_stream> <vgmstream-cli> <directory>...
 ```
 
 Both exit with status 1 if anything differs. The results were checked against vgmstream r2168.

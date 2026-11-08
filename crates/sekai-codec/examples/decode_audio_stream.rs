@@ -1,4 +1,4 @@
-//! Decodes HCA streams from standard input, for comparing with a reference decoder.
+//! Decodes HCA and ADX streams from standard input, for comparing with a reference decoder.
 //!
 //! Each request is a little-endian `u32` length and that many bytes. Each reply is a status byte:
 //! 0, then little-endian `u32` sample rate, `u32` channel count, `u32` length in bytes and the
@@ -6,7 +6,7 @@
 
 use std::io::{self, Read, Write};
 
-use sekai_codec::cri::decode_hca;
+use sekai_codec::cri::{decode_adx, decode_hca};
 
 fn main() -> io::Result<()> {
     let mut input = io::stdin().lock();
@@ -15,7 +15,12 @@ fn main() -> io::Result<()> {
     while input.read_exact(&mut length).is_ok() {
         let mut data = vec![0; u32::from_le_bytes(length) as usize];
         input.read_exact(&mut data)?;
-        match decode_hca(&data, None) {
+        let decoded = if data.starts_with(&[0x80, 0x00]) {
+            decode_adx(&data)
+        } else {
+            decode_hca(&data, None)
+        };
+        match decoded {
             Ok(pcm) => {
                 output.write_all(&[0])?;
                 output.write_all(&pcm.sample_rate().to_le_bytes())?;

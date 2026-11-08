@@ -1,7 +1,7 @@
 """Compare HCA decoding sample by sample with vgmstream.
 
 Usage:
-    python compare.py <decode_hca_stream executable> <vgmstream-cli> <directory>...
+    python compare.py <decode_audio_stream executable> <vgmstream-cli> <directory>...
 
 Every HCA stream found inside the files of the directories (ACB or AWB containers, or bare HCA
 files) is decoded by both programs. The script prints how many distinct streams decode to the
@@ -64,7 +64,7 @@ def decode_ours(process, stream):
 
 
 def decode_reference(tool, directory, stream):
-    source = directory / "stream.hca"
+    source = directory / ("stream.adx" if stream[:2] == b"\x80\x00" else "stream.hca")
     target = directory / "stream.wav"
     source.write_bytes(stream)
     subprocess.run([tool, "-i", "-o", str(target), str(source)], check=True, capture_output=True)
@@ -82,7 +82,8 @@ def main():
             for path in sorted(pathlib.Path(root).iterdir()):
                 if not path.is_file():
                     continue
-                for stream in streams(path.read_bytes()):
+                data = path.read_bytes()
+                for stream in [data] if data[:2] == b"\x80\x00" else streams(data):
                     digest = hashlib.sha256(stream).digest()
                     if digest in seen:
                         continue

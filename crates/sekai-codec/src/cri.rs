@@ -5,6 +5,7 @@
 //! and audio streams as stored. Those readers are submodules of this one.
 
 mod acb;
+mod adx;
 mod awb;
 mod hca;
 mod hca_tables;
@@ -24,6 +25,14 @@ pub struct HcaKey {
     pub key: u64,
     /// The subkey of the AWB the stream comes from, or 0 for a stream outside an AWB.
     pub subkey: u16,
+}
+
+/// Decodes one ADX stream to PCM.
+///
+/// Streams that are not version 4, encoding type 3 with four-bit samples, including encrypted
+/// ones, are reported as [`DecodeError::Unsupported`].
+pub fn decode_adx(data: &[u8]) -> Result<Pcm, DecodeError> {
+    adx::decode(data)
 }
 
 /// Decodes one HCA stream to PCM, without its encoder delay and padding.

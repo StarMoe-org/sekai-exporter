@@ -22,7 +22,7 @@ name = "decode_stream"
 required-features = ["texture"]
 
 [[example]]
-name = "decode_hca_stream"
+name = "decode_audio_stream"
 required-features = ["cri"]
 
 [[example]]

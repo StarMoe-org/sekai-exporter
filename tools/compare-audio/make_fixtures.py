@@ -136,7 +136,7 @@ def random_version_3(seed):
 
 
 def reference(tool, directory, stream, key, subkey):
-    source = directory / "stream.hca"
+    source = directory / ("stream.adx" if stream[:2] == b"\x80\x00" else "stream.hca")
     target = directory / "stream.wav"
     source.write_bytes(stream)
     key_file = directory / ".hcakey"
@@ -166,6 +166,9 @@ def main():
             write_wav(source, channels, sample)
             subprocess.run([encoder, "-c", str(source), str(target), "--hcaquality", "High"], check=True, capture_output=True)
             streams[name] = (target.read_bytes(), 0, 0)
+            adx = directory / f"{name}.adx"
+            subprocess.run([encoder, "-c", str(source), str(adx)], check=True, capture_output=True)
+            streams[f"{name}.adx"] = (adx.read_bytes(), 0, 0)
         stereo = streams["sine_stereo"][0]
         streams["sine_stereo_key"] = (encrypt(stereo, TEST_KEY, 0), TEST_KEY, 0)
         streams["sine_stereo_subkey"] = (encrypt(stereo, TEST_KEY, TEST_SUBKEY), TEST_KEY, TEST_SUBKEY)
@@ -173,10 +176,11 @@ def main():
 
         lines = []
         for name, (stream, key, subkey) in streams.items():
-            (out / f"{name}.hca").write_bytes(stream)
+            file = name if name.endswith(".adx") else f"{name}.hca"
+            (out / file).write_bytes(stream)
             rate, channels, samples = reference(tool, directory, stream, key, subkey)
             digest = hashlib.sha256(samples).hexdigest()
-            lines.append(f"{name}.hca {rate} {channels} {len(samples)} {digest} {key:x} {subkey:x}")
+            lines.append(f"{file} {rate} {channels} {len(samples)} {digest} {key:x} {subkey:x}")
             print(lines[-1])
     (out / "expected.txt").write_text("\n".join(lines) + "\n", newline="\n")
 

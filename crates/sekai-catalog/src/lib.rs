@@ -4,3 +4,6 @@
 
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
+pub mod store;
+
+pub use store::{Key, LocalStore};

@@ -398,6 +398,7 @@ name = "sekai-catalog"
 version = "0.0.0"
 dependencies = [
  "sekai-format",
+ "sha2",
 ]
 
 [[package]]
@@ -490,6 +491,7 @@ dependencies = [
  "sekai-game",
  "sekai-layouts",
  "sekai-unity",
+ "sha2",
 ]
 
 [[package]]

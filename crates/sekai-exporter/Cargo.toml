@@ -24,6 +24,8 @@ sekai-publish.workspace = true
 sekai-pipeline.workspace = true
 sekai-moesekai.workspace = true
 sekai-mysekai = { workspace = true, optional = true }
+sha2 = "0.11.1"
+lexopt = "0.3.2"
 
 [features]
 image = ["sekai-convert/image"]

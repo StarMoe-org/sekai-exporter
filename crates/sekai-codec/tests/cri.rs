@@ -204,13 +204,18 @@ fn sheet() -> Vec<u8> {
     let cues = utf(
         "Cue",
         &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
-        &[cue(1, 1, 10), cue(2, 0, 20), cue(3, 0, 30)],
+        &[cue(1, 1, 10), cue(2, 0, 20), cue(3, 0, 30), cue(8, 0, 40)],
     );
     let name = |text, index| vec![Text(text), U16(index)];
     let names = utf(
         "CueName",
         &["CueName", "CueIndex"],
-        &[name("direct", 0), name("synth", 1), name("sequence", 2)],
+        &[
+            name("direct", 0),
+            name("synth", 1),
+            name("sequence", 2),
+            name("block sequence", 3),
+        ],
     );
     let wave = |id, flag, samples| {
         vec![
@@ -255,10 +260,31 @@ fn sheet() -> Vec<u8> {
         &["NumTracks", "TrackIndex"],
         &[vec![U16(2), Data(vec![0, 1, 0, 0])]],
     );
-    let tracks = utf("Track", &["EventIndex"], &[vec![U16(0)], vec![U16(0xFFFF)]]);
+    // A block sequence with track 2 of its own and block 0, which has track 0.
+    let block_sequence = utf(
+        "BlockSequence",
+        &["NumTracks", "TrackIndex", "NumBlocks", "BlockIndex"],
+        &[vec![U16(1), Data(vec![0, 2]), U16(1), Data(vec![0, 0])]],
+    );
+    let blocks = utf(
+        "Block",
+        &["NumTracks", "TrackIndex"],
+        &[vec![U16(1), Data(vec![0, 0])]],
+    );
+    let tracks = utf(
+        "Track",
+        &["EventIndex"],
+        &[vec![U16(0)], vec![U16(0xFFFF)], vec![U16(1)]],
+    );
     // A command that names nothing, then a note on of synth 0.
     let event = vec![0x03, 0xE8, 1, 0, 0x07, 0xD0, 4, 0, 2, 0, 0];
-    let events = utf("TrackEvent", &["Command"], &[vec![Data(event)]]);
+    // A note on of waveform 1.
+    let direct = vec![0x07, 0xD0, 4, 0, 1, 0, 1];
+    let events = utf(
+        "TrackEvent",
+        &["Command"],
+        &[vec![Data(event)], vec![Data(direct)]],
+    );
     utf(
         "Header",
         &[
@@ -268,6 +294,8 @@ fn sheet() -> Vec<u8> {
             "WaveformExtensionDataTable",
             "SynthTable",
             "SequenceTable",
+            "BlockSequenceTable",
+            "BlockTable",
             "TrackTable",
             "TrackEventTable",
             "AwbFile",
@@ -279,6 +307,8 @@ fn sheet() -> Vec<u8> {
             Data(extension),
             Data(synth),
             Data(sequence),
+            Data(block_sequence),
+            Data(blocks),
             Data(tracks),
             Data(events),
             Data(afs2(0, &[(3, b"three"), (4, b"four")])),
@@ -290,7 +320,7 @@ fn sheet() -> Vec<u8> {
 fn cue_sheet_gives_cues_waveforms_and_its_bank() {
     let data = sheet();
     let acb = read_acb(&data).expect("sheet");
-    assert_eq!(acb.cues.len(), 3);
+    assert_eq!(acb.cues.len(), 4);
     assert_eq!(acb.cues[0].cue_names, ["direct"]);
     assert_eq!(acb.cues[0].cue_id, 10);
     assert_eq!(acb.cues[0].length, 1500);
@@ -298,6 +328,8 @@ fn cue_sheet_gives_cues_waveforms_and_its_bank() {
     assert_eq!(acb.cues[1].waveforms, [2, 0]);
     assert_eq!(acb.cues[2].cue_names, ["sequence"]);
     assert_eq!(acb.cues[2].waveforms, [2, 0]);
+    assert_eq!(acb.cues[3].cue_names, ["block sequence"]);
+    assert_eq!(acb.cues[3].waveforms, [1, 2, 0]);
 
     let wave = &acb.waveforms[1];
     assert_eq!(wave.memory_awb_id, Some(4));

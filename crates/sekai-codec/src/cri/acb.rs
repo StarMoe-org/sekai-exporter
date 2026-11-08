@@ -75,6 +75,8 @@ pub struct Acb<'a> {
 struct Tables<'a> {
     synth: Option<Table<'a>>,
     sequence: Option<Table<'a>>,
+    block_sequence: Option<Table<'a>>,
+    block: Option<Table<'a>>,
     track: Option<Table<'a>>,
     event: Option<Table<'a>>,
 }
@@ -83,6 +85,25 @@ fn require<'t, 'a>(table: &'t Option<Table<'a>>, name: &str) -> Result<&'t Table
     table
         .as_ref()
         .ok_or_else(|| malformed(format!("a cue refers to the missing {name}")))
+}
+
+/// The first `count` of the 16-bit indices in column `list` of row `row`, where `count` is
+/// column `count` of the same row.
+fn indices(
+    table: &Table<'_>,
+    row: usize,
+    count: &str,
+    list: &str,
+) -> Result<Vec<usize>, DecodeError> {
+    let n = table.int(row, count)?.unwrap_or(0) as usize;
+    let values = table.data(row, list)?.unwrap_or(&[]);
+    if values.len() < n * 2 {
+        return Err(malformed(format!("{list} has fewer than {count} entries")));
+    }
+    Ok(values.as_chunks::<2>().0[..n]
+        .iter()
+        .map(|v| be16(v))
+        .collect())
 }
 
 impl Tables<'_> {
@@ -102,13 +123,35 @@ impl Tables<'_> {
         out: &mut Vec<usize>,
     ) -> Result<(), DecodeError> {
         let table = require(&self.sequence, "SequenceTable")?;
-        let count = table.int(index, "NumTracks")?.unwrap_or(0) as usize;
-        let tracks = table.data(index, "TrackIndex")?.unwrap_or(&[]);
-        if tracks.len() < count * 2 {
-            return Err(malformed("a sequence has fewer track indices than tracks"));
+        self.tracks(table, index, depth, out)
+    }
+
+    /// A block sequence plays its own tracks, then the tracks of each of its blocks.
+    fn block_sequence(
+        &self,
+        index: usize,
+        depth: usize,
+        out: &mut Vec<usize>,
+    ) -> Result<(), DecodeError> {
+        let table = require(&self.block_sequence, "BlockSequenceTable")?;
+        self.tracks(table, index, depth, out)?;
+        for block in indices(table, index, "NumBlocks", "BlockIndex")? {
+            let blocks = require(&self.block, "BlockTable")?;
+            self.tracks(blocks, block, depth + 1, out)?;
         }
-        for track in tracks.as_chunks::<2>().0.iter().take(count) {
-            self.track(be16(track), depth + 1, out)?;
+        Ok(())
+    }
+
+    /// The tracks listed by row `index` of `table` in `NumTracks` and `TrackIndex`.
+    fn tracks(
+        &self,
+        table: &Table<'_>,
+        index: usize,
+        depth: usize,
+        out: &mut Vec<usize>,
+    ) -> Result<(), DecodeError> {
+        for track in indices(table, index, "NumTracks", "TrackIndex")? {
+            self.track(track, depth + 1, out)?;
         }
         Ok(())
     }
@@ -152,12 +195,7 @@ impl Tables<'_> {
             1 => out.push(index),
             2 => self.synth(index, depth, out)?,
             3 => self.sequence(index, depth, out)?,
-            8 => {
-                return Err(DecodeError::Unsupported {
-                    what: "ACB reference type",
-                    value: kind.into(),
-                });
-            }
+            8 => self.block_sequence(index, depth, out)?,
             _ => {}
         }
         Ok(())
@@ -227,6 +265,8 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
     let tables = Tables {
         synth: header.table(0, "SynthTable")?,
         sequence: header.table(0, "SequenceTable")?,
+        block_sequence: header.table(0, "BlockSequenceTable")?,
+        block: header.table(0, "BlockTable")?,
         track: header.table(0, "TrackTable")?,
         event,
     };

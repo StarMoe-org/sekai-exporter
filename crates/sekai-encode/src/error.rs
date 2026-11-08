@@ -30,7 +30,7 @@ impl EncodeError {
         }
     }
 
-    #[cfg(any(feature = "webp", feature = "mp3", feature = "aac"))]
+    #[cfg(feature = "aac")]
     pub(crate) fn not_written(encoder: &'static str) -> Self {
         Self::Unavailable {
             encoder,

@@ -33,7 +33,7 @@
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
 | 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp) | 链接 | MIT OR Apache-2.0 |
-| 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
+| 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`webp`](https://crates.io/crates/webp) 与 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 
 ## 音频与视频
 
@@ -46,6 +46,7 @@
 | FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |
 | 测试中读取 FLAC | [`claxon`](https://crates.io/crates/claxon) | 仅在测试中链接：写出的 FLAC 解回后逐采样比对 | Apache-2.0 |
 | MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
+| 运行时加载 LAME | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
 | MP4 音轨的 AAC 写出 | [FFmpeg](https://ffmpeg.org/) libavcodec | 在原生构建中运行时加载，不随导出器分发 | 不含 GPL 组件构建时为 LGPL-2.1-or-later |
 | MP4 容器 | ISO/IEC 14496-12 与 14496-14；VP9 的 ISO-BMFF 封装规范 | 规范 | — |
 

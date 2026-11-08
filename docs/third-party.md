@@ -33,7 +33,7 @@ An entry is added in the same change that adds the component, and removed in the
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
 | Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp) | Linked | MIT OR Apache-2.0 |
-| Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
+| Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`webp`](https://crates.io/crates/webp) and [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
 
 ## Audio and video
 
@@ -46,6 +46,7 @@ An entry is added in the same change that adds the component, and removed in the
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
 | FLAC reading in tests | [`claxon`](https://crates.io/crates/claxon) | Linked in tests only: written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
+| Loading LAME at run time | [`libloading`](https://crates.io/crates/libloading) | Linked in native builds | ISC |
 | AAC writing for MP4 audio tracks | [FFmpeg](https://ffmpeg.org/) libavcodec | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later, when FFmpeg is built without GPL components |
 | MP4 container | ISO/IEC 14496-12 and 14496-14; VP9 codec binding for ISO-BMFF | Specification | — |
 

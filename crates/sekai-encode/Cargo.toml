@@ -13,10 +13,12 @@ flacenc = { version = "0.5.1", default-features = false }
 image-webp = "0.2.4"
 png = "0.18.1"
 sekai-codec.workspace = true
+libloading = { version = "0.9", optional = true }
+webp = { version = "0.3", optional = true, default-features = false }
 
 [features]
-webp = []
-mp3 = []
+webp = ["dep:webp"]
+mp3 = ["dep:libloading"]
 aac = []
 
 [lints]

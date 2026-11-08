@@ -1,0 +1,3 @@
+//! Types of the published documents: object documents, asset documents, index shards and listings.
+//!
+//! Consumers depend on this crate to read the published output.

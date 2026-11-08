@@ -1,0 +1,21 @@
+[package]
+name = "sekai-wasm"
+description = "The exporter core exposed to JavaScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sekai-unity.workspace = true
+sekai-format.workspace = true
+sekai-convert.workspace = true
+sekai-pipeline.workspace = true
+
+[lints]
+workspace = true

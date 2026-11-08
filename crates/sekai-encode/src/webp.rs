@@ -1,0 +1,1 @@
+//! Lossy WebP through libwebp.

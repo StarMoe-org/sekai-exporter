@@ -1,0 +1,23 @@
+[package]
+name = "sekai-moesekai"
+description = "Asset forms of this game for the Moesekai site, and the storage view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-convert.workspace = true
+sekai-game.workspace = true
+
+[features]
+scenario = []
+episode = ["scenario", "sekai-convert/audio", "sekai-convert/image", "sekai-convert/live2d"]
+virtual-live = ["scenario", "sekai-convert/timeline", "sekai-convert/audio"]
+costume = ["sekai-convert/model"]
+storage-view = ["sekai-convert/image", "sekai-convert/audio", "sekai-convert/video"]
+
+[lints]
+workspace = true

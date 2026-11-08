@@ -1,0 +1,18 @@
+[package]
+name = "sekai-catalog"
+description = "The content-addressed store and the catalog of inputs, derivations, bindings and publications"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-format.workspace = true
+
+[features]
+sqlite = []
+
+[lints]
+workspace = true

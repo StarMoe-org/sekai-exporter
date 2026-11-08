@@ -1,0 +1,29 @@
+[package]
+name = "sekai-convert"
+description = "The converter interface, writers and the general-purpose converters for Unity content"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-unity.workspace = true
+sekai-codec.workspace = true
+sekai-format.workspace = true
+
+[features]
+image = ["sekai-codec/texture"]
+audio = ["sekai-codec/cri"]
+video = ["audio"]
+model = ["image"]
+animation = []
+live2d = ["image", "animation"]
+ugui = ["image", "text"]
+text = []
+timeline = ["animation"]
+particles = []
+
+[lints]
+workspace = true

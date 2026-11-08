@@ -1,0 +1,15 @@
+[package]
+name = "sekai-layouts"
+description = "Field layout tables for objects stored without type trees"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-unity.workspace = true
+
+[lints]
+workspace = true

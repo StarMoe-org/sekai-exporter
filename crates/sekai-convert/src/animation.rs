@@ -1,0 +1,1 @@
+//! Curve documents from `AnimationClip`.

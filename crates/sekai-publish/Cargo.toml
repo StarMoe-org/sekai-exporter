@@ -1,0 +1,19 @@
+[package]
+name = "sekai-publish"
+description = "Layouts, stores and the publication protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-catalog.workspace = true
+sekai-format.workspace = true
+
+[features]
+s3 = []
+
+[lints]
+workspace = true

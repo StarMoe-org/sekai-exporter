@@ -1,0 +1,39 @@
+[workspace]
+members = ["crates/*"]
+resolver = "3"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+repository = "https://github.com/StarMoe-org/sekai-exporter"
+publish = false
+
+[workspace.dependencies]
+sekai-unity = { path = "crates/sekai-unity" }
+sekai-format = { path = "crates/sekai-format" }
+sekai-layouts = { path = "crates/sekai-layouts" }
+sekai-codec = { path = "crates/sekai-codec" }
+sekai-catalog = { path = "crates/sekai-catalog" }
+sekai-game = { path = "crates/sekai-game" }
+sekai-convert = { path = "crates/sekai-convert" }
+sekai-encode = { path = "crates/sekai-encode" }
+sekai-publish = { path = "crates/sekai-publish" }
+sekai-pipeline = { path = "crates/sekai-pipeline" }
+sekai-moesekai = { path = "crates/sekai-moesekai" }
+sekai-mysekai = { path = "crates/sekai-mysekai" }
+sekai-wasm = { path = "crates/sekai-wasm" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+debug = "line-tables-only"

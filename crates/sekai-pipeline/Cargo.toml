@@ -1,0 +1,23 @@
+[package]
+name = "sekai-pipeline"
+description = "The eager and lazy evaluators and the scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-unity.workspace = true
+sekai-convert.workspace = true
+sekai-encode.workspace = true
+sekai-catalog.workspace = true
+sekai-game.workspace = true
+sekai-layouts = { workspace = true, optional = true }
+
+[features]
+client = ["dep:sekai-layouts", "sekai-game/client"]
+
+[lints]
+workspace = true

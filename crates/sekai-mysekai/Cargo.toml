@@ -1,0 +1,16 @@
+[package]
+name = "sekai-mysekai"
+description = "MySekai assets in the full form a game-reproducing runtime needs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sekai-game.workspace = true
+sekai-convert = { workspace = true, features = ["model", "animation", "particles", "timeline", "ugui", "audio"] }
+
+[lints]
+workspace = true

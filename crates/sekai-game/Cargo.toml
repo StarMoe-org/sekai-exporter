@@ -1,0 +1,18 @@
+[package]
+name = "sekai-game"
+description = "Game-specific inputs: deobfuscation, manifests, downloads, game data tables and the region table"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[features]
+cdn = []
+client = []
+
+[lints]
+workspace = true

@@ -1,0 +1,59 @@
+[package]
+name = "sekai-exporter"
+description = "Command-line program of the exporter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sekai-exporter"
+path = "src/main.rs"
+
+[dependencies]
+sekai-unity.workspace = true
+sekai-format.workspace = true
+sekai-codec.workspace = true
+sekai-catalog.workspace = true
+sekai-game.workspace = true
+sekai-convert.workspace = true
+sekai-encode.workspace = true
+sekai-publish.workspace = true
+sekai-pipeline.workspace = true
+sekai-moesekai.workspace = true
+sekai-mysekai = { workspace = true, optional = true }
+
+[features]
+image = ["sekai-convert/image"]
+audio = ["sekai-convert/audio"]
+video = ["sekai-convert/video"]
+model = ["sekai-convert/model"]
+animation = ["sekai-convert/animation"]
+live2d = ["sekai-convert/live2d"]
+ugui = ["sekai-convert/ugui"]
+text = ["sekai-convert/text"]
+timeline = ["sekai-convert/timeline"]
+particles = ["sekai-convert/particles"]
+scenario = ["sekai-moesekai/scenario"]
+episode = ["sekai-moesekai/episode"]
+virtual-live = ["sekai-moesekai/virtual-live"]
+costume = ["sekai-moesekai/costume"]
+storage-view = ["sekai-moesekai/storage-view"]
+webp = ["sekai-encode/webp"]
+mp3 = ["sekai-encode/mp3"]
+aac = ["sekai-encode/aac"]
+cdn = ["sekai-game/cdn"]
+client = ["sekai-pipeline/client"]
+s3 = ["sekai-publish/s3"]
+sqlite = ["sekai-catalog/sqlite"]
+mysekai = ["dep:sekai-mysekai"]
+serve = []
+default = ["cdn", "sqlite", "image", "audio", "video", "model", "animation", "live2d", "ugui", "text", "timeline", "particles", "scenario", "episode", "virtual-live", "costume", "storage-view", "webp", "mp3", "aac"]
+preset-mysekai = ["default", "mysekai"]
+preset-client = ["default", "client"]
+full = ["default", "mysekai", "client", "s3", "serve"]
+
+[lints]
+workspace = true

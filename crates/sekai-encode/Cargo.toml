@@ -19,7 +19,7 @@ webp = { version = "0.3", optional = true, default-features = false }
 [features]
 webp = ["dep:webp"]
 mp3 = ["dep:libloading"]
-aac = []
+aac = ["dep:libloading"]
 
 [lints]
 workspace = true

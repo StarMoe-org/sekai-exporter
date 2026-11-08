@@ -29,14 +29,6 @@ impl EncodeError {
             Self::Failed { .. } => "encode_failed",
         }
     }
-
-    #[cfg(feature = "aac")]
-    pub(crate) fn not_written(encoder: &'static str) -> Self {
-        Self::Unavailable {
-            encoder,
-            message: "the encoder is not written yet".to_owned(),
-        }
-    }
 }
 
 impl fmt::Display for EncodeError {

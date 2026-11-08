@@ -45,8 +45,9 @@
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
 | FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |
 | 测试中读取 FLAC | [`claxon`](https://crates.io/crates/claxon) | 仅在测试中链接：写出的 FLAC 解回后逐采样比对 | Apache-2.0 |
+| AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |
 | MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
-| 运行时加载 LAME | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
+| 运行时加载 LAME 与 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
 | MP4 音轨的 AAC 写出 | [FFmpeg](https://ffmpeg.org/) libavcodec | 在原生构建中运行时加载，不随导出器分发 | 不含 GPL 组件构建时为 LGPL-2.1-or-later |
 | MP4 容器 | ISO/IEC 14496-12 与 14496-14；VP9 的 ISO-BMFF 封装规范 | 规范 | — |
 

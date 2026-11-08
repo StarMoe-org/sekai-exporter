@@ -1,0 +1,8 @@
+/Library/
+/Logs/
+/Temp/
+/UserSettings/
+/Assets/Generated/
+/Assets/Generated.meta
+*.csproj
+*.sln

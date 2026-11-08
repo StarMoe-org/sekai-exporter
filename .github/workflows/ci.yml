@@ -23,6 +23,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: python3 tools/check-layers.py
 
   test:
     strategy:
@@ -55,3 +56,20 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sekai-wasm --target wasm32-unknown-unknown
+
+  unitypy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install UnityPy==1.25.4
+      - run: cargo build -p sekai-exporter
+      - run: |
+          for variant in uncompressed lz4 lzma; do
+            target/debug/sekai-exporter objects crates/sekai-unity/tests/fixtures/$variant out/$variant
+            python tools/compare-unitypy/compare.py crates/sekai-unity/tests/fixtures/$variant out/$variant
+          done

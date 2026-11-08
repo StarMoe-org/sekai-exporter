@@ -1,0 +1,67 @@
+# Texture
+
+The `texture` form is the image a texture object stores, as a plain picture. Converter: `texture` in `sekai-convert` (feature `image`). Form version: 1.
+
+## 1. Runtime
+
+Any program that shows or processes the picture a texture holds: image viewers, web pages that display card and story art, and tools that crop sprites from a texture themselves. The form keeps the stored colour values as they are; it does not apply the texture's sampling settings, colour space conversion or the shading of any material that uses it.
+
+## 2. Contents
+
+One member:
+
+| Role | Content |
+|---|---|
+| `image` | The image: 8-bit RGBA with straight (not premultiplied) alpha, rows from top to bottom |
+
+The image is mip level 0 of the first slice. For a `Cubemap` this is the first face (+X). The width and height are `m_Width` and `m_Height`.
+
+Each texel format expands to RGBA as follows:
+
+| Format (`m_TextureFormat`) | Expansion |
+|---|---|
+| 1 Alpha8 | `(0, 0, 0, a)` |
+| 3 RGB24 | `(r, g, b, 255)` |
+| 4 RGBA32 | `(r, g, b, a)` |
+| 7 RGB565 | Each channel widened by repeating its high bits: `r << 3 \| r >> 2`, `g << 2 \| g >> 4`, `b << 3 \| b >> 2`; alpha 255 |
+| 34 ETC_RGB4 | ETC1, alpha 255 |
+| 47 ETC2_RGBA8 | ETC2 colour with EAC alpha |
+| 48–53 ASTC 4×4 to 12×12 | ASTC LDR decoded to 8 bits per channel, as ARM's reference decoder does in its LDR profile |
+
+## 3. Sources
+
+**Root objects:** every `Texture2D` (class 28) and every `Cubemap` (class 89). The form does not read game data tables.
+
+**Fields read:** `m_Width`, `m_Height`, `m_TextureFormat`, `image data` and `m_StreamData` (`offset`, `size`, `path`).
+
+**Image data.** When `m_StreamData.path` is not empty, the image data is `size` bytes at `offset` in the resource file the path names; the file is an entry of the texture's own bundle, and the path's last component is the entry name. Otherwise the image data is the `image data` field. The data starts with mip level 0 of the first slice; the bytes after that image are not used.
+
+**Outcomes other than an image:**
+
+| Case | Result |
+|---|---|
+| Width or height is 0, and there is no image data and no stream path | No asset. This is the texture of a dynamic font, which the engine fills at run time |
+| Width or height is 0, but image data is present | Error `malformed` |
+| The format is not in the table in section 2 | Error `unsupported` |
+| The image data is shorter than mip level 0 | Error `truncated` |
+| An ASTC block is illegal | Error `malformed` |
+| An ASTC block uses HDR endpoints | Error `unsupported` |
+| The stream path names no entry of the bundle | Error `missing_resource` |
+
+Crunch-compressed formats and HDR formats are reported as `unsupported`.
+
+## 4. Container
+
+The member is decoded content, which the evaluator encodes. The canonical file is lossless WebP, written by the `webp-lossless` encoder (version 1) with the fixed parameters of that encoder. Views that need another container, such as PNG, produce it from the same decoded image with their own encoder.
+
+## 5. Correctness
+
+Unity stores texture rows from bottom to top; the form turns them to top to bottom, the order of PNG and WebP. The stored colour values are kept unchanged, so the result is the same picture Unity uploads to the GPU, before any sampling or colour space conversion.
+
+The decoders are checked byte for byte against independent reference decoders: ASTC against ARM's `astcenc` in its 8-bit LDR mode, ETC1 and ETC2 against a reference ETC decoder, and the uncompressed formats against a direct expansion of the bytes. The checks run on synthetic textures built with the Unity editor (`crates/sekai-codec/tests`) and, by anyone who has the game data, on real bundles with the scripts in `tools/compare-texture`. `compare_converter.py` checks the whole converter, including the fields and the resource files, texture by texture.
+
+## 6. Version
+
+| Version | Change |
+|---|---|
+| 1 | First version |

@@ -4,3 +4,6 @@
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod version;
+
+pub use version::{BundleError, BundleInput, Version};

@@ -48,7 +48,11 @@ pub trait Converter: Send + Sync {
     fn is_root(&self, object: &ObjectIndex, container_paths: &[String]) -> bool;
 
     /// Produces the asset whose root is `root`.
-    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Asset, ConvertError>;
+    ///
+    /// [`Converter::is_root`] sees only the index of an object. `Ok(None)` means that the
+    /// object's fields show it holds no asset of this form, such as a font texture that the
+    /// engine fills at run time; this is not an error.
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError>;
 }
 
 /// What a converter reads through.

@@ -6,7 +6,7 @@ An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the g
 
 ## Status
 
-In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8 and ASTC LDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust; crunched and ASTC HDR textures are reported as unsupported. `sekai-encode` writes PNG, lossless and lossy WebP, FLAC, MP3 and AAC. Converters and the evaluator are being written against the interfaces in `sekai-codec`, `sekai-encode` and `sekai-convert`. The documents in [`docs/`](docs/) describe the design that the code implements.
+In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8 and ASTC LDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust; crunched and ASTC HDR textures are reported as unsupported. `sekai-encode` writes PNG, lossless and lossy WebP, FLAC, MP3 and AAC. The first converter, [`texture`](docs/spec/texture.md), turns `Texture2D` and `Cubemap` objects into images, reading them through a version of opened bundles in `sekai-pipeline`; `sekai-catalog` has a local content-addressed store. The evaluator that runs converters and publishes their output is being written. The documents in [`docs/`](docs/) describe the design that the code implements.
 
 ## What it does
 
@@ -29,6 +29,7 @@ Why the project is built around converting rather than unpacking is explained in
 | [Publishing](docs/publishing.md) | Stores, layouts, asset documents and the publication protocol |
 | [Features](docs/features.md) | Crates, Cargo features and presets |
 | [Object documents](docs/spec/object-documents.md) | The specification of object documents |
+| [Texture](docs/spec/texture.md) | The specification of the texture form |
 | [Glossary](docs/glossary.md) | Terms used throughout the documents and the code |
 | [Third-party sources](docs/third-party.md) | The upstream specification, library or reference behind each component |
 | [Contributing](CONTRIBUTING.md) | Where changes go, rules and checks |

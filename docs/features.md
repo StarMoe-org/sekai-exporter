@@ -1,0 +1,75 @@
+# Features
+
+[中文](features.zh-CN.md)
+
+The exporter is assembled from Cargo features. Each converter family, view, encoding backend and input source is a feature, so a build contains exactly the parts it needs. The crates are described in [Architecture](architecture.md#crates).
+
+## Rules
+
+1. **One feature is one converter family, one view, one backend or one source.** A feature enables a whole module (`#[cfg(feature = "x")] mod x;`) or an optional dependency. Function bodies contain no `#[cfg]`.
+2. **Features are additive.** No two features exclude each other. When several backends for the same format are compiled in, the configuration selects one, and the selected backend is part of every fingerprint it affects.
+3. **Dependencies between features are declared in `Cargo.toml`.** Enabling a feature enables the features it needs.
+4. **A converter that is not compiled in is reported, not skipped.** Each asset it would have produced is recorded with the status `not_compiled` and the converter's name. Turning a feature off never removes output silently.
+5. **There is no runtime plug-in interface.** Extending the exporter means adding a module and a feature.
+6. **Continuous integration builds every feature on its own** (`cargo hack check --each-feature`), as well as the presets with no default features, with default features and with all features. A feature that depends on another without declaring it fails this check.
+
+## Converter families
+
+In `sekai-convert`, general to Unity content:
+
+| Feature | Converts |
+|---|---|
+| `image` | `Texture2D`, `Sprite` and sprite atlases into images |
+| `audio` | `AudioClip` and CRI ACB/AWB cues into audio files and cue tables |
+| `video` | CRI USM and MPEG streams into video files |
+| `model` | Prefab hierarchies, meshes, skins and materials into glTF |
+| `animation` | `AnimationClip` into curve documents, and into glTF animation where the bindings allow it |
+| `live2d` | Live2D Cubism models and their motions |
+| `ugui` | UI prefabs into layout documents |
+| `text` | `TextAsset` and fonts |
+| `timeline` | Timeline assets into timeline documents |
+| `particles` | Particle systems into particle documents |
+
+In `sekai-moesekai`, specific to this game, for the default consumer:
+
+| Feature | Converts or produces |
+|---|---|
+| `scenario` | Scenario objects into scenario documents |
+| `episode` | Story episodes: one table row with every asset it refers to resolved |
+| `virtual-live` | Virtual lives: timeline, scenario and voice |
+| `costume` | Costume combinations for 3D viewing |
+| `storage-view` | The [storage view](publishing.md#the-storage-view) |
+
+In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs.
+
+## Backends
+
+In `sekai-encode`:
+
+| Feature | Format | Library |
+|---|---|---|
+| (always) | PNG | `png` |
+| `flac` | FLAC | `flacenc` |
+| `webp` | WebP | libwebp, statically linked |
+| `mp3` | MP3 | LAME, loaded at run time |
+| `aac` | AAC audio tracks in MP4 | libavcodec, loaded at run time |
+
+Backends that need a C library are available only in native builds. The licences of these libraries are listed in [Third-party sources](third-party.md).
+
+## Sources and publishing
+
+| Feature | Crate | Enables |
+|---|---|---|
+| `cdn` | `sekai-game` | The `cp` and `nuverse` sources, with HTTP and TLS |
+| `client` | `sekai-game`, `sekai-layouts` | The `apk` source and the field layout tables |
+| `s3` | `sekai-publish` | S3-compatible stores |
+| `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server |
+
+## Presets
+
+| Preset | Contents |
+|---|---|
+| `default` | Everything the default consumer needs: `cdn`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `flac`, `webp`, `mp3`, `aac` |
+| `mysekai` | `default` and `mysekai` |
+| `client` | `default` and `client` |
+| `full` | Every feature |

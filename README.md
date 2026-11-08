@@ -1,26 +1,40 @@
-# moesekai-exporter
+# sekai-exporter
 
-Working name; the final name is not settled yet.
+[中文](README.zh-CN.md)
 
-An exporter that turns Project SEKAI asset bundles into open formats
-(PNG/WebP, WAV/OGG/MP3, MP4, glTF, JSON) in one pipeline, with one
-incremental ledger shared by every output family.
+An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the game's Unity asset bundles and client package and turns their contents into assets in open formats: images, audio, video, models, scenarios, curves and documents. Every output is recorded with the objects it came from, so a consumer can find out what any file is.
 
-## Layout
+## Status
 
-| Layer | Role |
+Design phase. The documents in [`docs/`](docs/) describe the design that the code implements; code follows them module by module.
+
+## What it does
+
+- **Unpacks** asset bundles and the client's player data into an exact object graph, with every cross-file reference resolved.
+- **Converts** object closures into assets with one converter per asset form. The default forms are the ones the [Moesekai](https://github.com/StarMoe-org/Moesekai) site and its viewers consume. Further forms are optional features.
+- **Publishes** the results as a content-addressed store with self-describing indexes, or as a plain path tree, locally or to S3-compatible storage.
+- **Rebuilds only what changed.** Every output is the result of a pure function of content-addressed inputs, so unchanged work is skipped, and identical content is shared across regions.
+
+Why the project is built around converting rather than unpacking is explained in [Objects and assets](docs/objects-and-assets.md).
+
+## Documents
+
+| Document | Contents |
 |---|---|
-| core | bytes to value trees: UnityFS, SerializedFile, TypeTree, PPtr, resS; type layouts are injected, never bundled |
-| remap | objects to files, placed by container path |
-| codecs | Unity payloads to neutral forms: textures, audio, video, curves, meshes |
-| writers | target formats, including the Unity to glTF coordinate conversion |
-| capabilities | per-family rules: which object, which fields, where the output goes |
-| ledger | bundle CRC, output hash and tool version; drives skipping and deduplication |
+| [Objects and assets](docs/objects-and-assets.md) | What exporting Unity content means and why this project is an exporter |
+| [Architecture](docs/architecture.md) | The derivation model, evaluation strategies and the crate structure |
+| [Pipeline](docs/pipeline.md) | The stages of a run and the invariant each stage keeps |
+| [Performance](docs/performance.md) | How the design avoids work, and where the remaining work runs |
+| [Sources](docs/sources.md) | Inputs, regions, version discovery and credentials |
+| [Publishing](docs/publishing.md) | Stores, layouts, asset documents and the publication protocol |
+| [Features](docs/features.md) | Crates, Cargo features and presets |
+| [Glossary](docs/glossary.md) | Terms used throughout the documents and the code |
+| [Third-party sources](docs/third-party.md) | The upstream specification, library or reference behind each component |
+| [Contributing](CONTRIBUTING.md) | Where changes go, rules and checks |
 
 ## Game data
 
-This repository contains no game data. Inputs are read from the user's own
-download or client install; outputs stay outside the repository.
+This repository contains no game data. Inputs are read from the user's own download or client install, and outputs are written outside the repository. Tests use synthetic inputs.
 
 ## License
 

@@ -1,0 +1,34 @@
+# Audio comparison
+
+[中文](README.zh-CN.md)
+
+These scripts compare the CRI readers and the HCA decoder of `sekai-codec` with
+[vgmstream](https://github.com/vgmstream/vgmstream) on a user's own files. They run the example
+programs of the crate:
+
+```bash
+cargo build -p sekai-codec --all-features --release --example decode_hca_stream --example acb_streams
+```
+
+`compare.py` finds the HCA streams inside the files of a directory and compares each with
+`vgmstream-cli`, sample by sample:
+
+```bash
+python compare.py <decode_hca_stream> <vgmstream-cli> <directory>...
+```
+
+`compare_acb.py` reads ACB files and compares, for every stream of the memory bank, the samples and
+the names of the cues that play it:
+
+```bash
+python compare_acb.py <acb_streams> <decode_hca_stream> <vgmstream-cli> <directory>...
+```
+
+Both exit with status 1 if anything differs. The results were checked against vgmstream r2168.
+
+`make_fixtures.py` builds `crates/sekai-codec/tests/fixtures/hca` from generated audio. It needs
+[VGAudio](https://github.com/Thealexbarney/VGAudio) to encode:
+
+```bash
+python make_fixtures.py <VGAudioCli> <vgmstream-cli> ../../crates/sekai-codec/tests/fixtures/hca
+```

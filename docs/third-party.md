@@ -39,7 +39,9 @@ An entry is added in the same change that adds the component, and removed in the
 
 | Component | Source | Use | Licence |
 |---|---|---|---|
-| CRI ACB tables, AWB archives, HCA decoding, USM demultiplexing, ADX decoding | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: decoded samples are compared sample by sample | ISC |
+| HCA decoding | [vgmstream](https://github.com/vgmstream/vgmstream) clHCA | Ported: the decoder follows its structure and the constants are generated from it, with the notice kept in the generated file; decoded samples are compared sample by sample | ISC |
+| CRI ACB tables, AWB archives, USM demultiplexing, ADX decoding | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: results are compared with what it reads and decodes | ISC |
+| HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
 | FLAC reading in tests | [`claxon`](https://crates.io/crates/claxon) | Linked in tests only: written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |

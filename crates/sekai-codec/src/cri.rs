@@ -4,6 +4,15 @@
 //! streams they play, taken from the ACB itself or from its AWB; reading a USM yields its video
 //! and audio streams as stored. Those readers are submodules of this one.
 
+mod acb;
+mod awb;
+mod hca;
+mod hca_tables;
+mod utf;
+
+pub use acb::{Acb, Cue, Waveform, read_acb};
+pub use awb::{Awb, AwbStream, read_awb};
+
 use crate::{DecodeError, Pcm};
 
 /// The key of an encrypted HCA stream.
@@ -15,13 +24,11 @@ pub struct HcaKey {
     pub subkey: u16,
 }
 
-/// Decodes one HCA stream to PCM. `key` is needed when the stream is encrypted.
+/// Decodes one HCA stream to PCM, without its encoder delay and padding.
+///
+/// A stream of cipher type 56 needs `key`; decoding one without it fails with
+/// [`DecodeError::Unsupported`]. The checksum of a frame covers its stored bytes, so a wrong key
+/// is not detected.
 pub fn decode_hca(data: &[u8], key: Option<HcaKey>) -> Result<Pcm, DecodeError> {
-    let _ = key;
-    Err(DecodeError::Unsupported {
-        what: "HCA version",
-        value: data
-            .get(4..6)
-            .map_or(0, |v| i64::from(u16::from_be_bytes([v[0], v[1]]))),
-    })
+    hca::decode(data, key)
 }

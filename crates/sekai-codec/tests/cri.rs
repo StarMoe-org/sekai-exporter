@@ -1,0 +1,321 @@
+//! HCA decoding against samples from vgmstream, and ACB and AWB reading of files built here.
+
+#![cfg(feature = "cri")]
+
+use std::fs;
+use std::path::PathBuf;
+
+use sekai_codec::DecodeError;
+use sekai_codec::cri::{HcaKey, decode_hca, read_acb, read_awb};
+use sha2::{Digest, Sha256};
+
+fn fixture(name: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/hca");
+    fs::read(path.join(name)).expect("the fixture exists")
+}
+
+#[test]
+fn decoded_samples_match_the_reference() {
+    let listing = String::from_utf8(fixture("expected.txt")).expect("text");
+    let mut count = 0;
+    for line in listing.lines() {
+        let fields: Vec<&str> = line.split(' ').collect();
+        let [name, rate, channels, bytes, digest, key, subkey] = fields[..] else {
+            panic!("bad line {line}");
+        };
+        let key = u64::from_str_radix(key, 16).expect("hex");
+        let subkey = u16::from_str_radix(subkey, 16).expect("hex");
+        let key = (key != 0).then_some(HcaKey { key, subkey });
+        let pcm = decode_hca(&fixture(name), key).expect(name);
+        assert_eq!(pcm.sample_rate().to_string(), rate, "{name}");
+        assert_eq!(pcm.channels().to_string(), channels, "{name}");
+        let samples: Vec<u8> = pcm.samples().iter().flat_map(|s| s.to_le_bytes()).collect();
+        assert_eq!(samples.len().to_string(), bytes, "{name}");
+        let actual: String = Sha256::digest(&samples)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(actual, digest, "{name}");
+        count += 1;
+    }
+    assert_eq!(count, 6);
+}
+
+#[test]
+fn encrypted_stream_needs_a_key() {
+    let result = decode_hca(&fixture("sine_stereo_key.hca"), None);
+    assert!(matches!(result, Err(DecodeError::Unsupported { .. })));
+}
+
+#[test]
+fn frame_with_a_wrong_checksum_is_malformed() {
+    let mut data = fixture("sine_mono.hca");
+    let last = data.len() - 1;
+    data[last] ^= 1;
+    let result = decode_hca(&data, None);
+    assert!(matches!(result, Err(DecodeError::Malformed { .. })));
+}
+
+#[test]
+fn cut_stream_is_truncated() {
+    let data = fixture("sine_mono.hca");
+    let result = decode_hca(&data[..data.len() - 1], None);
+    assert!(matches!(result, Err(DecodeError::Truncated { .. })));
+}
+
+fn afs2(subkey: u16, streams: &[(u16, &[u8])]) -> Vec<u8> {
+    const ALIGNMENT: usize = 0x20;
+    let mut out = b"AFS2\x01\x04\x02\x00".to_vec();
+    out.extend((streams.len() as u32).to_le_bytes());
+    out.extend((ALIGNMENT as u16).to_le_bytes());
+    out.extend(subkey.to_le_bytes());
+    for (id, _) in streams {
+        out.extend(id.to_le_bytes());
+    }
+    let mut body = Vec::new();
+    let first = out.len() + (streams.len() + 1) * 4;
+    let mut offset = first;
+    for (_, data) in streams {
+        out.extend((offset as u32).to_le_bytes());
+        let start = offset.next_multiple_of(ALIGNMENT);
+        body.resize(start - first, 0);
+        body.extend(*data);
+        offset = first + body.len();
+    }
+    out.extend((offset as u32).to_le_bytes());
+    out.extend(body);
+    out
+}
+
+#[test]
+fn bank_gives_each_stream_and_the_subkey() {
+    let plain = decode_hca(&fixture("sine_stereo.hca"), None).expect("plain");
+    let stream = fixture("sine_stereo_subkey.hca");
+    let bank = afs2(0x4A1C, &[(7, b"not read"), (9, &stream)]);
+    let awb = read_awb(&bank).expect("bank");
+    assert_eq!(awb.subkey, 0x4A1C);
+    assert_eq!(awb.streams.len(), 2);
+    assert_eq!(awb.streams[0].wave_id, 7);
+    let found = awb.stream(9).expect("stream 9");
+    assert_eq!(found.data, &stream[..]);
+    let key = HcaKey {
+        key: 0x0123456789ABCDE,
+        subkey: awb.subkey,
+    };
+    let decoded = decode_hca(found.data, Some(key)).expect("decoded");
+    assert_eq!(decoded.samples(), plain.samples());
+}
+
+#[test]
+fn bank_with_a_stream_outside_the_file_is_malformed() {
+    let mut bank = afs2(0, &[(0, b"stream")]);
+    bank.truncate(bank.len() - 1);
+    let last_offset = bank.len() + 1;
+    let position = 0x10 + 2 + 4;
+    bank[position..position + 4].copy_from_slice(&(last_offset as u32 + 64).to_le_bytes());
+    assert!(matches!(
+        read_awb(&bank),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+enum Cell {
+    U8(u8),
+    U16(u16),
+    U32(u32),
+    Text(&'static str),
+    Data(Vec<u8>),
+}
+
+/// Builds an `@UTF` table whose columns all live in the rows.
+fn utf(name: &str, columns: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
+    let mut strings = b"<NULL>\0".to_vec();
+    let text = |value: &str, strings: &mut Vec<u8>| {
+        let offset = strings.len() as u32;
+        strings.extend(value.as_bytes());
+        strings.push(0);
+        offset
+    };
+    let name_offset = text(name, &mut strings);
+    let mut schema = Vec::new();
+    for (index, column) in columns.iter().enumerate() {
+        let kind = match &rows[0][index] {
+            Cell::U8(_) => 0u8,
+            Cell::U16(_) => 2,
+            Cell::U32(_) => 4,
+            Cell::Text(_) => 10,
+            Cell::Data(_) => 11,
+        };
+        schema.push(0x50 | kind);
+        let offset = text(column, &mut strings);
+        schema.extend(offset.to_be_bytes());
+    }
+    let mut body = Vec::new();
+    let mut blobs: Vec<u8> = Vec::new();
+    for row in rows {
+        for cell in row {
+            match cell {
+                Cell::U8(value) => body.push(*value),
+                Cell::U16(value) => body.extend(value.to_be_bytes()),
+                Cell::U32(value) => body.extend(value.to_be_bytes()),
+                Cell::Text(value) => {
+                    let offset = text(value, &mut strings);
+                    body.extend(offset.to_be_bytes());
+                }
+                Cell::Data(value) => {
+                    body.extend((blobs.len() as u32).to_be_bytes());
+                    body.extend((value.len() as u32).to_be_bytes());
+                    blobs.extend(value);
+                }
+            }
+        }
+    }
+    let rows_offset = 0x18 + schema.len();
+    let strings_offset = rows_offset + body.len();
+    let data_offset = strings_offset + strings.len();
+    let size = data_offset + blobs.len();
+
+    let mut out = b"@UTF".to_vec();
+    out.extend((size as u32).to_be_bytes());
+    out.extend(1u16.to_be_bytes());
+    out.extend((rows_offset as u16).to_be_bytes());
+    out.extend((strings_offset as u32).to_be_bytes());
+    out.extend((data_offset as u32).to_be_bytes());
+    out.extend(name_offset.to_be_bytes());
+    out.extend((columns.len() as u16).to_be_bytes());
+    out.extend(((body.len() / rows.len()) as u16).to_be_bytes());
+    out.extend((rows.len() as u32).to_be_bytes());
+    out.extend(schema);
+    out.extend(body);
+    out.extend(strings);
+    out.extend(blobs);
+    out
+}
+
+fn sheet() -> Vec<u8> {
+    use Cell::{Data, Text, U8, U16, U32};
+    let cue = |kind, index, id| vec![U8(kind), U16(index), U32(id), U32(1500)];
+    let cues = utf(
+        "Cue",
+        &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
+        &[cue(1, 1, 10), cue(2, 0, 20), cue(3, 0, 30)],
+    );
+    let name = |text, index| vec![Text(text), U16(index)];
+    let names = utf(
+        "CueName",
+        &["CueName", "CueIndex"],
+        &[name("direct", 0), name("synth", 1), name("sequence", 2)],
+    );
+    let wave = |id, flag, samples| {
+        vec![
+            U8(0),
+            U16(id),
+            U16(0xFFFF),
+            U8(2),
+            U8(flag),
+            U8(2),
+            U16(44100),
+            U32(samples),
+            U16(if flag == 0 { 0xFFFF } else { 0 }),
+        ]
+    };
+    let waves = utf(
+        "Waveform",
+        &[
+            "Streaming",
+            "MemoryAwbId",
+            "StreamAwbId",
+            "EncodeType",
+            "LoopFlag",
+            "NumChannels",
+            "SamplingRate",
+            "NumSamples",
+            "ExtensionData",
+        ],
+        &[wave(3, 0, 100), wave(4, 1, 200), wave(5, 0, 300)],
+    );
+    let extension = utf(
+        "WaveformExtensionData",
+        &["LoopStart", "LoopEnd"],
+        &[vec![U32(16), U32(180)]],
+    );
+    let synth = utf(
+        "Synth",
+        &["ReferenceItems"],
+        &[vec![Data(vec![0, 1, 0, 2, 0, 1, 0, 0])]],
+    );
+    let sequence = utf(
+        "Sequence",
+        &["NumTracks", "TrackIndex"],
+        &[vec![U16(2), Data(vec![0, 1, 0, 0])]],
+    );
+    let tracks = utf("Track", &["EventIndex"], &[vec![U16(0)], vec![U16(0xFFFF)]]);
+    // A command that names nothing, then a note on of synth 0.
+    let event = vec![0x03, 0xE8, 1, 0, 0x07, 0xD0, 4, 0, 2, 0, 0];
+    let events = utf("TrackEvent", &["Command"], &[vec![Data(event)]]);
+    utf(
+        "Header",
+        &[
+            "CueTable",
+            "CueNameTable",
+            "WaveformTable",
+            "WaveformExtensionDataTable",
+            "SynthTable",
+            "SequenceTable",
+            "TrackTable",
+            "TrackEventTable",
+            "AwbFile",
+        ],
+        &[vec![
+            Data(cues),
+            Data(names),
+            Data(waves),
+            Data(extension),
+            Data(synth),
+            Data(sequence),
+            Data(tracks),
+            Data(events),
+            Data(afs2(0, &[(3, b"three"), (4, b"four")])),
+        ]],
+    )
+}
+
+#[test]
+fn cue_sheet_gives_cues_waveforms_and_its_bank() {
+    let data = sheet();
+    let acb = read_acb(&data).expect("sheet");
+    assert_eq!(acb.cues.len(), 3);
+    assert_eq!(acb.cues[0].cue_names, ["direct"]);
+    assert_eq!(acb.cues[0].cue_id, 10);
+    assert_eq!(acb.cues[0].length, 1500);
+    assert_eq!(acb.cues[0].waveforms, [1]);
+    assert_eq!(acb.cues[1].waveforms, [2, 0]);
+    assert_eq!(acb.cues[2].cue_names, ["sequence"]);
+    assert_eq!(acb.cues[2].waveforms, [2, 0]);
+
+    let wave = &acb.waveforms[1];
+    assert_eq!(wave.memory_awb_id, Some(4));
+    assert_eq!(wave.stream_awb_id, None);
+    assert_eq!(wave.loop_flag, 1);
+    assert_eq!(wave.num_channels, 2);
+    assert_eq!(wave.sampling_rate, 44100);
+    assert_eq!(wave.num_samples, 200);
+    assert_eq!((wave.loop_start, wave.loop_end), (Some(16), Some(180)));
+    assert_eq!(acb.waveforms[0].loop_start, None);
+
+    let bank = acb.memory_awb.expect("bank");
+    assert_eq!(bank.stream(4).expect("stream 4").data, b"four");
+}
+
+#[test]
+fn cut_table_is_reported() {
+    let data = sheet();
+    assert!(matches!(
+        read_acb(&data[..data.len() - 1]),
+        Err(DecodeError::Truncated { .. })
+    ));
+    assert!(matches!(
+        read_acb(b"@UTX0000000000000000000000000000"),
+        Err(DecodeError::Malformed { .. })
+    ));
+}

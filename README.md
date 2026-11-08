@@ -6,7 +6,7 @@ An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the g
 
 ## Status
 
-In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. Decoders, encoders, converters and the evaluator are being written against the interfaces in `sekai-codec`, `sekai-encode` and `sekai-convert`. The documents in [`docs/`](docs/) describe the design that the code implements.
+In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8 and ASTC LDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust; crunched and ASTC HDR textures are reported as unsupported. `sekai-encode` writes PNG, lossless and lossy WebP, FLAC, MP3 and AAC. Converters and the evaluator are being written against the interfaces in `sekai-codec`, `sekai-encode` and `sekai-convert`. The documents in [`docs/`](docs/) describe the design that the code implements.
 
 ## What it does
 

@@ -6,7 +6,7 @@
 
 ## 状态
 
-开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。解码器、编码器、转换器与求值器正依照 `sekai-codec`、`sekai-encode`、`sekai-convert` 中的接口编写。[`docs/`](docs/) 中的文档描述了代码所实现的设计。
+开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。`sekai-codec` 以纯 Rust 解码 Alpha8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGBA8 与 ASTC LDR 贴图，HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器；crunch 与 ASTC HDR 贴图报告为不支持。`sekai-encode` 写出 PNG、无损与有损 WebP、FLAC、MP3 和 AAC。转换器与求值器正依照 `sekai-codec`、`sekai-encode`、`sekai-convert` 中的接口编写。[`docs/`](docs/) 中的文档描述了代码所实现的设计。
 
 ## 功能
 

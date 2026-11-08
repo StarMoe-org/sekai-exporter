@@ -6,7 +6,7 @@
 
 ## 状态
 
-设计阶段。[`docs/`](docs/) 中的文档描述了代码所实现的设计，代码按模块依次跟进。
+开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。解码器、编码器、转换器与求值器正依照 `sekai-codec`、`sekai-encode`、`sekai-convert` 中的接口编写。[`docs/`](docs/) 中的文档描述了代码所实现的设计。
 
 ## 功能
 
@@ -28,6 +28,7 @@
 | [来源](docs/sources.zh-CN.md) | 输入、区服、版本发现与凭据 |
 | [发布](docs/publishing.zh-CN.md) | store、布局、资产文档与发布协议 |
 | [Feature](docs/features.zh-CN.md) | crate、Cargo feature 与预设 |
+| [对象文档](docs/spec/object-documents.zh-CN.md) | 对象文档的规范 |
 | [术语表](docs/glossary.md) | 文档与代码中统一使用的术语 |
 | [第三方来源](docs/third-party.zh-CN.md) | 每个组件所依据的上游规范、库或参考实现 |
 | [贡献指南](CONTRIBUTING.zh-CN.md) | 改动的位置、规则与检查 |

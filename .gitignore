@@ -8,3 +8,4 @@
 /out/
 /local/
 .env
+__pycache__/

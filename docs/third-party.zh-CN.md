@@ -29,7 +29,7 @@
 | 组件 | 来源 | 使用方式 | 许可证 |
 |---|---|---|---|
 | ASTC 解码 | Khronos ASTC 规范；[astc-encoder](https://github.com/ARM-software/astc-encoder) | 规范；参考：解码像素逐字节比对 | Apache-2.0（astc-encoder） |
-| ETC2 与 EAC 解码 | Khronos Data Format Specification | 规范 | — |
+| ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
 | 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp) | 链接 | MIT OR Apache-2.0 |

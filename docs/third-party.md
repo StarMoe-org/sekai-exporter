@@ -29,7 +29,7 @@ An entry is added in the same change that adds the component, and removed in the
 | Component | Source | Use | Licence |
 |---|---|---|---|
 | ASTC decoding | Khronos ASTC specification; [astc-encoder](https://github.com/ARM-software/astc-encoder) | Specification; reference: decoded pixels are compared byte by byte | Apache-2.0 (astc-encoder) |
-| ETC2 and EAC decoding | Khronos Data Format Specification | Specification | — |
+| ETC1, ETC2 and EAC decoding | Khronos Data Format Specification; [texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | Specification; reference: decoded pixels are compared byte by byte | MIT (texture2ddecoder) |
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
 | Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp) | Linked | MIT OR Apache-2.0 |

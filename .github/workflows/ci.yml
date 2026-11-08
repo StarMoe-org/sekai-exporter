@@ -73,3 +73,5 @@ jobs:
             target/debug/sekai-exporter objects crates/sekai-unity/tests/fixtures/$variant out/$variant
             python tools/compare-unitypy/compare.py crates/sekai-unity/tests/fixtures/$variant out/$variant
           done
+      - run: cargo build -p sekai-codec --features texture --example decode_stream
+      - run: python tools/compare-texture/fuzz_astc.py target/debug/examples/decode_stream 20000

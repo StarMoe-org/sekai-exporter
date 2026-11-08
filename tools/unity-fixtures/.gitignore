@@ -6,3 +6,5 @@
 /Assets/Generated.meta
 *.csproj
 *.sln
+/Assets/GeneratedTextures/
+/Assets/GeneratedTextures.meta

@@ -21,6 +21,7 @@ An entry is added in the same change that adds the component, and removed in the
 | Common strings of type trees | Unity editor 2022.3.62f2 (`UnityFileSystemApi.dll`) | Copied: a list of engine field and type names that type trees refer to by offset. UnityPy distributes the same table | Not applicable to a list of identifiers |
 | LZ4 block decompression | [`lz4_flex`](https://crates.io/crates/lz4_flex) | Linked | MIT |
 | LZMA block decompression | [`lzma-rs`](https://crates.io/crates/lzma-rs) | Linked | MIT |
+| Engine class names by class ID | [UnityPy](https://github.com/K0lb3/UnityPy) `ClassIDType` | Ported: the table is generated from it, and the notice is kept in the generated file | MIT |
 | Bundle header deobfuscation used by this game | [sssekai](https://github.com/MetaSekaiLab/sssekai) | Reference: the transform is described there publicly | MIT |
 
 ## Textures

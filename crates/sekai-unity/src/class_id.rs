@@ -1,4 +1,7 @@
 //! Engine class names by class ID.
+//!
+//! Generated from the `ClassIDType` table of UnityPy (https://github.com/K0lb3/UnityPy),
+//! MIT License, Copyright (c) 2019-2026 K0lb3.
 
 /// The engine's name for a class ID, used when an object has no layout.
 pub fn class_name(class_id: i32) -> Option<&'static str> {

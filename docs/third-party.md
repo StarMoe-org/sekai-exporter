@@ -30,7 +30,8 @@ An entry is added in the same change that adds the component, and removed in the
 | ETC2 and EAC decoding | Khronos Data Format Specification | Specification | — |
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
-| WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
+| Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp) | Linked | MIT OR Apache-2.0 |
+| Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
 
 ## Audio and video
 

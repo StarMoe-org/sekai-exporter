@@ -88,18 +88,18 @@
 | 层 | Crate | 内容 |
 |---|---|---|
 | 0 | `sekai-unity` | 解包：UnityFS、SerializedFile、type tree、布局编译、块缓存。不使用过程宏，不依赖 C 库 |
-| 0 | `sekai-layouts` | 不带 type tree 的对象所用的字段布局表及其加载 |
 | 0 | `sekai-format` | 已发布文档的 serde 类型，供使用者直接依赖 |
+| 1 | `sekai-layouts` | 不带 type tree 的对象所用的字段布局表及其加载 |
 | 1 | `sekai-codec` | 纯 Rust 实现的贴图与 CRI 解码 |
-| 1 | `sekai-encode` | 编码后端，每个后端一个 feature；全部 C 依赖限于此处 |
 | 1 | `sekai-catalog` | 内容寻址的 store 与目录 |
 | 1 | `sekai-game` | 本游戏专有的输入：资源包去混淆、清单、下载、游戏数据表、区服表 |
 | 2 | `sekai-convert` | 转换器接口、写出器与通用转换器 |
-| 2 | `sekai-pipeline` | 急切与惰性两种求值器、调度器与派生缓存 |
+| 2 | `sekai-encode` | 已解码内容的编码器。规范形式的编码器为纯 Rust 且始终存在；全部 C 依赖限于此处，每项一个 feature |
 | 2 | `sekai-publish` | 布局、store、发布协议与资产列表 |
+| 3 | `sekai-pipeline` | 急切与惰性两种求值器、调度器与派生缓存 |
 | 3 | `sekai-moesekai` | 剧本、剧集、虚拟演唱会、服装与 storage 视图 |
 | 3 | `sekai-mysekai` | 按复刻游戏的运行时所需的完整形式产出的 MySekai 资产 |
 | 4 | `sekai-exporter` | 命令行程序 |
 | 4 | `sekai-wasm` | 面向 JavaScript 暴露的核心 |
 
-依赖只指向更低的层。转换器族、视图与后端均为由 feature 启用的模块，参见 [Feature](features.zh-CN.md)。
+依赖只指向更低的层。转换器返回已解码的内容（图像表面、PCM 采样）或成品字节；对已解码内容的编码是一个独立的变换派生，因此 `sekai-convert` 不依赖 `sekai-encode`。转换器族、视图与后端均为由 feature 启用的模块，参见 [Feature](features.zh-CN.md)。

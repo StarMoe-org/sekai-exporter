@@ -49,19 +49,21 @@
 | Feature | 格式 | 库 |
 |---|---|---|
 | （始终启用） | PNG | `png` |
-| `flac` | FLAC | `flacenc` |
-| `webp` | WebP | libwebp，静态链接 |
+| （始终启用） | 无损 WebP，图片的规范形式 | `image-webp` |
+| （始终启用） | FLAC，音频的规范形式 | `flacenc` |
+| `webp` | 有损 WebP | libwebp，静态链接 |
 | `mp3` | MP3 | LAME，运行时加载 |
 | `aac` | MP4 中的 AAC 音轨 | libavcodec，运行时加载 |
 
-依赖 C 库的后端仅在原生构建中可用。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
+规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
 
 ## 来源与发布
 
 | Feature | Crate | 启用的内容 |
 |---|---|---|
 | `cdn` | `sekai-game` | `cp` 与 `nuverse` 来源，含 HTTP 与 TLS |
-| `client` | `sekai-game`、`sekai-layouts` | `apk` 来源与字段布局表 |
+| `client` | `sekai-game`、`sekai-pipeline` | `apk` 来源，以及读取客户端安装包内资产所用的字段布局表（`sekai-layouts`） |
+| `sqlite` | `sekai-catalog` | 保存于 SQLite 的目录 |
 | `s3` | `sekai-publish` | S3 兼容的 store |
 | `serve` | `sekai-exporter` | 以 HTTP 服务形式运行的惰性求值器 |
 
@@ -69,7 +71,7 @@
 
 | 预设 | 内容 |
 |---|---|
-| `default` | 默认使用者所需的全部内容：`cdn`、全部通用转换器族、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`flac`、`webp`、`mp3`、`aac` |
-| `mysekai` | `default` 加 `mysekai` |
-| `client` | `default` 加 `client` |
+| `default` | 默认使用者所需的全部内容：`cdn`、`sqlite`、全部通用转换器族、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
+| `preset-mysekai` | `default` 加 `mysekai` |
+| `preset-client` | `default` 加 `client` |
 | `full` | 全部 feature |

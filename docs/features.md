@@ -49,19 +49,21 @@ In `sekai-encode`:
 | Feature | Format | Library |
 |---|---|---|
 | (always) | PNG | `png` |
-| `flac` | FLAC | `flacenc` |
-| `webp` | WebP | libwebp, statically linked |
+| (always) | Lossless WebP, the canonical image form | `image-webp` |
+| (always) | FLAC, the canonical audio form | `flacenc` |
+| `webp` | Lossy WebP | libwebp, statically linked |
 | `mp3` | MP3 | LAME, loaded at run time |
 | `aac` | AAC audio tracks in MP4 | libavcodec, loaded at run time |
 
-Backends that need a C library are available only in native builds. The licences of these libraries are listed in [Third-party sources](third-party.md).
+The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The licences of these libraries are listed in [Third-party sources](third-party.md).
 
 ## Sources and publishing
 
 | Feature | Crate | Enables |
 |---|---|---|
 | `cdn` | `sekai-game` | The `cp` and `nuverse` sources, with HTTP and TLS |
-| `client` | `sekai-game`, `sekai-layouts` | The `apk` source and the field layout tables |
+| `client` | `sekai-game`, `sekai-pipeline` | The `apk` source, and the field layout tables (`sekai-layouts`) for assets inside the client package |
+| `sqlite` | `sekai-catalog` | The catalog kept in SQLite |
 | `s3` | `sekai-publish` | S3-compatible stores |
 | `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server |
 
@@ -69,7 +71,7 @@ Backends that need a C library are available only in native builds. The licences
 
 | Preset | Contents |
 |---|---|
-| `default` | Everything the default consumer needs: `cdn`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `flac`, `webp`, `mp3`, `aac` |
-| `mysekai` | `default` and `mysekai` |
-| `client` | `default` and `client` |
+| `default` | Everything the default consumer needs: `cdn`, `sqlite`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
+| `preset-mysekai` | `default` and `mysekai` |
+| `preset-client` | `default` and `client` |
 | `full` | Every feature |

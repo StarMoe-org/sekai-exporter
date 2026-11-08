@@ -30,7 +30,8 @@
 | ETC2 与 EAC 解码 | Khronos Data Format Specification | 规范 | — |
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
-| WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
+| 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp) | 链接 | MIT OR Apache-2.0 |
+| 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 
 ## 音频与视频
 

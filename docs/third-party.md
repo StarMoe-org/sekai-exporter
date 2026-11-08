@@ -41,6 +41,7 @@ An entry is added in the same change that adds the component, and removed in the
 |---|---|---|---|
 | CRI ACB tables, AWB archives, HCA decoding, USM demultiplexing, ADX decoding | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: decoded samples are compared sample by sample | ISC |
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
+| FLAC reading in tests | [`claxon`](https://crates.io/crates/claxon) | Linked in tests only: written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
 | AAC writing for MP4 audio tracks | [FFmpeg](https://ffmpeg.org/) libavcodec | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later, when FFmpeg is built without GPL components |
 | MP4 container | ISO/IEC 14496-12 and 14496-14; VP9 codec binding for ISO-BMFF | Specification | — |

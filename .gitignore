@@ -1,0 +1,10 @@
+/target/
+*.unity3d
+*.bundle
+*.acb
+*.awb
+*.usm
+/data/
+/out/
+/local/
+.env

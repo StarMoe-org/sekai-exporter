@@ -3,6 +3,30 @@
 mod export;
 mod monitor;
 mod objects;
+#[cfg(all(feature = "cdn", feature = "storage-view"))]
+mod storage;
+#[cfg(all(feature = "cdn", not(feature = "storage-view")))]
+mod storage {
+    use std::path::Path;
+
+    use sekai_catalog::{Derivations, LocalStore};
+    use sekai_pipeline::Evaluation;
+
+    use crate::monitor::Monitor;
+
+    /// Refuses to publish a view that this build does not have.
+    pub(crate) fn publish(
+        _evaluation: &Evaluation,
+        _version: &str,
+        _root: &Path,
+        _store: &LocalStore,
+        _derivations: &dyn Derivations,
+        _threads: usize,
+        _monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        Err("this build has no storage view: enable the storage-view feature".into())
+    }
+}
 #[cfg(feature = "cdn")]
 mod update;
 
@@ -19,7 +43,7 @@ commands:
       index is published under <output>/published, and --tree also writes a
       path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
-         [--tree <dir>] [--threads <n>] [--force]
+         [--tree <dir>] [--storage <dir>] [--threads <n>] [--force]
       Bring <output> up to the current version of a region of the configuration.
       Bundles go to <output>/inputs, which holds game data and must stay private.
       A version that matches the last complete run is left alone unless --force

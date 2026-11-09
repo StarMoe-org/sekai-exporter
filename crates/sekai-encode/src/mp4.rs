@@ -17,7 +17,7 @@ use crate::EncodeError;
 pub const NAME: &str = "mp4-h264-aac";
 
 /// The encoder version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The threads of one x264 encoder.
 const VIDEO_THREADS: &str = "2";
@@ -119,8 +119,12 @@ fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -
             "libx264",
             "-preset",
             "medium",
-            "-crf",
-            "20",
+            "-b:v",
+            "4M",
+            "-g",
+            "12",
+            "-bf",
+            "2",
             "-pix_fmt",
             "yuv420p",
             "-threads",

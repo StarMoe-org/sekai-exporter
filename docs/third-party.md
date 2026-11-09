@@ -47,7 +47,7 @@ An entry is added in the same change that adds the component, and removed in the
 | HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
 | OpenEXR writing (the canonical HDR image form) | [`exr`](https://crates.io/crates/exr) | Linked | BSD-3-Clause |
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
-| FLAC reading in tests | [`claxon`](https://crates.io/crates/claxon) | Linked in tests only: written FLAC is decoded and compared sample by sample | Apache-2.0 |
+| FLAC reading | [`claxon`](https://crates.io/crates/claxon) | Linked with the `storage-view` feature, which reads canonical FLAC members, and in tests, where written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | AAC writing | [FFmpeg libavcodec](https://ffmpeg.org/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later |
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
 | Loading LAME and libavcodec at run time | [`libloading`](https://crates.io/crates/libloading) | Linked in native builds | ISC |

@@ -31,6 +31,7 @@ struct Options {
     config: PathBuf,
     secrets: Option<PathBuf>,
     tree: Option<PathBuf>,
+    storage: Option<PathBuf>,
     only: Vec<String>,
     threads: usize,
     force: bool,
@@ -43,6 +44,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut config = None;
     let mut secrets = None;
     let mut tree = None;
+    let mut storage = None;
     let mut only = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut force = false;
@@ -51,6 +53,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
             Long("secrets") => secrets = Some(PathBuf::from(parser.value()?)),
             Long("tree") => tree = Some(PathBuf::from(parser.value()?)),
+            Long("storage") => storage = Some(PathBuf::from(parser.value()?)),
             Long("only") => only.push(parser.value()?.string()?),
             Long("threads") => threads = parser.value()?.parse()?,
             Long("force") => force = true,
@@ -67,6 +70,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         config: config.ok_or("--config is required")?,
         secrets,
         tree,
+        storage,
         only,
         threads: threads.max(1),
         force,
@@ -347,6 +351,18 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &plan,
         monitor,
     )?;
+
+    if let Some(root) = &options.storage {
+        crate::storage::publish(
+            &evaluation,
+            &name,
+            root,
+            &store,
+            &derivations,
+            options.threads,
+            monitor,
+        )?;
+    }
 
     let record = || -> io::Result<()> {
         let text = serde_json::to_string(&identity).map_err(io::Error::other)?;

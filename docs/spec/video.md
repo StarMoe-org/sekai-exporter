@@ -32,11 +32,11 @@ An ADX audio track can end before the sample count of its header. The whole fram
 
 ## 4. Container
 
-The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 1) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
+The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 2) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
 
 | Stream | Parameters |
 |---|---|
-| Video | H.264 from `libx264`: preset `medium`, CRF 20, `yuv420p`, 2 threads, one output frame for each input frame. A picture with an odd width or height is padded to even |
+| Video | H.264 from `libx264`: preset `medium`, 4 Mb/s, a keyframe every 12 frames, up to 2 B-frames, `yuv420p`, 2 threads, one output frame for each input frame. A picture with an odd width or height is padded to even |
 | Audio | AAC from the FFmpeg encoder at 192 kb/s, at the sample rate and channel count of the track |
 
 The container carries no metadata. The same input and the same FFmpeg build give the same bytes; the thread count is fixed because `libx264` output depends on it.

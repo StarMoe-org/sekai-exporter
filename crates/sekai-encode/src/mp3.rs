@@ -13,7 +13,7 @@ use crate::EncodeError;
 pub const NAME: &str = "mp3";
 
 /// The encoder version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The library names tried in order.
 const LIBRARIES: [&str; 6] = [
@@ -48,6 +48,7 @@ type EncodeBuffer = unsafe extern "C" fn(
     c_int,
 ) -> c_int;
 type Flush = unsafe extern "C" fn(Handle, *mut c_uchar, c_int) -> c_int;
+type TagFrame = unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> usize;
 
 fn unavailable(message: String) -> EncodeError {
     EncodeError::Unavailable {
@@ -167,7 +168,7 @@ pub fn encode_with(
         (b"lame_set_brate\0", bitrate),
         (b"lame_set_mode\0", mode),
         (b"lame_set_VBR\0", VBR_OFF),
-        (b"lame_set_bWriteVbrTag\0", 0),
+        (b"lame_set_bWriteVbrTag\0", 1),
         (b"lame_set_quality\0", QUALITY),
     ] {
         configure(&library, handle, name, value)?;
@@ -214,5 +215,15 @@ pub fn encode_with(
     let written = usize::try_from(written)
         .map_err(|_| failed(format!("lame_encode_flush returned {written}")))?;
     out.extend_from_slice(&buffer[..written]);
+
+    // The first frame of the stream is reserved for the tag that tells players how many samples
+    // to skip at each end.
+    let tag: Symbol<'_, TagFrame> = symbol(&library, b"lame_get_lametag_frame\0")?;
+    // SAFETY: the buffer is writable for the length passed with it.
+    let written = unsafe { tag(handle, buffer.as_mut_ptr(), buffer.len()) };
+    if written == 0 || written > out.len() {
+        return Err(failed(format!("lame_get_lametag_frame returned {written}")));
+    }
+    out[..written].copy_from_slice(&buffer[..written]);
     Ok(out)
 }

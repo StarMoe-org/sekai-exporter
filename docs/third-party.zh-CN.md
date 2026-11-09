@@ -47,7 +47,7 @@
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
 | OpenEXR 写出（规范 HDR 图像形式） | [`exr`](https://crates.io/crates/exr) | 链接 | BSD-3-Clause |
 | FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |
-| 测试中读取 FLAC | [`claxon`](https://crates.io/crates/claxon) | 仅在测试中链接：写出的 FLAC 解回后逐采样比对 | Apache-2.0 |
+| FLAC 读取 | [`claxon`](https://crates.io/crates/claxon) | 随 `storage-view` feature 链接，用于读取规范层 FLAC 成员；测试中也用于解码写出的 FLAC 并逐采样比对 | Apache-2.0 |
 | AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |
 | MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
 | 运行时加载 LAME 与 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |

@@ -811,7 +811,13 @@ dependencies = [
 name = "sekai-moesekai"
 version = "0.0.0"
 dependencies = [
+ "claxon",
+ "image-webp",
+ "png",
+ "sekai-codec",
  "sekai-convert",
+ "sekai-encode",
+ "sekai-format",
  "sekai-game",
 ]
 

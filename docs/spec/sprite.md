@@ -32,17 +32,17 @@ The document has no whitespace.
 
 **Root objects:** every `Sprite` (class 213). The form does not read game data tables.
 
-**Fields read:** `m_Rect`, `m_Pivot`, `m_PixelsToUnits`, `m_Border`, `m_SpriteAtlas`, `m_RenderDataKey`, and from `m_RD`: `texture`, `alphaTexture`, `textureRect`, `textureRectOffset`, `settingsRaw`. From the sprite atlas: `m_RenderDataMap`. From the texture: the fields the `texture` form reads.
+**Fields read:** `m_Rect`, `m_Pivot`, `m_PixelsToUnits`, `m_Border`, `m_SpriteAtlas`, `m_RenderDataKey`, and from the render data (`m_RD`, or the entry of the atlas under `m_RenderDataKey` when the atlas lists one): `texture`, `alphaTexture`, `textureRect`, `textureRectOffset`, `settingsRaw`. From the sprite atlas: `m_RenderDataMap`. From the texture: the fields the `texture` form reads.
 
-**Image.** The texture `m_RD.texture` is decoded as the `texture` form decodes a `Texture2D`. Each edge of `m_Rect` is rounded to the nearest whole pixel, ties to even: the left edge is `x`, the right edge `x + width`, the bottom edge `y` and the top edge `y + height`, the sums taken in double precision. The image is the pixels between those edges, with `y` counted from the bottom row of the texture.
+**Image.** The `texture` of the render data is decoded as the `texture` form decodes a `Texture2D`. Each edge of `m_Rect`, or of `textureRect` when the render data comes from the atlas, is rounded to the nearest whole pixel, ties to even: the left edge is `x`, the right edge `x + width`, the bottom edge `y` and the top edge `y + height`, the sums taken in double precision. The image is the pixels between those edges, with `y` counted from the bottom row of the texture.
 
 **Outcomes other than an image:**
 
 | Case | Result |
 |---|---|
-| The sprite's atlas lists render data under the sprite's `m_RenderDataKey` (the sprite is drawn from the atlas texture) | Error `unsupported` |
-| `m_RD.settingsRaw` has the packed bit (bit 0) set | Error `unsupported` |
-| `m_RD.alphaTexture` is not null | Error `unsupported` |
+| The render data comes from the atlas and is rotated (bits 2 to 5 of `settingsRaw`), has a non-zero `textureRectOffset`, or has a `textureRect` of another size than `m_Rect` | Error `unsupported` |
+| The render data is `m_RD` and `settingsRaw` has the packed bit (bit 0) set | Error `unsupported` |
+| The render data has an `alphaTexture` that is not null | Error `unsupported` |
 | The rounded rectangle is empty or reaches outside the texture | Error `malformed` |
 | The texture holds no image | Error `malformed` |
 | A float of the layout is not finite | Error `malformed` |

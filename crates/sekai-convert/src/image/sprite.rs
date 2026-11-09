@@ -8,9 +8,15 @@ use sekai_unity::Value;
 use super::{Texture, field, malformed, texture_memory};
 use crate::roots;
 use crate::{
-    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, Object, ObjectId,
     ObjectIndex,
 };
+
+/// The bit of `settingsRaw` that says a sprite is packed into another texture.
+const PACKED: u64 = 1;
+/// The place and width of the rotation of a sprite in `settingsRaw`.
+const ROTATION_SHIFT: u32 = 2;
+const ROTATION_MASK: u64 = 0xF;
 
 /// The image region and layout of a `Sprite`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -37,28 +43,29 @@ impl Converter for Sprite {
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
         let object = cx.object(root)?;
         let fields = &object.fields;
-        let rd = field(fields, "m_RD")?;
-        check_atlas(root, fields, cx)?;
-        let settings = field(rd, "settingsRaw")?
-            .as_u64()
-            .ok_or_else(|| malformed("m_RD.settingsRaw is not an integer"))?;
-        if settings & 1 != 0 {
-            return Err(unsupported("a sprite packed into another texture"));
-        }
-        if pptr(rd, "alphaTexture", root, cx)?.is_some() {
+        let atlas = atlas_of(root, fields, cx)?;
+        let placement = Placement::find(root, fields, atlas.as_ref())?;
+        if placement.reference("alphaTexture", cx)?.is_some() {
             return Err(unsupported("a sprite with a separate alpha texture"));
         }
-        let texture =
-            pptr(rd, "texture", root, cx)?.ok_or_else(|| malformed("the sprite has no texture"))?;
+        let texture = placement
+            .reference("texture", cx)?
+            .ok_or_else(|| malformed("the sprite has no texture"))?;
         let image = match Texture.convert(texture, cx)? {
             Some(Asset { members }) => members.into_iter().next().map(|m| m.content),
             None => None,
         };
         let rect = Rect::read(field(fields, "m_Rect")?, "m_Rect")?;
+        let texture_rect = Rect::read(field(placement.data, "textureRect")?, "textureRect")?;
+        let texture_rect_offset = vector(
+            field(placement.data, "textureRectOffset")?,
+            "textureRectOffset",
+        )?;
+        let region = placement.region(rect, texture_rect, texture_rect_offset)?;
         let layout = Layout {
             rect,
-            texture_rect: Rect::read(field(rd, "textureRect")?, "m_RD.textureRect")?,
-            texture_rect_offset: vector(field(rd, "textureRectOffset")?, "m_RD.textureRectOffset")?,
+            texture_rect,
+            texture_rect_offset,
             pivot: vector(field(fields, "m_Pivot")?, "m_Pivot")?,
             pixels_per_unit: float(field(fields, "m_PixelsToUnits")?, "m_PixelsToUnits")?,
             border: border(field(fields, "m_Border")?)?,
@@ -70,12 +77,12 @@ impl Converter for Sprite {
                     content: match image {
                         Some(Content::Image(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &rect)?;
+                                crop(image.width(), image.height(), image.pixels(), &region)?;
                             Content::Image(Surface::new(w, h, pixels)?)
                         }
                         Some(Content::HdrImage(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &rect)?;
+                                crop(image.width(), image.height(), image.pixels(), &region)?;
                             Content::HdrImage(HdrSurface::new(w, h, pixels)?)
                         }
                         _ => return Err(malformed("the sprite's texture holds no image")),
@@ -101,21 +108,80 @@ impl Converter for Sprite {
     }
 }
 
-/// Fails when the sprite's atlas holds render data for it: the sprite is then drawn from the
-/// atlas texture, which this form does not read.
-fn check_atlas(root: ObjectId, fields: &Value, cx: &dyn Context) -> Result<(), ConvertError> {
-    let Some(atlas) = pptr(fields, "m_SpriteAtlas", root, cx)? else {
-        return Ok(());
-    };
-    let atlas = cx.object(atlas)?;
-    let entries = field(&atlas.fields, "m_RenderDataMap")?
-        .as_map()
-        .ok_or_else(|| malformed("m_RenderDataMap is not a map"))?;
-    let key = field(fields, "m_RenderDataKey")?;
-    if entries.iter().any(|(k, _)| k == key) {
-        return Err(unsupported("a sprite drawn from its atlas texture"));
+/// The atlas of a sprite.
+fn atlas_of(
+    root: ObjectId,
+    fields: &Value,
+    cx: &dyn Context,
+) -> Result<Option<Object>, ConvertError> {
+    pptr(fields, "m_SpriteAtlas", root, cx)?
+        .map(|atlas| cx.object(atlas))
+        .transpose()
+}
+
+/// The render data that places a sprite in a texture: the entry of its atlas when the atlas lists
+/// the sprite, and otherwise its own.
+struct Placement<'a> {
+    /// The object whose references `data` holds.
+    owner: ObjectId,
+    data: &'a Value,
+    in_atlas: bool,
+}
+
+impl<'a> Placement<'a> {
+    fn find(
+        root: ObjectId,
+        fields: &'a Value,
+        atlas: Option<&'a Object>,
+    ) -> Result<Self, ConvertError> {
+        if let Some(atlas) = atlas {
+            let key = field(fields, "m_RenderDataKey")?;
+            let entries = field(&atlas.fields, "m_RenderDataMap")?
+                .as_map()
+                .ok_or_else(|| malformed("m_RenderDataMap is not a map"))?;
+            if let Some((_, data)) = entries.iter().find(|(k, _)| k == key) {
+                return Ok(Self {
+                    owner: atlas.id,
+                    data,
+                    in_atlas: true,
+                });
+            }
+        }
+        Ok(Self {
+            owner: root,
+            data: field(fields, "m_RD")?,
+            in_atlas: false,
+        })
     }
-    Ok(())
+
+    fn reference(&self, name: &str, cx: &dyn Context) -> Result<Option<ObjectId>, ConvertError> {
+        pptr(self.data, name, self.owner, cx)
+    }
+
+    /// The region of the texture that the image of the sprite is cut from. An atlas may trim or
+    /// rotate what it holds, and only a sprite it holds whole has its image at `texture_rect`.
+    fn region(
+        &self,
+        rect: Rect,
+        texture_rect: Rect,
+        offset: [f32; 2],
+    ) -> Result<Rect, ConvertError> {
+        let settings = field(self.data, "settingsRaw")?
+            .as_u64()
+            .ok_or_else(|| malformed("settingsRaw is not an integer"))?;
+        if !self.in_atlas {
+            return if settings & PACKED != 0 {
+                Err(unsupported("a sprite packed into another texture"))
+            } else {
+                Ok(rect)
+            };
+        }
+        let same_size = (rect.width, rect.height) == (texture_rect.width, texture_rect.height);
+        if settings >> ROTATION_SHIFT & ROTATION_MASK != 0 || offset != [0.0, 0.0] || !same_size {
+            return Err(unsupported("a sprite trimmed or rotated in its atlas"));
+        }
+        Ok(texture_rect)
+    }
 }
 
 /// The rounded region `rect` covers in an RGBA image of `width` x `height` pixels, given as its
@@ -237,8 +303,9 @@ fn float(value: &Value, name: &str) -> Result<f32, ConvertError> {
 /// also covers the cropped image.
 fn sprite_memory(root: ObjectId, cx: &dyn Context) -> Option<u64> {
     let object = cx.object(root).ok()?;
-    let rd = object.fields.get("m_RD")?;
-    let texture = pptr(rd, "texture", root, cx).ok()??;
+    let atlas = atlas_of(root, &object.fields, cx).ok()?;
+    let placement = Placement::find(root, &object.fields, atlas.as_ref()).ok()?;
+    let texture = placement.reference("texture", cx).ok()??;
     texture_memory(texture, cx)
 }
 

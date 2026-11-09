@@ -164,6 +164,22 @@ fn atlas(keys: &[u64]) -> Object {
     )
 }
 
+/// An atlas that holds the sprite with the key 7 at `texture_rect` of the texture.
+fn atlas_holding(texture_rect: Value, offset: Value, settings: i64) -> Object {
+    let data = s(vec![
+        ("texture", pptr(2)),
+        ("alphaTexture", pptr(0)),
+        ("textureRect", texture_rect),
+        ("textureRectOffset", offset),
+        ("settingsRaw", i(settings)),
+    ]);
+    object(
+        3,
+        687078895,
+        s(vec![("m_RenderDataMap", Value::Map(vec![(key(7), data)]))]),
+    )
+}
+
 fn members(asset: Asset) -> Vec<(String, Content)> {
     asset
         .members
@@ -206,10 +222,40 @@ fn a_sprite_is_its_rounded_rectangle_and_its_layout() {
 }
 
 #[test]
+fn a_sprite_its_atlas_holds_whole_is_cut_from_the_atlas_texture() {
+    let file = File(vec![
+        sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+        texture(),
+        atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(0.0, 0.0), 3),
+    ]);
+    let got = members(Sprite.convert(id(1), &file).unwrap().unwrap());
+    let Content::Image(image) = &got[0].1 else {
+        panic!("unexpected members {got:?}");
+    };
+    assert_eq!((image.width(), image.height()), (2, 2));
+    let reds: Vec<u8> = image.pixels().chunks(4).map(|p| p[0]).collect();
+    assert_eq!(reds, [11, 12, 21, 22]);
+}
+
+#[test]
 fn sprites_drawn_from_elsewhere_are_unsupported() {
     let whole = || rect(0.0, 0.0, 4.0, 3.0);
     let cases = [
-        File(vec![sprite(3, 64, 0, whole()), texture(), atlas(&[7])]),
+        File(vec![
+            sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+            texture(),
+            atlas_holding(rect(1.0, 0.0, 1.5, 2.0), vector(0.0, 0.0), 3),
+        ]),
+        File(vec![
+            sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+            texture(),
+            atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(1.0, 0.0), 3),
+        ]),
+        File(vec![
+            sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+            texture(),
+            atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(0.0, 0.0), 11),
+        ]),
         File(vec![sprite(0, 1, 0, whole()), texture()]),
         File(vec![sprite(0, 0, 2, whole()), texture()]),
     ];

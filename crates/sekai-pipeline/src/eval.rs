@@ -6,7 +6,7 @@ use std::io;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sekai_catalog::{Derivations, Derived, Key, LocalStore};
+use sekai_catalog::{Derivations, Derived, Key, Store};
 use sekai_convert::{Asset, Content, ConvertError, Converter, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
@@ -220,7 +220,7 @@ fn decoded_size(asset: &Asset) -> u64 {
 }
 
 /// The estimated peak memory of a derivation.
-fn estimated_memory(plan: &Planned<'_>, version: &Version<'_>) -> u64 {
+pub(crate) fn estimated_memory(plan: &Planned<'_>, version: &Version<'_>) -> u64 {
     let root = plan.closure[0];
     let index = version.index();
     index.position(root).map_or(0, |position| {
@@ -233,10 +233,9 @@ fn estimated_memory(plan: &Planned<'_>, version: &Version<'_>) -> u64 {
 pub(crate) fn derive(
     plan: &Planned<'_>,
     version: &Version<'_>,
-    store: &LocalStore,
+    store: &dyn Store,
     recorder: &dyn Recorder,
 ) -> io::Result<(Derived, Option<String>)> {
-    let index = version.index();
     let form = plan.converter.name();
     let result = {
         let estimated = estimated_memory(plan, version);
@@ -277,8 +276,12 @@ pub(crate) fn derive(
                     }
                     Err(e) => {
                         members.clear();
+                        let code = match e {
+                            EncodeError::Unavailable { .. } => "encoder_unavailable",
+                            _ => "encode_failed",
+                        };
                         failed = Some(AssetError {
-                            code: "encode_failed".to_owned(),
+                            code: code.to_owned(),
                             message: e.to_string(),
                         });
                         break;
@@ -289,6 +292,30 @@ pub(crate) fn derive(
         }
         Err(e) => Some(asset_error(&e)),
     };
+    let code = error.as_ref().map(|e| e.code.clone());
+    let key = write_document(plan, version, store, members, error)?;
+    Ok((Derived::Document(key), code))
+}
+
+/// Stores the document of an asset that could not be produced.
+pub(crate) fn document(
+    plan: &Planned<'_>,
+    version: &Version<'_>,
+    store: &dyn Store,
+    members: Vec<MemberFile>,
+    error: AssetError,
+) -> io::Result<Key> {
+    write_document(plan, version, store, members, Some(error))
+}
+
+fn write_document(
+    plan: &Planned<'_>,
+    version: &Version<'_>,
+    store: &dyn Store,
+    members: Vec<MemberFile>,
+    error: Option<AssetError>,
+) -> io::Result<Key> {
+    let index = version.index();
     let sources = plan
         .closure
         .iter()
@@ -302,7 +329,6 @@ pub(crate) fn derive(
             })
         })
         .collect();
-    let code = error.as_ref().map(|e| e.code.clone());
     let document = AssetDocument {
         format: FORMAT.to_owned(),
         version: VERSION,
@@ -316,7 +342,7 @@ pub(crate) fn derive(
         error,
     };
     let bytes = document.to_bytes().map_err(io::Error::other)?;
-    Ok((Derived::Document(store.put(&bytes, "json")?), code))
+    store.put(&bytes, "json")
 }
 
 /// Evaluates every asset of `version`. An asset that cannot be produced is recorded with its
@@ -324,7 +350,7 @@ pub(crate) fn derive(
 pub fn evaluate(
     version: &Version<'_>,
     converters: &[Box<dyn Converter>],
-    store: &LocalStore,
+    store: &dyn Store,
     derivations: &dyn Derivations,
     recorder: &dyn Recorder,
     threads: usize,
@@ -403,7 +429,7 @@ pub(crate) fn plan<'a>(
 pub(crate) fn run(
     plan: &Plan<'_>,
     version: &Version<'_>,
-    store: &LocalStore,
+    store: &dyn Store,
     derivations: &dyn Derivations,
     recorder: &dyn Recorder,
     threads: usize,

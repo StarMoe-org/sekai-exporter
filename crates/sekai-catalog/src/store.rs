@@ -3,12 +3,14 @@
 //! An object is named `<aa>/<sha256>.<extension>`, where `<aa>` is the first two hexadecimal
 //! digits of the SHA-256 of its bytes. The name carries no other meaning.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 
 use sha2::{Digest, Sha256};
 
@@ -95,6 +97,51 @@ pub struct LocalStore {
 
 /// The directory under the root where objects are written before they are renamed into place.
 const INCOMING: &str = "incoming";
+
+/// Where derivations write their files.
+pub trait Store: Sync {
+    /// Stores `bytes` and returns their key.
+    fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key>;
+}
+
+impl Store for LocalStore {
+    fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
+        LocalStore::put(self, bytes, extension)
+    }
+}
+
+/// A store in memory.
+#[derive(Debug, Default)]
+pub struct MemoryStore(Mutex<BTreeMap<Key, Vec<u8>>>);
+
+impl Store for MemoryStore {
+    fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
+        let key = Key::of(bytes, extension);
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), bytes.to_vec());
+        Ok(key)
+    }
+}
+
+impl MemoryStore {
+    /// The bytes of `key`.
+    pub fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, key.to_string()))
+    }
+
+    /// Removes every file and returns them, in key order.
+    pub fn drain(&self) -> Vec<(Key, Vec<u8>)> {
+        let files = std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner));
+        files.into_iter().collect()
+    }
+}
 
 impl LocalStore {
     /// Opens the store at `root`, creating the directory if it does not exist.

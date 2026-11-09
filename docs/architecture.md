@@ -60,6 +60,8 @@ Assets are named by their logical path and asset form. When several assets would
 - **By bundle** (`<region>/bundle/<bundle name>/…`): fully lazy. A request can be served by fetching the bundle, unpacking it and returning the object, with no index prepared in advance.
 - **By logical path** (`<region>/<view>/<logical path>`): the path must first be mapped to its bundle and objects, which requires the binding index. The index derivations are inexpensive and are computed eagerly; only the expensive convert and transform derivations are left lazy.
 
+The lazy evaluator takes the eager evaluator's names and fingerprints from the index of the version, reads only the bundles of the asset that is requested, and writes the same documents and members. Concurrent requests for one fingerprint compute it once. A request can name an asset or a bundle and object.
+
 ## Disciplines the model depends on
 
 1. **Determinism.** Converters and encoders do not read the clock, do not depend on thread order and do not iterate unordered containers. The same input gives the same bytes with one thread or many, natively or on `wasm32`, and with or without the optimizations described in [Performance](performance.md). Continuous integration checks all three.

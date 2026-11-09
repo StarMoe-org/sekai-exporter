@@ -22,6 +22,7 @@
 | LZ4 块解压 | [`lz4_flex`](https://crates.io/crates/lz4_flex) | 链接 | MIT |
 | LZMA 块解压 | [`lzma-rs`](https://crates.io/crates/lzma-rs) | 链接 | MIT |
 | 按类 ID 的引擎类名 | [UnityPy](https://github.com/K0lb3/UnityPy) `ClassIDType` | 移植：该表由其生成，生成文件中保留其版权声明 | MIT |
+| TPK 文件格式的引擎类布局 | [Tpk](https://github.com/AssetRipper/Tpk)、[UnityPy](https://github.com/K0lb3/UnityPy) | 文件格式及按版本选择布局的参考；布局逐节点比对。类表文件由使用者提供，不随本项目分发 | MIT |
 | 本游戏所用的资源包头部去混淆 | [sssekai](https://github.com/MetaSekaiLab/sssekai) | 参考：该变换在其中有公开说明 | MIT |
 
 ## 贴图

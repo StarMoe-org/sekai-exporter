@@ -22,6 +22,7 @@ An entry is added in the same change that adds the component, and removed in the
 | LZ4 block decompression | [`lz4_flex`](https://crates.io/crates/lz4_flex) | Linked | MIT |
 | LZMA block decompression | [`lzma-rs`](https://crates.io/crates/lzma-rs) | Linked | MIT |
 | Engine class names by class ID | [UnityPy](https://github.com/K0lb3/UnityPy) `ClassIDType` | Ported: the table is generated from it, and the notice is kept in the generated file | MIT |
+| Engine class layouts in the TPK file format | [Tpk](https://github.com/AssetRipper/Tpk), [UnityPy](https://github.com/K0lb3/UnityPy) | Reference for the file format and for choosing a layout by version; layouts are compared node by node. A table file is supplied by the user and is not distributed | MIT |
 | Bundle header deobfuscation used by this game | [sssekai](https://github.com/MetaSekaiLab/sssekai) | Reference: the transform is described there publicly | MIT |
 
 ## Textures

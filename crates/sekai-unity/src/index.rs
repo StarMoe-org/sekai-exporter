@@ -5,6 +5,7 @@
 //! then resolves external files to bundles and scripts to class names.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
@@ -12,11 +13,19 @@ use crate::class_id::class_name;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::read::{Field, ReferenceTypes, Visitor, read_object};
-use crate::serialized::{External, ReferencedName, SerializedFile};
+use crate::serialized::{External, ReferencedName, SerializedFile, SerializedType};
 use crate::source::ByteSource;
+use crate::typetree::TypeTree;
 use crate::value::{Value, read_value};
 
 const MONO_SCRIPT: i32 = 115;
+const MONO_BEHAVIOUR: i32 = 114;
+
+/// Type trees of engine classes, for files stored without them.
+pub trait ClassLayouts: Sync {
+    /// The type tree of `class_id` in the Unity version `unity_version`.
+    fn tree(&self, class_id: i32, unity_version: &str) -> Option<Arc<TypeTree>>;
+}
 
 /// The compiled layouts of one serialized file.
 #[derive(Debug)]
@@ -28,15 +37,21 @@ pub struct FileLayouts {
 impl FileLayouts {
     /// Compiles the type trees of a file. Types without a tree get [`Error::NoLayout`].
     pub fn new(file: &SerializedFile) -> Self {
+        FileLayouts::compile(file, None)
+    }
+
+    /// Compiles the type trees of a file, taking the layout of types without a tree from
+    /// `classes` at the file's Unity version. A `MonoBehaviour` stores its script's fields after
+    /// its engine header, so it gets [`Error::NoLayout`] whatever `classes` holds.
+    pub fn with_classes(file: &SerializedFile, classes: &dyn ClassLayouts) -> Self {
+        FileLayouts::compile(file, Some(classes))
+    }
+
+    fn compile(file: &SerializedFile, classes: Option<&dyn ClassLayouts>) -> Self {
         let types = file
             .types
             .iter()
-            .map(|t| match &t.tree {
-                Some(tree) => Layout::compile(tree),
-                None => Err(Error::NoLayout {
-                    class_id: t.class_id,
-                }),
-            })
+            .map(|t| type_layout(t, &file.unity_version, classes))
             .collect();
         let referenced = file
             .referenced_types
@@ -53,6 +68,24 @@ impl FileLayouts {
     pub fn get(&self, type_index: usize) -> Result<&Layout> {
         self.types[type_index].as_ref().map_err(Clone::clone)
     }
+}
+
+/// Compiles the layout of a type: the tree the file stores, or else the tree of its class in
+/// `classes`.
+fn type_layout(
+    serialized: &SerializedType,
+    unity_version: &str,
+    classes: Option<&dyn ClassLayouts>,
+) -> Result<Layout> {
+    if let Some(tree) = &serialized.tree {
+        return Layout::compile(tree);
+    }
+    let class_id = serialized.class_id;
+    let tree = classes
+        .filter(|_| class_id != MONO_BEHAVIOUR)
+        .and_then(|classes| classes.tree(class_id, unity_version))
+        .ok_or(Error::NoLayout { class_id })?;
+    Layout::compile(&tree)
 }
 
 impl ReferenceTypes for FileLayouts {
@@ -506,5 +539,153 @@ impl VersionIndex {
         self.containers
             .get(&(bundle, file, path_id))
             .map_or(&[], Vec::as_slice)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+    use crate::endian::Endian;
+    use crate::serialized::{FileHeader, ObjectInfo};
+    use crate::typetree::TypeTreeNode;
+
+    /// The class of the files' type.
+    const CLASS: i32 = 43;
+    /// The root type of the trees that files store.
+    const STORED: &str = "Stored";
+    /// The root type of the trees of a table.
+    const FROM_TABLE: &str = "FromTable";
+
+    /// A file of one object of class `CLASS` whose types, when `trees` is set, have the tree.
+    fn file(unity_version: &str, trees: bool) -> SerializedFile {
+        let serialize = |class_id| SerializedType {
+            class_id,
+            stripped: false,
+            script_type_index: -1,
+            script_id: None,
+            old_type_hash: [0; 16],
+            tree: trees.then(|| tree_of(STORED)),
+            referenced: None,
+            dependencies: vec![],
+        };
+        SerializedFile {
+            header: FileHeader {
+                metadata_size: 0,
+                file_size: 0,
+                version: 22,
+                data_offset: 0,
+                endian: Endian::Little,
+            },
+            unity_version: unity_version.into(),
+            platform: 13,
+            type_trees: trees,
+            types: [CLASS, MONO_BEHAVIOUR].map(serialize).into(),
+            objects: vec![ObjectInfo {
+                path_id: 1,
+                offset: 0,
+                size: 4,
+                type_index: 0,
+                class_id: CLASS,
+            }],
+            scripts: vec![],
+            externals: vec![],
+            referenced_types: vec![],
+            user_information: String::new(),
+        }
+    }
+
+    /// A tree of one node, whose type is `root`.
+    fn tree_of(root: &str) -> Arc<TypeTree> {
+        let node = TypeTreeNode {
+            version: 1,
+            level: 0,
+            type_flags: 0,
+            type_name: root.into(),
+            name: "field".into(),
+            byte_size: 4,
+            index: 0,
+            meta_flags: 0,
+            ref_type_hash: 0,
+        };
+        Arc::new(TypeTree::from_nodes(vec![node]).unwrap())
+    }
+
+    /// A table that has a tree for every class at the files' version.
+    struct Table;
+
+    impl ClassLayouts for Table {
+        fn tree(&self, _class_id: i32, unity_version: &str) -> Option<Arc<TypeTree>> {
+            (unity_version == "2022.3.62f2").then(|| tree_of(FROM_TABLE))
+        }
+    }
+
+    /// A table that has no tree for any class.
+    struct NoTrees;
+
+    impl ClassLayouts for NoTrees {
+        fn tree(&self, _class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
+            None
+        }
+    }
+
+    #[test]
+    fn the_tree_of_the_file_comes_first() {
+        let file = file("2022.3.62f2", true);
+        let layouts = FileLayouts::with_classes(&file, &Table);
+        assert_eq!(layouts.get(0).unwrap().root_type(), STORED);
+    }
+
+    #[test]
+    fn types_without_a_tree_use_the_classes() {
+        let file = file("2022.3.62f2", false);
+        let layouts = FileLayouts::with_classes(&file, &Table);
+        assert_eq!(layouts.get(0).unwrap().root_type(), FROM_TABLE);
+    }
+
+    #[test]
+    fn a_table_without_the_class_leaves_no_layout() {
+        let file = file("2022.3.62f2", false);
+        let layouts = FileLayouts::with_classes(&file, &NoTrees);
+        assert!(layouts.get(0).is_err_and(|e| e.code() == "no_layout"));
+    }
+
+    #[test]
+    fn the_classes_get_the_version_of_the_file() {
+        let file = file("2018.4.36f1", false);
+        let layouts = FileLayouts::with_classes(&file, &Table);
+        assert!(layouts.get(0).is_err_and(|e| e.code() == "no_layout"));
+    }
+
+    #[test]
+    fn without_classes_a_type_has_no_layout() {
+        let file = file("2022.3.62f2", false);
+        assert!(
+            FileLayouts::new(&file)
+                .get(0)
+                .is_err_and(|e| e.code() == "no_layout")
+        );
+    }
+
+    /// A table that has a tree for every class but `MonoBehaviour`, which it records having been
+    /// asked about.
+    struct Behaviours(AtomicBool);
+
+    impl ClassLayouts for Behaviours {
+        fn tree(&self, class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
+            self.0
+                .fetch_or(class_id == MONO_BEHAVIOUR, Ordering::Relaxed);
+            (class_id != MONO_BEHAVIOUR).then(|| tree_of(FROM_TABLE))
+        }
+    }
+
+    #[test]
+    fn a_mono_behaviour_is_not_asked_of_the_classes() {
+        let file = file("2022.3.62f2", false);
+        let table = Behaviours(AtomicBool::new(false));
+        let layouts = FileLayouts::with_classes(&file, &table);
+        assert!(layouts.get(1).is_err_and(|e| e.code() == "no_layout"));
+        assert!(!table.0.load(Ordering::Relaxed));
     }
 }

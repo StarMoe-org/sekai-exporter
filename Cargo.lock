@@ -856,6 +856,7 @@ dependencies = [
 name = "sekai-layouts"
 version = "0.0.0"
 dependencies = [
+ "lzma-rs",
  "sekai-unity",
 ]
 

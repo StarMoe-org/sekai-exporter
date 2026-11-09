@@ -154,6 +154,20 @@ fn select(entries: Vec<BundleEntry>, only: &[String]) -> Vec<BundleEntry> {
     entries
 }
 
+/// Why a selection of bundles cannot run here. A selection is not a version, so it must not
+/// replace a complete run or remove files that `roots` already hold.
+fn selection_conflict<'a>(
+    complete_run: bool,
+    mut roots: impl Iterator<Item = &'a Path>,
+) -> Option<String> {
+    if complete_run {
+        return Some("--only needs an <output> that holds no complete run".to_owned());
+    }
+    roots
+        .find(|root| std::fs::read_dir(root).is_ok_and(|mut files| files.next().is_some()))
+        .map(|root| format!("--only needs an empty directory: {}", root.display()))
+}
+
 /// The bundles that another output directory holds.
 struct EarlierRun {
     catalog: Catalog,
@@ -324,6 +338,14 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let catalog = derivations.catalog();
 
     let previous = previous_identity(catalog, region_name).map_err(|e| e.to_string())?;
+    let selection = !options.only.is_empty();
+    if selection {
+        let roots = [&options.tree, &options.storage];
+        let roots = roots.into_iter().flatten().map(PathBuf::as_path);
+        if let Some(conflict) = selection_conflict(previous.is_some(), roots) {
+            return Err(conflict.into());
+        }
+    }
     let identity = {
         let _span = monitor.span("plan", "identity", region_name);
         source
@@ -406,14 +428,16 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &store,
         monitor,
     )?;
-    publish_bucket(
-        &config,
-        options.secrets.as_deref(),
-        &store,
-        &target,
-        &plan,
-        monitor,
-    )?;
+    if !selection {
+        publish_bucket(
+            &config,
+            options.secrets.as_deref(),
+            &store,
+            &target,
+            &plan,
+            monitor,
+        )?;
+    }
 
     if let Some(root) = &options.storage {
         crate::storage::publish(
@@ -430,16 +454,18 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let record = || -> io::Result<()> {
         let text = serde_json::to_string(&identity).map_err(io::Error::other)?;
         let mut batch = catalog.write()?;
-        batch.put_version(region_name, &name, &text)?;
-        batch.set_pointer(region_name, &name)?;
-        batch.put_publication(
-            "local",
-            &target,
-            &PublicationRow {
-                version: name.clone(),
-                revision: pointer.revision.clone(),
-            },
-        )?;
+        if !selection {
+            batch.put_version(region_name, &name, &text)?;
+            batch.set_pointer(region_name, &name)?;
+            batch.put_publication(
+                "local",
+                &target,
+                &PublicationRow {
+                    version: name.clone(),
+                    revision: pointer.revision.clone(),
+                },
+            )?;
+        }
         for (subject, cost) in monitor.costs() {
             batch.put_cost(&CostRow {
                 kind: cost.kind,
@@ -631,6 +657,25 @@ mod tests {
             None
         );
         drop(runs);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_selection_keeps_away_from_complete_runs_and_published_files() {
+        let root = std::env::temp_dir().join(format!("sekai-selection-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (empty, used) = (root.join("empty"), root.join("used"));
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&used).unwrap();
+        std::fs::write(used.join("file"), b"x").unwrap();
+        let missing = root.join("missing");
+
+        let roots = [empty.as_path(), missing.as_path()];
+        assert_eq!(selection_conflict(false, roots.into_iter()), None);
+        assert!(selection_conflict(true, roots.into_iter()).is_some());
+        let roots = [empty.as_path(), used.as_path()];
+        let conflict = selection_conflict(false, roots.into_iter()).unwrap();
+        assert!(conflict.contains("used"), "{conflict}");
         std::fs::remove_dir_all(root).unwrap();
     }
 

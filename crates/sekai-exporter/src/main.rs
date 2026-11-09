@@ -75,6 +75,8 @@ commands:
       Bundles go to <output>/inputs, which holds game data and must stay private.
       A version that matches the last complete run is left alone unless --force
       is given. --only selects bundles by name prefix, with their dependencies.
+      A selection is neither recorded as a version nor sent to a bucket; it needs
+      an <output> without a complete run and empty --tree and --storage folders.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

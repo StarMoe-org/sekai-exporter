@@ -9,7 +9,9 @@ use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
-use sekai_unity::{BlockCache, Bundle, ByteSource, ClassLayouts, NoClasses, SerializedFile};
+use sekai_unity::{
+    BlockCache, Bundle, ByteSource, ClassLayouts, NoClasses, SerializedFile, open_files,
+};
 use sha2::{Digest, Sha256};
 
 use crate::eval::parallel;
@@ -37,14 +39,7 @@ impl Opened {
         classes: &dyn ClassLayouts,
     ) -> sekai_unity::Result<Self> {
         let bundle = Bundle::open(source, id)?;
-        let mut files = Vec::new();
-        for (i, entry) in bundle.entries().iter().enumerate() {
-            if entry.is_serialized() {
-                let file = SerializedFile::parse(&bundle.entry(i, cache))?;
-                let layouts = FileLayouts::with_classes(&file, classes);
-                files.push((i, file, layouts));
-            }
-        }
+        let files = open_files(&bundle, cache, classes)?;
         Ok(Self { bundle, files })
     }
 

@@ -2,16 +2,16 @@
 
 use std::fmt;
 
-/// A TPK file could not be read.
+/// A table file could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TpkError {
+pub struct TableError {
     message: String,
 }
 
-impl TpkError {
+impl TableError {
     /// An error that says what is wrong with the file.
     pub(crate) fn new(message: impl Into<String>) -> Self {
-        TpkError {
+        TableError {
             message: message.into(),
         }
     }
@@ -22,10 +22,10 @@ impl TpkError {
     }
 }
 
-impl fmt::Display for TpkError {
+impl fmt::Display for TableError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TPK: {}", self.message)
+        write!(f, "layout table: {}", self.message)
     }
 }
 
-impl std::error::Error for TpkError {}
+impl std::error::Error for TableError {}

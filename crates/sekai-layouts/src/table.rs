@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use sekai_unity::{ClassLayouts, TypeTree, TypeTreeNode};
 
-use crate::error::TpkError;
+use crate::error::TableError;
 use crate::tpk;
 
 /// The release type of a version that states none, a final release.
@@ -48,7 +48,7 @@ pub(crate) struct Node {
 
 impl VersionTable {
     /// Reads the type tree information of a TPK file.
-    pub fn from_tpk(bytes: &[u8]) -> Result<Self, TpkError> {
+    pub fn from_tpk(bytes: &[u8]) -> Result<Self, TableError> {
         tpk::read(bytes)
     }
 
@@ -61,6 +61,11 @@ impl VersionTable {
             .take_while(|entry| entry.from <= version)
             .last()?
             .release_root
+    }
+
+    /// The SHA-256 of the TPK file.
+    pub(crate) fn sha256(&self) -> [u8; 32] {
+        self.sha256
     }
 
     fn string(&self, index: u16) -> Option<String> {

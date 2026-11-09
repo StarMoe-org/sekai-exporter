@@ -8,18 +8,18 @@ use sekai_pipeline::{BundleInput, parallel};
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
 use sekai_unity::index::{BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file};
 use sekai_unity::{
-    BlockCache, BoundedBlockCache, Bundle, ByteSource, ClassLayouts, SerializedFile,
+    BlockCache, BoundedBlockCache, Bundle, ByteSource, ClassLayouts, SerializedFile, open_files,
 };
 use sha2::{Digest, Sha256};
 
-use crate::export::{self, Source};
+use crate::export::{self, LayoutTables, Source};
 
 const BLOCK_CACHE_BYTES: usize = 256 << 20;
 
 struct Options {
     input: PathBuf,
     output: PathBuf,
-    class_table: Option<PathBuf>,
+    tables: LayoutTables,
     threads: usize,
 }
 
@@ -28,11 +28,12 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut parser = lexopt::Parser::from_args(args);
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
-    let mut class_table = None;
+    let mut tables = LayoutTables::default();
     while let Some(arg) = parser.next()? {
         match arg {
             Long("threads") => threads = parser.value()?.parse()?,
-            Long("class-table") => class_table = Some(PathBuf::from(parser.value()?)),
+            Long("class-table") => tables.classes = Some(PathBuf::from(parser.value()?)),
+            Long("script-table") => tables.scripts = Some(PathBuf::from(parser.value()?)),
             Value(v) => positional.push(PathBuf::from(v)),
             _ => return Err(arg.unexpected()),
         }
@@ -43,7 +44,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     Ok(Options {
         input,
         output,
-        class_table,
+        tables,
         threads: threads.max(1),
     })
 }
@@ -60,15 +61,7 @@ fn load(
     cache: &dyn BlockCache,
 ) -> Result<Loaded, String> {
     let bundle = Bundle::open(input.source, input.sha256).map_err(|e| e.to_string())?;
-    let mut files = Vec::new();
-    for (i, entry) in bundle.entries().iter().enumerate() {
-        if entry.is_serialized() {
-            let file = SerializedFile::parse(&bundle.entry(i, cache))
-                .map_err(|e| format!("{}: {e}", entry.path))?;
-            let layouts = FileLayouts::with_classes(&file, classes);
-            files.push((i, file, layouts));
-        }
-    }
+    let files = open_files(&bundle, cache, classes).map_err(|e| e.to_string())?;
     Ok(Loaded { bundle, files })
 }
 
@@ -101,7 +94,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         manifest,
         inputs,
         classes,
-    } = export::source(&options.input, options.class_table.as_deref())?;
+    } = export::source(&options.input, &options.tables)?;
     let mut names: Vec<&str> = manifest.iter().map(|entry| entry.name.as_str()).collect();
     names.sort_unstable();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);

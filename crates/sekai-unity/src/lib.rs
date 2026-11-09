@@ -21,7 +21,7 @@ pub use bundle::{Bundle, Entry, StoredFile, store_files};
 pub use cache::{BlockCache, BoundedBlockCache, NoBlockCache};
 pub use endian::Endian;
 pub use error::{Error, Result};
-pub use index::{ClassLayouts, NoClasses};
+pub use index::{ClassLayouts, NoClasses, open_files};
 pub use layout::Layout;
 pub use read::{Field, Scalar, Visitor, read_object};
 pub use serialized::SerializedFile;

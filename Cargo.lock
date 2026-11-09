@@ -912,8 +912,11 @@ dependencies = [
 name = "sekai-layouts"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "lzma-rs",
  "sekai-unity",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

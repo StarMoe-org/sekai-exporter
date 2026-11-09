@@ -184,7 +184,7 @@ struct Options {
     input: PathBuf,
     output: PathBuf,
     tree: Option<PathBuf>,
-    class_table: Option<PathBuf>,
+    tables: LayoutTables,
     threads: usize,
     memory: Option<u64>,
     plain: bool,
@@ -196,7 +196,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut tree = None;
-    let mut class_table = None;
+    let mut tables = LayoutTables::default();
     let mut memory = None;
     let mut plain = false;
     while let Some(arg) = parser.next()? {
@@ -205,7 +205,8 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("memory") => memory = Some(budget::parse_bytes(&parser.value()?.string()?)?),
             Long("plain") => plain = true,
             Long("tree") => tree = Some(PathBuf::from(parser.value()?)),
-            Long("class-table") => class_table = Some(PathBuf::from(parser.value()?)),
+            Long("class-table") => tables.classes = Some(PathBuf::from(parser.value()?)),
+            Long("script-table") => tables.scripts = Some(PathBuf::from(parser.value()?)),
             Value(v) => positional.push(PathBuf::from(v)),
             _ => return Err(arg.unexpected()),
         }
@@ -217,11 +218,20 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         input,
         output,
         tree,
-        class_table,
+        tables,
         threads: threads.max(1),
         memory,
         plain,
     })
+}
+
+/// The layout tables named on the command line.
+#[derive(Debug, Default)]
+pub(crate) struct LayoutTables {
+    /// A TPK file of engine class layouts.
+    pub(crate) classes: Option<PathBuf>,
+    /// A table of script layouts.
+    pub(crate) scripts: Option<PathBuf>,
 }
 
 /// What an export reads.
@@ -238,11 +248,12 @@ pub(crate) struct Source<'a> {
 /// directory of bundles.
 pub(crate) fn source<'a>(
     input: &'a Path,
-    class_table: Option<&Path>,
+    tables: &LayoutTables,
 ) -> Result<Source<'a>, lexopt::Error> {
-    match class_table {
-        Some(table) => client::source(input, table),
-        None => directory(input),
+    match (&tables.classes, &tables.scripts) {
+        (Some(classes), scripts) => client::source(input, classes, scripts.as_deref()),
+        (None, Some(_)) => Err("--script-table needs --class-table".into()),
+        (None, None) => directory(input),
     }
 }
 
@@ -310,7 +321,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         mut manifest,
         inputs,
         classes,
-    } = source(&options.input, options.class_table.as_deref())?;
+    } = source(&options.input, &options.tables)?;
     let inputs = inputs.as_ref();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     {

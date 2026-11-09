@@ -10,7 +10,11 @@ mod client {
     use crate::export::Source;
 
     /// Refuses a client package that this build cannot read.
-    pub(crate) fn source(_package: &Path, _table: &Path) -> Result<Source<'static>, lexopt::Error> {
+    pub(crate) fn source(
+        _package: &Path,
+        _classes: &Path,
+        _scripts: Option<&Path>,
+    ) -> Result<Source<'static>, lexopt::Error> {
         Err("this build has no client source: enable the client feature".into())
     }
 }
@@ -75,13 +79,15 @@ const USAGE: &str = "\
 usage: sekai-exporter <command> [options]
 
 commands:
-  export <input> <output> [--class-table <file>] [--tree <dir>] [--threads <n>]
-         [--memory <bytes>] [--plain]
+  export <input> <output> [--class-table <file>] [--script-table <file>]
+         [--tree <dir>] [--threads <n>] [--memory <bytes>] [--plain]
       Convert every bundle file under <input>, named by its path under <input>
       with / separators, to canonical assets in <output>/store, and list them in
       <output>/assets.tsv. With --class-table, a TPK file of engine class
       layouts, <input> is instead a client package (APK or XAPK): its player
       data is one bundle named player, and its assets are named by load path.
+      --script-table is a gzipped JSON lines file of script layouts, so that
+      MonoBehaviour objects can be read too.
       Each bundle is evaluated with the bundles that hold
       the external files it names. What became of every object of each bundle
       is in <output>/ledger.tsv. CPU and memory use and the time of each stage
@@ -99,10 +105,11 @@ commands:
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.
-  objects <input> <output> [--class-table <file>] [--threads <n>]
+  objects <input> <output> [--class-table <file>] [--script-table <file>]
+          [--threads <n>]
       Write the object document of every bundle file under <input> to
       <output>/<bundle>/_objects.json. Payloads larger than the inline limit are
-      written to <output>/_payloads/<aa>/<sha256>.bin. --class-table is the same
+      written to <output>/_payloads/<aa>/<sha256>.bin. The tables are the same
       as for export.
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the

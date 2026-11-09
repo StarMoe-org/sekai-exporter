@@ -9,6 +9,8 @@ use std::sync::Arc;
 
 use sha2::{Digest, Sha256};
 
+use crate::bundle::Bundle;
+use crate::cache::BlockCache;
 use crate::class_id::class_name;
 use crate::error::{Error, Result};
 use crate::layout::Layout;
@@ -28,6 +30,12 @@ const CONTAINER_TARGETS: [&str; 2] = ["asset", "second"];
 pub trait ClassLayouts: Sync {
     /// The type tree of `class_id` in the Unity version `unity_version`.
     fn tree(&self, class_id: i32, unity_version: &str) -> Option<Arc<TypeTree>>;
+
+    /// The type tree of a `MonoBehaviour` whose script is `script`, as
+    /// `"<assembly>/<namespace>.<class>"`, in the Unity version `unity_version`.
+    fn script_tree(&self, _script: &str, _unity_version: &str) -> Option<Arc<TypeTree>> {
+        None
+    }
 
     /// The hash of the data the trees come from, when there are any trees.
     fn identity(&self) -> Option<[u8; 32]>;
@@ -62,13 +70,18 @@ impl FileLayouts {
 
     /// Compiles the type trees of a file, taking the layout of types without a tree from
     /// `classes` at the file's Unity version. A `MonoBehaviour` stores its script's fields after
-    /// its engine header, so it gets [`Error::NoLayout`] whatever `classes` holds.
+    /// its engine header, and the script is not known here, so it gets [`Error::NoLayout`].
     pub fn with_classes(file: &SerializedFile, classes: &dyn ClassLayouts) -> Self {
-        let types = file
-            .types
-            .iter()
-            .map(|t| type_layout(t, &file.unity_version, classes))
-            .collect();
+        TypeLayouts {
+            path: "",
+            file,
+            classes,
+            scripts: &ScriptNames::default(),
+        }
+        .compile()
+    }
+
+    fn from_types(file: &SerializedFile, types: Vec<Result<Layout>>) -> Self {
         let referenced = file
             .referenced_types
             .iter()
@@ -86,24 +99,120 @@ impl FileLayouts {
     }
 }
 
-/// Compiles the layout of a type: the tree the file stores, or else the tree of its class in
-/// `classes`.
-fn type_layout(
-    serialized: &SerializedType,
-    unity_version: &str,
+/// The names of the scripts of a bundle, by the file and the path ID of each `MonoScript`.
+#[derive(Debug, Default)]
+struct ScriptNames(HashMap<String, HashMap<i64, String>>);
+
+impl ScriptNames {
+    /// Reads every `MonoScript` of `files`, which are entries of `bundle`. Script names are used
+    /// only with layouts from `classes`, so without any nothing is read.
+    fn read(
+        bundle: &Bundle,
+        files: &[(usize, SerializedFile)],
+        cache: &dyn BlockCache,
+        classes: &dyn ClassLayouts,
+    ) -> Self {
+        if classes.identity().is_none() {
+            return Self::default();
+        }
+        let holders = files
+            .iter()
+            .filter(|(_, file)| file.objects.iter().any(|o| o.class_id == MONO_SCRIPT));
+        let names = holders.map(|(entry, file)| {
+            let path = &bundle.entries()[*entry].path;
+            let open = OpenFile {
+                path,
+                file,
+                source: &bundle.entry(*entry, cache),
+                layouts: &FileLayouts::with_classes(file, classes),
+            };
+            (path.clone(), names_in_file(&open))
+        });
+        Self(names.collect())
+    }
+
+    /// The name of the script a type refers to, when it is known. `path` is the file of the type.
+    fn of(&self, path: &str, file: &SerializedFile, serialized: &SerializedType) -> Option<&str> {
+        let index = usize::try_from(serialized.script_type_index).ok()?;
+        let script = file.scripts.get(index)?;
+        let holder = match usize::try_from(script.file_index).ok()?.checked_sub(1) {
+            None => path,
+            Some(external) => file.externals.get(external)?.path.rsplit('/').next()?,
+        };
+        Some(self.0.get(holder)?.get(&script.path_id)?)
+    }
+}
+
+/// The name of each `MonoScript` of a file that can be read, by path ID.
+fn names_in_file(open: &OpenFile<'_>) -> HashMap<i64, String> {
+    let scripts = open.file.objects.iter().enumerate();
+    scripts
+        .filter(|(_, object)| object.class_id == MONO_SCRIPT)
+        .filter_map(|(index, object)| {
+            let mut visitor = IndexVisitor::default();
+            open.read(index, &mut visitor).ok()?;
+            Some((object.path_id, visitor.script_name()?))
+        })
+        .collect()
+}
+
+/// Where the layouts of the types of one file come from.
+struct TypeLayouts<'a> {
+    /// The entry path of the file.
+    path: &'a str,
+    file: &'a SerializedFile,
+    classes: &'a dyn ClassLayouts,
+    scripts: &'a ScriptNames,
+}
+
+impl TypeLayouts<'_> {
+    fn compile(&self) -> FileLayouts {
+        let types = self.file.types.iter().map(|t| self.layout(t)).collect();
+        FileLayouts::from_types(self.file, types)
+    }
+
+    /// Compiles the layout of a type: the tree the file stores, or else the tree of its class, or
+    /// of its script for a `MonoBehaviour`, in `classes`.
+    fn layout(&self, serialized: &SerializedType) -> Result<Layout> {
+        if let Some(tree) = &serialized.tree {
+            return Layout::compile(tree);
+        }
+        let class_id = serialized.class_id;
+        let unity_version = &self.file.unity_version;
+        let tree = if class_id == MONO_BEHAVIOUR {
+            self.scripts
+                .of(self.path, self.file, serialized)
+                .and_then(|script| self.classes.script_tree(script, unity_version))
+        } else {
+            self.classes.tree(class_id, unity_version)
+        };
+        Layout::compile(&*tree.ok_or(Error::NoLayout { class_id })?)
+    }
+}
+
+/// Each serialized file of `bundle`, in directory order, with its entry index and its layouts.
+pub fn open_files(
+    bundle: &Bundle,
+    cache: &dyn BlockCache,
     classes: &dyn ClassLayouts,
-) -> Result<Layout> {
-    if let Some(tree) = &serialized.tree {
-        return Layout::compile(tree);
-    }
-    let class_id = serialized.class_id;
-    if class_id == MONO_BEHAVIOUR {
-        return Err(Error::NoLayout { class_id });
-    }
-    let tree = classes
-        .tree(class_id, unity_version)
-        .ok_or(Error::NoLayout { class_id })?;
-    Layout::compile(&tree)
+) -> Result<Vec<(usize, SerializedFile, FileLayouts)>> {
+    let serialized = bundle.entries().iter().enumerate();
+    let files = serialized
+        .filter(|(_, entry)| entry.is_serialized())
+        .map(|(index, _)| Ok((index, SerializedFile::parse(&bundle.entry(index, cache))?)))
+        .collect::<Result<Vec<_>>>()?;
+    let scripts = ScriptNames::read(bundle, &files, cache, classes);
+    let compiled = files.into_iter().map(|(index, file)| {
+        let layouts = TypeLayouts {
+            path: &bundle.entries()[index].path,
+            file: &file,
+            classes,
+            scripts: &scripts,
+        }
+        .compile();
+        (index, file, layouts)
+    });
+    Ok(compiled.collect())
 }
 
 impl ReferenceTypes for FileLayouts {
@@ -567,7 +676,7 @@ mod tests {
 
     use super::*;
     use crate::endian::Endian;
-    use crate::serialized::{FileHeader, ObjectInfo};
+    use crate::serialized::{FileHeader, ObjectInfo, ScriptRef};
     use crate::typetree::TypeTreeNode;
 
     /// The class of the files' type.
@@ -708,6 +817,69 @@ mod tests {
                 .get(0)
                 .is_err_and(|e| e.code() == "no_layout")
         );
+    }
+
+    const SCRIPT: &str = "Assembly-CSharp/Game.Dialog";
+    const SCRIPT_FILE: &str = "scripts.assets";
+
+    /// A table with a tree for the script `SCRIPT` only.
+    struct Scripted;
+
+    impl ClassLayouts for Scripted {
+        fn tree(&self, _class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
+            None
+        }
+
+        fn script_tree(&self, script: &str, _unity_version: &str) -> Option<Arc<TypeTree>> {
+            (script == SCRIPT).then(|| tree_of(FROM_TABLE))
+        }
+
+        fn identity(&self) -> Option<[u8; 32]> {
+            Some([2; 32])
+        }
+    }
+
+    /// The layout of the `MonoBehaviour` type of a file whose script is object 7 of the file
+    /// `file_index` refers to, when `SCRIPT_FILE` names `path_id` as `SCRIPT`.
+    fn behaviour_layout(file_index: i32, path_id: i64) -> Result<String> {
+        let mut file = file("2022.3.62f2", false);
+        file.types[1].script_type_index = 0;
+        file.scripts = vec![ScriptRef {
+            file_index,
+            path_id: 7,
+        }];
+        file.externals = vec![External {
+            path: format!("archive:/CAB/{SCRIPT_FILE}"),
+            guid: [0; 16],
+            kind: 0,
+        }];
+        let in_file = HashMap::from([(path_id, SCRIPT.to_owned())]);
+        let scripts = ScriptNames(HashMap::from([(SCRIPT_FILE.to_owned(), in_file)]));
+        let path = if file_index == 0 {
+            SCRIPT_FILE
+        } else {
+            "level0"
+        };
+        let layouts = TypeLayouts {
+            path,
+            file: &file,
+            classes: &Scripted,
+            scripts: &scripts,
+        }
+        .compile();
+        layouts.get(1).map(|layout| layout.root_type().to_owned())
+    }
+
+    #[test]
+    fn a_mono_behaviour_takes_the_tree_of_its_script() {
+        assert_eq!(behaviour_layout(1, 7).unwrap(), FROM_TABLE);
+        assert_eq!(behaviour_layout(0, 7).unwrap(), FROM_TABLE);
+    }
+
+    #[test]
+    fn a_mono_behaviour_with_an_unknown_script_has_no_layout() {
+        assert!(behaviour_layout(1, 8).is_err_and(|e| e.code() == "no_layout"));
+        assert!(behaviour_layout(2, 7).is_err_and(|e| e.code() == "no_layout"));
     }
 
     /// A table that has a tree for every class but `MonoBehaviour`, which it records having been

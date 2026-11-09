@@ -6,7 +6,7 @@ An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the g
 
 ## Status
 
-In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8, crunched DXT5, ASTC LDR and ASTC HDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust. `sekai-encode` writes PNG, lossless and lossy WebP, OpenEXR, FLAC, MP3 and AAC. Converters for textures, sprites, fonts, text assets, story scenes, CRI movies, CRI cue sheets, and Live2D models and motion sets are in place, and [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet. `sekai-exporter export` and `update` evaluate bundles one at a time into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view. The core also builds for WebAssembly, and continuous integration compares its output with the native build. The documents in [`docs/`](docs/) describe the design that the code implements.
+In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8, crunched DXT5, ASTC LDR and ASTC HDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust. `sekai-encode` writes PNG, lossless and lossy WebP, OpenEXR, FLAC, MP3 and AAC. Converters for textures, sprites, fonts, text assets, story scenes, CRI movies, CRI cue sheets, Live2D models and motion sets, and costume parts and motions are in place, and [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet. `sekai-exporter export` and `update` evaluate bundles one at a time into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view. The core also builds for WebAssembly, and continuous integration compares its output with the native build. The documents in [`docs/`](docs/) describe the design that the code implements.
 
 ## What it does
 
@@ -33,6 +33,9 @@ Why the project is built around converting rather than unpacking is explained in
 | [Texture](docs/spec/texture.md) | The specification of the texture form |
 | [Live2D](docs/spec/live2d.md) | The specification of the Live2D model and motion-set forms |
 | [Clip documents](docs/spec/clip-documents.md) | The specification of animation clip documents |
+| [Model files](docs/spec/model.md) | The specification of model files: a prefab as GLB with external images |
+| [Component documents](docs/spec/component-documents.md) | The specification of component documents: the components of a prefab and their references |
+| [Costumes](docs/spec/costume.md) | The specification of the costume part and motion forms |
 | [Glossary](docs/glossary.md) | Terms used throughout the documents and the code |
 | [Third-party sources](docs/third-party.md) | The upstream specification, library or reference behind each component |
 | [Contributing](CONTRIBUTING.md) | Where changes go, rules and checks |

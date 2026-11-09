@@ -30,7 +30,7 @@
 | `timeline` | Timeline 资产，转换为时间轴文档 |
 | `particles` | 粒子系统，转换为粒子文档 |
 
-`model`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。这四种资产形式没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容，如规则 4 所述。`animation` 把 `AnimationClip` 解码为 Live2D 形式所包含的[剪辑文档](spec/clip-documents.zh-CN.md)，目前尚不单独产出资产。`audio` 目前尚不转换 `AudioClip`。
+`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。这三种资产形式没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容，如规则 4 所述。`model` 把预制体读成[模型文件](spec/model.zh-CN.md)与[组件文档](spec/component-documents.zh-CN.md)，`animation` 把 `AnimationClip` 解码为[剪辑文档](spec/clip-documents.zh-CN.md)。Live2D 形式与服装形式包含它们；这两个转换器族目前都不单独产出资产，也不产出 glTF 动画。`audio` 目前尚不转换 `AudioClip`。
 
 `sekai-moesekai` 中本游戏专有、服务于默认使用者的转换器族：
 
@@ -39,9 +39,9 @@
 | `scenario` | 剧本对象，转换为剧本文档 |
 | `episode` | 剧情的一话：一条数据表记录，以及其所引用的全部已解析资产 |
 | `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.md) |
-| `costume` | 供 3D 浏览的服装组合 |
+| `costume` | 供 3D 浏览的服装部件、动作与组合，见[服装形式](spec/costume.zh-CN.md) |
 
-`costume` 这个 feature 已定义，目前尚不产出任何内容。它的资产形式同样没有根规则，因此不含它的构建不会以 `not_compiled` 报告任何内容。
+`costume` 产出 `costume-model` 与 `costume-motion` 两种形式；每套服装由哪些部件与动作组成的组合，目前尚不产出。
 
 [storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建会拒绝 `update --storage`，并且不会以 `not_compiled` 报告任何资产。
 

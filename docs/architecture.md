@@ -62,7 +62,7 @@ Assets are named by their logical path and asset form, inside the directory name
 
 The lazy evaluator names and fingerprints the assets of a bundle from the unit of that bundle, as the streaming evaluator does, and writes the same documents and members. A request opens only the window of its bundle and reads object bytes only from the bundles of the closure of the asset. Concurrent requests for one fingerprint compute it once. A request can name an asset or a bundle and object.
 
-On `wasm32` the core produces textures, sprites, audio as FLAC, text, fonts, scenarios, and Live2D models and motion sets, and they are byte-identical to native output. Video needs the `ffmpeg` program and reports `encoder_unavailable`. An asset estimated to need more than 2 GiB of memory reports `too_large`.
+On `wasm32` the core produces textures, sprites, audio as FLAC, text, fonts, scenarios, Live2D models and motion sets, and costume parts and motions, and they are byte-identical to native output. Video needs the `ffmpeg` program and reports `encoder_unavailable`. An asset estimated to need more than 2 GiB of memory reports `too_large`.
 
 ## Disciplines the model depends on
 

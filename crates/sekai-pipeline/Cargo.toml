@@ -10,15 +10,16 @@ publish.workspace = true
 
 [dependencies]
 sekai-unity.workspace = true
+sekai-format.workspace = true
 sekai-convert.workspace = true
 sekai-encode.workspace = true
 sekai-catalog.workspace = true
 sekai-game.workspace = true
 sekai-layouts = { workspace = true, optional = true }
+sha2 = "0.11.1"
 
 [dev-dependencies]
 sekai-convert = { workspace = true, features = ["image"] }
-sha2 = "0.11.1"
 
 [features]
 client = ["dep:sekai-layouts", "sekai-game/client"]

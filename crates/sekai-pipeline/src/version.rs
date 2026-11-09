@@ -7,6 +7,7 @@ use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
 use sekai_unity::{BlockCache, Bundle, ByteSource, SerializedFile};
+use sha2::{Digest, Sha256};
 
 /// One bundle: its container and its serialized files.
 struct Opened {
@@ -139,6 +140,23 @@ impl<'c> Version<'c> {
                 id.path_id, bundle.files[id.file].path, bundle.name
             ),
         )
+    }
+
+    /// The SHA-256 of each resource entry of a bundle that can be read, in directory order.
+    pub fn resource_hashes(&self, bundle: usize) -> Vec<[u8; 32]> {
+        let bundle = &self.bundles[bundle].bundle;
+        bundle
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_serialized())
+            .filter_map(|(i, entry)| {
+                let size = usize::try_from(entry.size).ok()?;
+                let source = bundle.entry(i, self.cache);
+                let chunk = source.read(0, size).ok()?;
+                Some(Sha256::digest(&*chunk).into())
+            })
+            .collect()
     }
 
     /// The index of the version.

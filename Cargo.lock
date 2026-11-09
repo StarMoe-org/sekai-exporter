@@ -590,6 +590,7 @@ dependencies = [
  "sekai-catalog",
  "sekai-convert",
  "sekai-encode",
+ "sekai-format",
  "sekai-game",
  "sekai-layouts",
  "sekai-unity",

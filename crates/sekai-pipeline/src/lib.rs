@@ -4,6 +4,9 @@
 
 #[cfg(feature = "client")]
 pub mod client;
+pub mod eval;
+pub mod naming;
 pub mod version;
 
+pub use eval::{Derivations, Derived, Evaluation, MemoryDerivations, Output, evaluate, parallel};
 pub use version::{BundleError, BundleInput, Version};

@@ -4,10 +4,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sekai_game::obfuscation::deobfuscate;
+use sekai_pipeline::parallel;
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
 use sekai_unity::index::{BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file};
 use sekai_unity::{BlockCache, BoundedBlockCache, Bundle, ByteSource, SerializedFile};
@@ -65,32 +64,6 @@ fn load(path: &Path, cache: &dyn BlockCache) -> Result<Loaded, String> {
         }
     }
     Ok(Loaded { bundle, files })
-}
-
-/// Runs `job` for indices `0..n` on `threads` threads and returns the results in index order.
-fn parallel<T: Send>(n: usize, threads: usize, job: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<T>>> = Mutex::new((0..n).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n.max(1)) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let r = job(i);
-                    results.lock().unwrap()[i] = Some(r);
-                }
-            });
-        }
-    });
-    results
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .map(|r| r.expect("every index ran"))
-        .collect()
 }
 
 struct DiskPayloads<'a> {

@@ -54,7 +54,7 @@ In `sekai-encode`:
 | (always) | FLAC, the canonical audio form | `flacenc` |
 | `webp` | Lossy WebP | libwebp, statically linked |
 | `mp3` | MP3 | LAME, loaded at run time |
-| `aac` | AAC audio tracks in MP4 | libavcodec 63 with libavutil 61, loaded at run time |
+| `aac` | AAC audio tracks in MP4 | libavcodec 59 to 63 with the libavutil of the same FFmpeg release (FFmpeg 5.1 to 9.0), loaded at run time on 64-bit platforms |
 
 The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The default build includes `mp3` and `aac`, so it needs LAME and libavcodec installed at run time; the exporter checks for them when it starts and names the library that is missing. The licences of these libraries are listed in [Third-party sources](third-party.md).
 

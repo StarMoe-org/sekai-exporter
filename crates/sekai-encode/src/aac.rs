@@ -4,8 +4,8 @@
 //! the MP4 writer can place them without parsing a container.
 //!
 //! The libraries are driven through their options and functions. The few structure fields that
-//! have no accessor are read at offsets known per major version, listed in [`LAYOUTS`]; other
-//! versions are reported as unavailable.
+//! have no accessor are read at offsets known per major version on 64-bit platforms, listed in
+//! [`LAYOUTS`]; other versions and platforms are reported as unavailable.
 
 #![allow(unsafe_code)]
 
@@ -44,13 +44,43 @@ struct Layout {
     frame_channel_layout: usize,
 }
 
-const LAYOUTS: [Layout; 1] = [Layout {
-    avcodec_major: 63,
-    avutil_major: 61,
-    context_sample_format: 348,
-    frame_sample_rate: 180,
-    frame_channel_layout: 384,
-}];
+const LAYOUTS: [Layout; 5] = [
+    Layout {
+        avcodec_major: 59,
+        avutil_major: 57,
+        context_sample_format: 360,
+        frame_sample_rate: 208,
+        frame_channel_layout: 448,
+    },
+    Layout {
+        avcodec_major: 60,
+        avutil_major: 58,
+        context_sample_format: 360,
+        frame_sample_rate: 208,
+        frame_channel_layout: 448,
+    },
+    Layout {
+        avcodec_major: 61,
+        avutil_major: 59,
+        context_sample_format: 348,
+        frame_sample_rate: 192,
+        frame_channel_layout: 408,
+    },
+    Layout {
+        avcodec_major: 62,
+        avutil_major: 60,
+        context_sample_format: 348,
+        frame_sample_rate: 180,
+        frame_channel_layout: 384,
+    },
+    Layout {
+        avcodec_major: 63,
+        avutil_major: 61,
+        context_sample_format: 348,
+        frame_sample_rate: 180,
+        frame_channel_layout: 384,
+    },
+];
 const FRAME_NB_SAMPLES: usize = 112;
 const FRAME_FORMAT: usize = 116;
 const PACKET_DATA: usize = 24;
@@ -225,6 +255,11 @@ pub fn encode_with(
 }
 
 fn find_layout(api: &Api<'_>) -> Result<Layout, EncodeError> {
+    if size_of::<usize>() != 8 {
+        return Err(unavailable(
+            "the structure layouts are known for 64-bit builds".to_owned(),
+        ));
+    }
     let codec_version: Symbol<'_, VersionFn> = api.codec(b"avcodec_version\0")?;
     let util_version: Symbol<'_, VersionFn> = api.util(b"avutil_version\0")?;
     // SAFETY: both functions take no arguments and return a number.

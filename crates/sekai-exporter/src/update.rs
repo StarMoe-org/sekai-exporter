@@ -310,7 +310,8 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     let (version, errors) = {
         let _span = monitor.span("open", "version", region_name);
-        Version::open(bundles, &cache)
+        Version::open_indexed(bundles, &cache, &catalog.bundle_indexes(), options.threads)
+            .map_err(|e| e.to_string())?
     };
     for e in &errors {
         eprintln!("{}: {}: {}", e.name, e.code, e.message);

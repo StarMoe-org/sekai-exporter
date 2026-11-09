@@ -1,12 +1,14 @@
 //! A version opened from the Unity-built fixtures serves objects, references and textures.
 
+use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sekai_convert::image::Texture;
 use sekai_convert::{Content, Context, Converter, PPtr};
-use sekai_pipeline::{BundleInput, Version};
-use sekai_unity::NoBlockCache;
+use sekai_pipeline::{BundleIndexes, BundleInput, NoBundleIndexes, Version};
+use sekai_unity::{ByteSource, Chunk, NoBlockCache};
 use sha2::{Digest, Sha256};
 
 fn input(file: &str, name: &str) -> BundleInput {
@@ -26,6 +28,77 @@ fn fixtures() -> Vec<BundleInput> {
         input("fixture_scene", "fixture_scene"),
         input("fixture_data", "fixture_data"),
     ]
+}
+
+#[derive(Default)]
+struct MemoryIndexes(Mutex<BTreeMap<[u8; 32], Vec<u8>>>);
+
+impl BundleIndexes for MemoryIndexes {
+    fn get(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().unwrap().get(bundle).cloned())
+    }
+
+    fn put(&self, bundle: [u8; 32], index: Vec<u8>) -> io::Result<()> {
+        self.0.lock().unwrap().insert(bundle, index);
+        Ok(())
+    }
+}
+
+/// A source with no bytes behind it, which shows that a bundle was not read.
+struct Gone;
+
+impl ByteSource for Gone {
+    fn len(&self) -> u64 {
+        0
+    }
+
+    fn read(&self, offset: u64, len: usize) -> sekai_unity::Result<Chunk<'_>> {
+        Err(sekai_unity::Error::Truncated {
+            what: "a bundle that must not be read",
+            offset,
+            needed: len as u64,
+            available: 0,
+        })
+    }
+}
+
+/// Everything the index of a version says, in order.
+fn listing(version: &Version<'_>) -> String {
+    let bundles = version.index().bundles().len();
+    let hashes: Vec<_> = (0..bundles).map(|b| version.resource_hashes(b)).collect();
+    format!("{:?} {hashes:?}", version.index().bundles())
+}
+
+#[test]
+fn a_stored_index_replaces_reading_the_bundle() {
+    let indexes = MemoryIndexes::default();
+    let (first, errors) = Version::open_indexed(fixtures(), &NoBlockCache, &indexes, 4).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(indexes.0.lock().unwrap().len(), 2);
+    let unread = fixtures()
+        .into_iter()
+        .map(|input| BundleInput {
+            source: Arc::new(Gone),
+            ..input
+        })
+        .collect();
+    let (second, errors) = Version::open_indexed(unread, &NoBlockCache, &indexes, 1).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(listing(&first), listing(&second));
+    let id = find(&second, "small");
+    let error = second.object(id).map(|_| ()).unwrap_err();
+    assert_eq!(error.code, "truncated_file");
+}
+
+#[test]
+fn opening_does_not_depend_on_threads() {
+    let open = |threads| {
+        let (version, errors) =
+            Version::open_indexed(fixtures(), &NoBlockCache, &NoBundleIndexes, threads).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        listing(&version)
+    };
+    assert_eq!(open(1), open(8));
 }
 
 fn find(version: &Version<'_>, name: &str) -> sekai_convert::ObjectId {

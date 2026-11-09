@@ -23,6 +23,8 @@ Work is reduced in this order, and each step is applied before the next is consi
 
 **Block cache.** UnityFS stores data in LZ4 or LZMA blocks. Decompressed blocks are cached under the key `(bundle content hash, block index)`, and the cache counts against the memory budget. Reading an object decompresses only the blocks that contain it.
 
+**Bundle indexes.** The index of a bundle, with the hashes of its resource entries, is a function of the bundle bytes alone, so it is stored in the catalog under their SHA-256. Opening a version reads the stored index of every bundle it has seen before and parses only the new ones. A bundle is parsed again when an object or a resource of it is read, and only the most recently used bundles stay parsed.
+
 ## Scheduling
 
 - One scheduler runs on standard library threads, and its tasks are the nodes of the derivation graph.

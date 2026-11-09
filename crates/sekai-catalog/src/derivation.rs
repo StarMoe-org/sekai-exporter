@@ -27,6 +27,32 @@ pub trait Derivations: Sync {
     }
 }
 
+/// The stored indexes of bundles, by the SHA-256 of the bundle bytes.
+pub trait BundleIndexes: Sync {
+    /// The stored index of a bundle, if there is one.
+    fn get(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>>;
+    /// Stores the index of a bundle.
+    fn put(&self, bundle: [u8; 32], index: Vec<u8>) -> io::Result<()>;
+    /// Makes every stored index durable.
+    fn flush(&self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// [`BundleIndexes`] that keep nothing, so every bundle is indexed.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoBundleIndexes;
+
+impl BundleIndexes for NoBundleIndexes {
+    fn get(&self, _bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    fn put(&self, _bundle: [u8; 32], _index: Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// [`Derivations`] held in memory.
 #[derive(Debug, Default)]
 pub struct MemoryDerivations(Mutex<BTreeMap<[u8; 32], Derived>>);

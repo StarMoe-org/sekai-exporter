@@ -13,10 +13,12 @@ use redb::{
 };
 use sekai_format::AssetDocument;
 
-use crate::derivation::{Derivations, Derived};
+use crate::derivation::{BundleIndexes, Derivations, Derived};
 use crate::store::{Key, LocalStore, parse_hex};
 
 const DERIVATIONS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("derivations");
+const BUNDLE_INDEXES: TableDefinition<'_, &[u8; 32], &[u8]> =
+    TableDefinition::new("bundle_indexes");
 /// Form, fingerprint, document and error code.
 type AssetValue<'a> = (&'a str, &'a str, &'a str, Option<&'a str>);
 const ASSETS: TableDefinition<'_, (&str, &str), AssetValue<'_>> = TableDefinition::new("assets");
@@ -108,6 +110,7 @@ impl Catalog {
     fn init(db: Database) -> io::Result<Self> {
         let tx = db.begin_write().map_err(other)?;
         tx.open_table(DERIVATIONS).map_err(other)?;
+        tx.open_table(BUNDLE_INDEXES).map_err(other)?;
         tx.open_table(ASSETS).map_err(other)?;
         tx.open_table(BUNDLES).map_err(other)?;
         tx.open_table(VERSIONS).map_err(other)?;
@@ -235,6 +238,14 @@ impl Catalog {
         }))
     }
 
+    /// The catalog as the [`BundleIndexes`] of opening a version.
+    pub fn bundle_indexes(&self) -> CatalogBundleIndexes<'_> {
+        CatalogBundleIndexes {
+            catalog: self,
+            pending: Mutex::new(BTreeMap::new()),
+        }
+    }
+
     /// The catalog as the [`Derivations`] of an evaluation.
     pub fn into_derivations(self) -> CatalogDerivations {
         CatalogDerivations {
@@ -254,6 +265,13 @@ impl Batch {
         table
             .insert(fingerprint, encode(derived).as_slice())
             .map_err(other)?;
+        Ok(())
+    }
+
+    /// Stores the index of a bundle.
+    pub fn put_bundle_index(&mut self, bundle: &[u8; 32], index: &[u8]) -> io::Result<()> {
+        let mut table = self.0.open_table(BUNDLE_INDEXES).map_err(other)?;
+        table.insert(bundle, index).map_err(other)?;
         Ok(())
     }
 
@@ -318,6 +336,49 @@ impl Batch {
     /// Makes the batch visible and durable.
     pub fn commit(self) -> io::Result<()> {
         self.0.commit().map_err(other)
+    }
+}
+
+/// [`BundleIndexes`] kept in the catalog and written in batches, in key order.
+pub struct CatalogBundleIndexes<'c> {
+    catalog: &'c Catalog,
+    pending: Mutex<BTreeMap<[u8; 32], Vec<u8>>>,
+}
+
+impl CatalogBundleIndexes<'_> {
+    fn write(&self, pending: &mut BTreeMap<[u8; 32], Vec<u8>>) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        for (bundle, index) in pending.iter() {
+            batch.put_bundle_index(bundle, index)?;
+        }
+        batch.commit()?;
+        pending.clear();
+        Ok(())
+    }
+}
+
+impl BundleIndexes for CatalogBundleIndexes<'_> {
+    fn get(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        if let Some(index) = self.pending.lock().unwrap().get(bundle) {
+            return Ok(Some(index.clone()));
+        }
+        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let table = tx.open_table(BUNDLE_INDEXES).map_err(other)?;
+        let value = table.get(bundle).map_err(other)?;
+        Ok(value.map(|v| v.value().to_vec()))
+    }
+
+    fn put(&self, bundle: [u8; 32], index: Vec<u8>) -> io::Result<()> {
+        let mut pending = self.pending.lock().unwrap();
+        pending.insert(bundle, index);
+        if pending.len() >= BATCH {
+            self.write(&mut pending)?;
+        }
+        Ok(())
+    }
+
+    fn flush(&self) -> io::Result<()> {
+        self.write(&mut self.pending.lock().unwrap())
     }
 }
 

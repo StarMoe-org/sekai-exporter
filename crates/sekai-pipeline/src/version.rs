@@ -1,13 +1,22 @@
 //! The bundles of one version, opened and indexed, as the [`Context`] converters read through.
 
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::io;
+use std::sync::{Arc, Mutex};
 
+use sekai_catalog::{BundleIndexes, NoBundleIndexes};
 use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
 use sekai_unity::{BlockCache, Bundle, ByteSource, SerializedFile};
 use sha2::{Digest, Sha256};
+
+use crate::eval::parallel;
+use crate::index_record::IndexRecord;
+
+/// How many bundles stay parsed at once.
+const OPEN_BUNDLES: usize = 4096;
 
 /// One bundle: its container and its serialized files.
 struct Opened {
@@ -34,7 +43,7 @@ impl Opened {
         Ok(Self { bundle, files })
     }
 
-    fn index(&self, name: String, cache: &dyn BlockCache) -> sekai_unity::Result<BundleIndex> {
+    fn record(&self, cache: &dyn BlockCache) -> sekai_unity::Result<IndexRecord> {
         let files = self
             .files
             .iter()
@@ -47,7 +56,81 @@ impl Opened {
                 })
             })
             .collect::<sekai_unity::Result<_>>()?;
-        Ok(BundleIndex { name, files })
+        Ok(IndexRecord {
+            files,
+            resources: self.resource_hashes(cache),
+        })
+    }
+
+    /// The SHA-256 of each resource entry that can be read, in directory order.
+    fn resource_hashes(&self, cache: &dyn BlockCache) -> Vec<[u8; 32]> {
+        self.bundle
+            .entries()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !entry.is_serialized())
+            .filter_map(|(i, entry)| {
+                let size = usize::try_from(entry.size).ok()?;
+                let source = self.bundle.entry(i, cache);
+                let chunk = source.read(0, size).ok()?;
+                Some(Sha256::digest(&*chunk).into())
+            })
+            .collect()
+    }
+}
+
+/// The record of a bundle, from `indexes` or else by reading the bundle.
+fn record(
+    input: &BundleInput,
+    cache: &dyn BlockCache,
+    indexes: &dyn BundleIndexes,
+) -> io::Result<sekai_unity::Result<IndexRecord>> {
+    if let Some(record) = indexes
+        .get(&input.sha256)?
+        .as_deref()
+        .and_then(IndexRecord::decode)
+    {
+        return Ok(Ok(record));
+    }
+    let record = Opened::open(input.source.clone(), input.sha256, cache)
+        .and_then(|opened| opened.record(cache));
+    if let Some(bytes) = record.as_ref().ok().and_then(IndexRecord::encode) {
+        indexes.put(input.sha256, bytes)?;
+    }
+    Ok(record)
+}
+
+/// The most recently used bundles that are parsed.
+#[derive(Default)]
+struct Recent {
+    tick: u64,
+    bundles: HashMap<usize, (Arc<Opened>, u64)>,
+    order: BTreeMap<u64, usize>,
+}
+
+impl Recent {
+    fn get(&mut self, bundle: usize) -> Option<Arc<Opened>> {
+        let tick = self.tick;
+        self.tick += 1;
+        let (opened, used) = self.bundles.get_mut(&bundle)?;
+        self.order.remove(used);
+        self.order.insert(tick, bundle);
+        *used = tick;
+        Some(opened.clone())
+    }
+
+    fn insert(&mut self, bundle: usize, opened: Arc<Opened>) {
+        let tick = self.tick;
+        self.tick += 1;
+        if let Some((_, used)) = self.bundles.insert(bundle, (opened, tick)) {
+            self.order.remove(&used);
+        }
+        self.order.insert(tick, bundle);
+        if self.bundles.len() > OPEN_BUNDLES
+            && let Some((_, oldest)) = self.order.pop_first()
+        {
+            self.bundles.remove(&oldest);
+        }
     }
 }
 
@@ -72,12 +155,16 @@ pub struct BundleError {
     pub message: String,
 }
 
-/// The bundles of one version, opened and indexed, with references resolved across bundles.
+/// The bundles of one version, indexed, with references resolved across bundles.
 ///
-/// The bundles stay in memory while the version is open.
+/// A bundle is parsed when an object or a resource of it is first read, and only the most recently
+/// used bundles stay parsed.
 pub struct Version<'c> {
-    /// In the order of [`VersionIndex::bundles`].
-    bundles: Vec<Opened>,
+    /// The bytes and hash of each bundle, in the order of [`VersionIndex::bundles`].
+    bundles: Vec<(Arc<dyn ByteSource>, [u8; 32])>,
+    /// The hashes of the resource entries of each bundle.
+    resources: Vec<Vec<[u8; 32]>>,
+    recent: Mutex<Recent>,
     index: VersionIndex,
     cache: &'c dyn BlockCache,
 }
@@ -86,10 +173,20 @@ impl<'c> Version<'c> {
     /// Opens and indexes `inputs`. A bundle that cannot be opened or indexed is left out of the
     /// version and returned with its error. A name names one bundle of a version, so bundles
     /// that share a name are all left out, with the error `duplicate_name`.
-    pub fn open(
+    pub fn open(inputs: Vec<BundleInput>, cache: &'c dyn BlockCache) -> (Self, Vec<BundleError>) {
+        Self::open_indexed(inputs, cache, &NoBundleIndexes, 1)
+            .expect("keeping no indexes cannot fail")
+    }
+
+    /// Opens `inputs` as [`Version::open`] does, on `threads` threads, reading the index of a
+    /// bundle from `indexes` when it is there and adding it when it is not. The result does not
+    /// depend on `threads` or on what `indexes` holds. Fails only if `indexes` does.
+    pub fn open_indexed(
         mut inputs: Vec<BundleInput>,
         cache: &'c dyn BlockCache,
-    ) -> (Self, Vec<BundleError>) {
+        indexes: &dyn BundleIndexes,
+        threads: usize,
+    ) -> io::Result<(Self, Vec<BundleError>)> {
         // The version index orders bundles by name; opening them in that order keeps the two
         // lists aligned.
         inputs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -100,24 +197,33 @@ impl<'c> Version<'c> {
                     || inputs.get(i + 1).is_some_and(|next| next.name == *name)
             })
             .collect();
+        let records = parallel(inputs.len(), threads, |i| {
+            (!shared[i])
+                .then(|| record(&inputs[i], cache, indexes))
+                .transpose()
+        });
+        indexes.flush()?;
         let mut bundles = Vec::new();
-        let mut indexes = Vec::new();
+        let mut resources = Vec::new();
+        let mut bundle_indexes = Vec::new();
         let mut errors = Vec::new();
-        for (input, shared) in inputs.into_iter().zip(shared) {
-            if shared {
+        for (input, record) in inputs.into_iter().zip(records) {
+            let Some(record) = record? else {
                 errors.push(BundleError {
                     message: format!("more than one bundle is named {}", input.name),
                     name: input.name,
                     code: "duplicate_name",
                 });
                 continue;
-            }
-            let opened = Opened::open(input.source, input.sha256, cache)
-                .and_then(|o| Ok((o.index(input.name.clone(), cache)?, o)));
-            match opened {
-                Ok((index, opened)) => {
-                    indexes.push(index);
-                    bundles.push(opened);
+            };
+            match record {
+                Ok(record) => {
+                    bundle_indexes.push(BundleIndex {
+                        name: input.name,
+                        files: record.files,
+                    });
+                    resources.push(record.resources);
+                    bundles.push((input.source, input.sha256));
                 }
                 Err(e) => errors.push(BundleError {
                     name: input.name,
@@ -128,10 +234,23 @@ impl<'c> Version<'c> {
         }
         let version = Self {
             bundles,
-            index: VersionIndex::new(indexes),
+            resources,
+            recent: Mutex::default(),
+            index: VersionIndex::new(bundle_indexes),
             cache,
         };
-        (version, errors)
+        Ok((version, errors))
+    }
+
+    /// The parsed form of a bundle.
+    fn opened(&self, bundle: usize) -> Result<Arc<Opened>, ConvertError> {
+        if let Some(opened) = self.recent.lock().unwrap().get(bundle) {
+            return Ok(opened);
+        }
+        let (source, sha256) = &self.bundles[bundle];
+        let opened = Arc::new(Opened::open(source.clone(), *sha256, self.cache)?);
+        self.recent.lock().unwrap().insert(bundle, opened.clone());
+        Ok(opened)
     }
 
     fn missing(&self, id: ObjectId) -> ConvertError {
@@ -147,19 +266,7 @@ impl<'c> Version<'c> {
 
     /// The SHA-256 of each resource entry of a bundle that can be read, in directory order.
     pub fn resource_hashes(&self, bundle: usize) -> Vec<[u8; 32]> {
-        let bundle = &self.bundles[bundle].bundle;
-        bundle
-            .entries()
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.is_serialized())
-            .filter_map(|(i, entry)| {
-                let size = usize::try_from(entry.size).ok()?;
-                let source = bundle.entry(i, self.cache);
-                let chunk = source.read(0, size).ok()?;
-                Some(Sha256::digest(&*chunk).into())
-            })
-            .collect()
+        self.resources[bundle].clone()
     }
 
     /// The index of the version.
@@ -197,7 +304,7 @@ impl Context for Version<'_> {
         if let Some(e) = &record.error {
             return Err(ConvertError::from(e.clone()));
         }
-        let opened = &self.bundles[id.bundle];
+        let opened = self.opened(id.bundle)?;
         let (entry, file, layouts) = &opened.files[id.file];
         let fields = OpenFile {
             path: &opened.bundle.entries()[*entry].path,
@@ -239,7 +346,8 @@ impl Context for Version<'_> {
         offset: u64,
         size: u64,
     ) -> Result<Chunk<'_>, ConvertError> {
-        let bundle = &self.bundles[from.bundle].bundle;
+        let opened = self.opened(from.bundle)?;
+        let bundle = &opened.bundle;
         // A stored path has the form `archive:/<file>/<resource file>`; the resource file is an
         // entry of the object's own bundle.
         let name = path.rsplit('/').next().unwrap_or(path);

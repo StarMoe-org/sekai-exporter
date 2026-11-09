@@ -46,6 +46,9 @@ pub struct Evaluation {
 
 /// Runs `job` for indices `0..n` on `threads` threads and returns the results in index order.
 pub fn parallel<T: Send>(n: usize, threads: usize, job: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    if threads <= 1 {
+        return (0..n).map(job).collect();
+    }
     let next = AtomicUsize::new(0);
     let results: Mutex<Vec<Option<T>>> = Mutex::new((0..n).map(|_| None).collect());
     std::thread::scope(|s| {

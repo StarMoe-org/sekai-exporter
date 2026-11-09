@@ -7,5 +7,5 @@ pub mod db;
 pub mod derivation;
 pub mod store;
 
-pub use derivation::{Derivations, Derived, MemoryDerivations};
+pub use derivation::{BundleIndexes, Derivations, Derived, MemoryDerivations, NoBundleIndexes};
 pub use store::{Key, LocalStore};

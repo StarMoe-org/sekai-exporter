@@ -9,7 +9,7 @@ use sekai_convert::Converter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Evaluation, Version, evaluate, parallel};
+use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes, Version, evaluate, parallel};
 use sekai_publish::{Binding, Plan, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
@@ -170,7 +170,8 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     let (version, errors) = {
         let _span = monitor.span("open", "version", "");
-        Version::open(inputs, &cache)
+        Version::open_indexed(inputs, &cache, &NoBundleIndexes, options.threads)
+            .map_err(|e| e.to_string())?
     };
     for e in &errors {
         eprintln!("{}: {}: {}", e.name, e.code, e.message);

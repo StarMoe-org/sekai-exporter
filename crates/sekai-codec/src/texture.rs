@@ -30,6 +30,8 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surfa
         }),
         29 => crunch::decode(w, h, data),
         34 => etc::decode_etc1(w, h, data),
+        41 => etc::decode_eac_r(w, h, data),
+        45 => etc::decode_etc2_rgb(w, h, data),
         47 => etc::decode_etc2_rgba8(w, h, data),
         48 => astc::decode(4, 4, w, h, data),
         49 => astc::decode(5, 5, w, h, data),
@@ -37,6 +39,7 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surfa
         51 => astc::decode(8, 8, w, h, data),
         52 => astc::decode(10, 10, w, h, data),
         53 => astc::decode(12, 12, w, h, data),
+        63 => texels(1, w, h, data, "R8 image", |t| [t[0], 0, 0, 255]),
         _ => Err(DecodeError::Unsupported {
             what: "texture format",
             value: format.into(),

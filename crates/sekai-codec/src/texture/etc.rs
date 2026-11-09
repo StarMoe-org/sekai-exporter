@@ -52,19 +52,45 @@ pub(super) fn decode_etc1(
     height: usize,
     data: &[u8],
 ) -> Result<Vec<u8>, DecodeError> {
+    decode_opaque(Profile::Etc1, "ETC1 image", width, height, data)
+}
+
+/// Decodes ETC2 RGB into RGBA in stored row order.
+pub(super) fn decode_etc2_rgb(
+    width: usize,
+    height: usize,
+    data: &[u8],
+) -> Result<Vec<u8>, DecodeError> {
+    decode_opaque(Profile::Etc2, "ETC2 image", width, height, data)
+}
+
+fn decode_opaque(
+    profile: Profile,
+    what: &'static str,
+    width: usize,
+    height: usize,
+    data: &[u8],
+) -> Result<Vec<u8>, DecodeError> {
     let mut texels = [[0; 4]; 16];
-    decode_blocks(
-        (4, 4, 8),
-        width,
-        height,
-        data,
-        "ETC1 image",
-        |block, out| {
-            color_block(word(block), Profile::Etc1, &mut texels)?;
-            out(&texels);
-            Ok(())
-        },
-    )
+    decode_blocks((4, 4, 8), width, height, data, what, |block, out| {
+        color_block(word(block), profile, &mut texels)?;
+        out(&texels);
+        Ok(())
+    })
+}
+
+/// Decodes EAC R11 into RGBA in stored row order, with red narrowed to eight bits.
+pub(super) fn decode_eac_r(
+    width: usize,
+    height: usize,
+    data: &[u8],
+) -> Result<Vec<u8>, DecodeError> {
+    let mut texels = [[0; 4]; 16];
+    decode_blocks((4, 4, 8), width, height, data, "EAC image", |block, out| {
+        red_block(word(block), &mut texels);
+        out(&texels);
+        Ok(())
+    })
 }
 
 /// Decodes ETC2 RGBA8, an EAC alpha block before each colour block, into RGBA in stored row
@@ -237,16 +263,54 @@ fn planar_mode(bits: u64, texels: &mut [[u8; 4]; 16]) {
     }
 }
 
+/// The fields of an EAC block.
+struct EacBlock {
+    base: i32,
+    multiplier: i32,
+    table: [i32; 8],
+    bits: u64,
+}
+
+impl EacBlock {
+    fn new(bits: u64) -> Self {
+        Self {
+            base: (bits >> 56) as i32,
+            multiplier: (bits >> 52 & 0xF) as i32,
+            table: ALPHA_TABLES[(bits >> 48 & 0xF) as usize],
+            bits,
+        }
+    }
+
+    /// The table value that the texel at column `x` and row `y` selects.
+    fn modifier(&self, x: usize, y: usize) -> i32 {
+        let shift = 45 - 3 * (x * 4 + y);
+        self.table[(self.bits >> shift & 7) as usize]
+    }
+}
+
 /// Replaces the alpha of `texels` with the values of an EAC alpha block.
 fn alpha_block(bits: u64, texels: &mut [[u8; 4]; 16]) {
-    let base = (bits >> 56) as i32;
-    let multiplier = (bits >> 52 & 0xF) as i32;
-    let table = ALPHA_TABLES[(bits >> 48 & 0xF) as usize];
+    let block = EacBlock::new(bits);
     for y in 0..4 {
         for x in 0..4 {
-            let shift = 45 - 3 * (x * 4 + y);
-            let index = (bits >> shift & 7) as usize;
-            texels[y * 4 + x][3] = (base + table[index] * multiplier).clamp(0, 255) as u8;
+            let alpha = block.base + block.modifier(x, y) * block.multiplier;
+            texels[y * 4 + x][3] = alpha.clamp(0, 255) as u8;
+        }
+    }
+}
+
+/// Fills `texels` with the red values of an EAC R11 block.
+fn red_block(bits: u64, texels: &mut [[u8; 4]; 16]) {
+    let block = EacBlock::new(bits);
+    let scale = if block.multiplier == 0 {
+        1
+    } else {
+        block.multiplier * 8
+    };
+    for y in 0..4 {
+        for x in 0..4 {
+            let red = (block.base * 8 + 4 + block.modifier(x, y) * scale).clamp(0, 2047);
+            texels[y * 4 + x] = [(red >> 3) as u8, 0, 0, 255];
         }
     }
 }

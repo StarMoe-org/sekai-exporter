@@ -28,7 +28,10 @@ Each texel format expands to RGBA as follows:
 | 7 RGB565 | Each channel widened by repeating its high bits: `r << 3 \| r >> 2`, `g << 2 \| g >> 4`, `b << 3 \| b >> 2`; alpha 255 |
 | 34 ETC_RGB4 | ETC1, alpha 255 |
 | 29 DXT5Crunched | Crunch-compressed BC3. Colours follow the S3TC formulas: endpoints are `c / 31` and `c / 63`, interpolation is exact, and the result is rounded to the nearest 8-bit value |
+| 41 EAC_R | EAC R11, the 11-bit value narrowed to 8 bits by dropping its low bits: `(r, 0, 0, 255)` |
+| 45 ETC2_RGB | ETC2 colour, alpha 255 |
 | 47 ETC2_RGBA8 | ETC2 colour with EAC alpha |
+| 63 R8 | `(r, 0, 0, 255)` |
 | 66 to 71 ASTC_HDR | ASTC in the HDR profile, footprints 4x4, 5x5, 6x6, 8x8, 10x10 and 12x12, as binary16 values |
 | 48–53 ASTC 4×4 to 12×12 | ASTC LDR decoded to 8 bits per channel, as ARM's reference decoder does in its LDR profile |
 
@@ -70,7 +73,7 @@ The member is decoded content, which the evaluator encodes. The canonical file i
 
 Unity stores texture rows from bottom to top; the form turns them to top to bottom, the order of PNG and WebP. The stored colour values are kept unchanged, so the result is the same picture Unity uploads to the GPU, before any sampling or colour space conversion.
 
-The decoders are checked byte for byte against independent reference decoders: ASTC against ARM's `astcenc` in its 8-bit LDR mode and, as binary16 values, in its HDR profile, crunch against the blocks unpacked by Unity's crunch library and exact arithmetic from the S3TC formulas, ETC1 and ETC2 against a reference ETC decoder, and the uncompressed formats against a direct expansion of the bytes. The checks run on synthetic textures built with the Unity editor (`crates/sekai-codec/tests`) and, by anyone who has the game data, on real bundles with the scripts in `tools/compare-texture`. `compare_converter.py` checks the whole converter, including the fields and the resource files, texture by texture. The slices of texture arrays are checked against the same reference decoders, and binary16 slices against the stored values.
+The decoders are checked byte for byte against independent reference decoders: ASTC against ARM's `astcenc` in its 8-bit LDR mode and, as binary16 values, in its HDR profile, crunch against the blocks unpacked by Unity's crunch library and exact arithmetic from the S3TC formulas, ETC1, ETC2 and EAC against a reference ETC decoder, and the uncompressed formats against a direct expansion of the bytes. The checks run on synthetic textures built with the Unity editor (`crates/sekai-codec/tests`) and, by anyone who has the game data, on real bundles with the scripts in `tools/compare-texture`. `compare_converter.py` checks the whole converter, including the fields and the resource files, texture by texture. The slices of texture arrays are checked against the same reference decoders, and binary16 slices against the stored values.
 
 ## 6. Version
 

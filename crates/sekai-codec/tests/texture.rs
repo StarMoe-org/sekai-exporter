@@ -222,3 +222,26 @@ fn an_etc1_block_with_a_colour_out_of_range_is_malformed() {
         Err(DecodeError::Malformed { .. })
     ));
 }
+
+#[test]
+fn r8_keeps_its_value_in_red() {
+    let surface = decode(63, 1, 1, &[200]).unwrap();
+    assert_eq!(surface.pixels(), [200, 0, 0, 255]);
+}
+
+#[test]
+fn eac_r_narrows_eleven_bits_to_eight() {
+    // Base 100, multiplier 1, table 0, and every texel selects the table value -3.
+    let block = [100, 0x10, 0, 0, 0, 0, 0, 0];
+    let surface = decode(41, 4, 4, &block).unwrap();
+    assert_eq!(surface.pixels()[..4], [97, 0, 0, 255]);
+}
+
+#[test]
+fn etc2_rgb_reads_an_individual_block_as_etc1_does() {
+    let block = [0x80, 0x80, 0x80, 0, 0, 0, 0, 0];
+    let etc2 = decode(45, 4, 4, &block).unwrap();
+    let etc1 = decode(34, 4, 4, &block).unwrap();
+    assert_eq!(etc2.pixels(), etc1.pixels());
+    assert_eq!(etc2.pixels()[3], 255);
+}

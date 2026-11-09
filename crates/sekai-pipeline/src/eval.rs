@@ -97,11 +97,24 @@ fn closure(index: &VersionIndex, root: ObjectId) -> Vec<ObjectId> {
 }
 
 /// A derivation to evaluate.
-struct Planned<'a> {
-    converter: &'a dyn Converter,
-    name: String,
-    closure: Vec<ObjectId>,
-    fingerprint: [u8; 32],
+pub(crate) struct Planned<'a> {
+    /// The converter of the asset form.
+    pub(crate) converter: &'a dyn Converter,
+    /// The name of the asset.
+    pub(crate) name: String,
+    /// The root and every object it reaches, root first.
+    pub(crate) closure: Vec<ObjectId>,
+    /// The fingerprint of the derivation.
+    pub(crate) fingerprint: [u8; 32],
+}
+
+/// The derivations of a version, before any of them runs.
+pub(crate) struct Plan<'a> {
+    /// The derivations, in name order.
+    pub(crate) derivations: Vec<Planned<'a>>,
+    /// Roots that cannot be told apart from another root by name, as `(logical path, path ID)`,
+    /// in order.
+    pub(crate) unnamed: Vec<(String, i64)>,
 }
 
 fn fingerprint(
@@ -186,7 +199,7 @@ fn asset_error(e: &ConvertError) -> AssetError {
 }
 
 /// Evaluates one derivation and returns its output and the error code of a failed asset.
-fn derive(
+pub(crate) fn derive(
     plan: &Planned<'_>,
     version: &Version<'_>,
     store: &LocalStore,
@@ -280,8 +293,20 @@ pub fn evaluate(
     recorder: &dyn Recorder,
     threads: usize,
 ) -> io::Result<Evaluation> {
+    let plan = plan(version, converters, recorder, threads);
+    run(&plan, version, store, derivations, recorder, threads)
+}
+
+/// Chooses the roots of `version`, names them and computes the closure and fingerprint of each
+/// derivation. Nothing is converted and the store is not read.
+pub(crate) fn plan<'a>(
+    version: &Version<'_>,
+    converters: &'a [Box<dyn Converter>],
+    recorder: &dyn Recorder,
+    threads: usize,
+) -> Plan<'a> {
     let index = version.index();
-    let planning = recorder.span("plan", "assets", "");
+    let _span = recorder.span("plan", "assets", "");
     let mut roots = Vec::new();
     for (id, object, paths) in version.objects() {
         let Some(path) = paths.iter().min() else {
@@ -313,26 +338,41 @@ pub fn evaluate(
         let _span = recorder.span("hash", "resources", &index.bundles()[b].name);
         version.resource_hashes(b)
     });
-    let mut evaluation = Evaluation::default();
-    let mut plans = Vec::new();
+    let mut unnamed = Vec::new();
+    let mut derivations = Vec::new();
     for ((converter, id, _, logical), name) in roots.iter().zip(names) {
         let Some(name) = name else {
-            evaluation.unnamed.push(((*logical).to_owned(), id.path_id));
+            unnamed.push(((*logical).to_owned(), id.path_id));
             continue;
         };
         let closure = closure(index, *id);
         let fingerprint = fingerprint(*converter, &name, index, &closure, &resources);
-        plans.push(Planned {
+        derivations.push(Planned {
             converter: *converter,
             name,
             closure,
             fingerprint,
         });
     }
-    evaluation.unnamed.sort();
-    plans.sort_by(|a, b| a.name.cmp(&b.name));
-    drop(planning);
+    unnamed.sort();
+    derivations.sort_by(|a, b| a.name.cmp(&b.name));
+    Plan {
+        derivations,
+        unnamed,
+    }
+}
 
+/// Runs the derivations of `plan` whose output is not recorded in `derivations` yet and records
+/// the new outputs.
+pub(crate) fn run(
+    plan: &Plan<'_>,
+    version: &Version<'_>,
+    store: &LocalStore,
+    derivations: &dyn Derivations,
+    recorder: &dyn Recorder,
+    threads: usize,
+) -> io::Result<Evaluation> {
+    let plans = &plan.derivations;
     let results = parallel(plans.len(), threads, |i| -> io::Result<_> {
         let plan = &plans[i];
         if let Some(derived) = derivations.get(&plan.fingerprint)? {
@@ -346,6 +386,10 @@ pub fn evaluate(
         Ok((derived, error, false))
     });
     derivations.flush()?;
+    let mut evaluation = Evaluation {
+        unnamed: plan.unnamed.clone(),
+        ..Evaluation::default()
+    };
     for (plan, result) in plans.iter().zip(results) {
         let (derived, error, reused) = result?;
         if reused {

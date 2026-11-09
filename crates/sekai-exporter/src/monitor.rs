@@ -62,6 +62,7 @@ pub(crate) struct Monitor {
 
 impl Monitor {
     /// What each derivation of the run cost, by name.
+    #[cfg(feature = "cdn")]
     pub(crate) fn costs(&self) -> BTreeMap<String, Cost> {
         self.costs.lock().unwrap().clone()
     }

@@ -3,6 +3,8 @@
 mod export;
 mod monitor;
 mod objects;
+#[cfg(feature = "catalog-db")]
+mod stats;
 #[cfg(all(feature = "cdn", feature = "storage-view"))]
 mod storage;
 #[cfg(all(feature = "cdn", not(feature = "storage-view")))]
@@ -52,11 +54,24 @@ commands:
       Write the object document of every bundle file directly inside <input>
       to <output>/<bundle>/_objects.json. Payloads larger than the inline limit
       are written to <output>/_payloads/<aa>/<sha256>.bin.
+  stats <output> [--top <n>]
+      List the costliest kinds of derivation of the runs in <output> and the
+      converters whose memory estimates are furthest from what was measured.
 ";
 
 #[cfg(feature = "cdn")]
 fn update(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     update::run(args)
+}
+
+#[cfg(feature = "catalog-db")]
+fn stats(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    stats::run(args)
+}
+
+#[cfg(not(feature = "catalog-db"))]
+fn stats(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no catalog: enable the catalog-db feature".into())
 }
 
 #[cfg(not(feature = "cdn"))]
@@ -70,6 +85,7 @@ fn main() -> ExitCode {
         Some("export") => export::run(args),
         Some("objects") => objects::run(args),
         Some("update") => update(args),
+        Some("stats") => stats(args),
         Some("--version") => {
             println!("sekai-exporter {}", env!("CARGO_PKG_VERSION"));
             Ok(true)

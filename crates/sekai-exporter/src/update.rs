@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sekai_catalog::db::{BundleRow, Catalog, PublicationRow};
+use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::identity::VersionIdentity;
@@ -377,6 +377,18 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
                 revision: pointer.revision.clone(),
             },
         )?;
+        for (subject, cost) in monitor.costs() {
+            batch.put_cost(&CostRow {
+                kind: cost.kind,
+                subject,
+                wall_us: cost.wall_us,
+                cpu_us: cost.cpu_us,
+                read: cost.read,
+                written: cost.written,
+                estimated_memory: cost.estimated_memory,
+                actual_memory: cost.actual_memory,
+            })?;
+        }
         batch.commit()
     };
     record().map_err(|e| e.to_string())?;

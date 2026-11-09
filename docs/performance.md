@@ -50,7 +50,7 @@ Fused encoding does not change fingerprints: each output is the same bytes it wo
 
 ## Measurement
 
-- Each derivation records its wall time, CPU time, bytes read and written, and estimated and actual peak memory in the catalog. `sekai-exporter stats` lists the most expensive derivation kinds and the converters whose memory estimates are least accurate. Optimization starts from this record.
+- Each derivation records its wall time, CPU time, bytes read and written, and estimated and actual peak memory in the catalog. The cost of a derivation is its latest measurement, and the measured peak memory is the size of its decoded members. `sekai-exporter stats` lists the most expensive derivation kinds and the converters whose memory estimates are least accurate. Optimization starts from this record.
 - Each run writes `metrics.jsonl` next to its output, one JSON document per line, and shows a status line while it works: the CPU and memory use of the process and of the machine, sampled every second, and a span for each stage and derivation with its wall time, CPU time and bytes moved. The evaluator reports through a `Recorder` and reads no clock itself, so measurement cannot influence any output.
 - The hot paths have benchmarks on synthetic inputs. Regression checks use instruction counts, which are stable on shared machines, rather than wall time.
 - Benchmarks over real game data are run locally by whoever has the data, and their results are not part of this repository.

@@ -20,6 +20,27 @@ const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const STATUS_EVERY: u64 = 5;
 const GIB: f64 = (1u64 << 30) as f64;
 
+/// What the work on one derivation cost, summed over its spans.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Cost {
+    pub(crate) kind: String,
+    pub(crate) wall_us: u64,
+    pub(crate) cpu_us: u64,
+    pub(crate) read: u64,
+    pub(crate) written: u64,
+    pub(crate) estimated_memory: u64,
+    pub(crate) actual_memory: u64,
+}
+
+/// Whether a stage is work on a derivation, and the kind of the derivation it names.
+fn derivation_kind<'a>(stage: &str, label: &'a str) -> Option<Option<&'a str>> {
+    match stage {
+        "convert" | "encode" | "transform" => Some(Some(label)),
+        "store" => Some(None),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 struct Total {
     count: u64,
@@ -34,17 +55,24 @@ pub(crate) struct Monitor {
     start: Instant,
     sink: Mutex<BufWriter<File>>,
     totals: Mutex<BTreeMap<(&'static str, String), Total>>,
+    costs: Mutex<BTreeMap<String, Cost>>,
     done: Mutex<bool>,
     wake: Condvar,
 }
 
 impl Monitor {
+    /// What each derivation of the run cost, by name.
+    pub(crate) fn costs(&self) -> BTreeMap<String, Cost> {
+        self.costs.lock().unwrap().clone()
+    }
+
     /// Runs `body` while samples are taken, then writes the summary.
     pub(crate) fn watch<T>(path: &Path, body: impl FnOnce(&Monitor) -> T) -> io::Result<T> {
         let monitor = Monitor {
             start: Instant::now(),
             sink: Mutex::new(BufWriter::new(File::create(path)?)),
             totals: Mutex::new(BTreeMap::new()),
+            costs: Mutex::new(BTreeMap::new()),
             done: Mutex::new(false),
             wake: Condvar::new(),
         };
@@ -212,12 +240,17 @@ struct MonitorSpan<'a> {
     cpu: ThreadTime,
     read: u64,
     written: u64,
+    memory: (u64, u64),
 }
 
 impl Span for MonitorSpan<'_> {
     fn bytes(&mut self, read: u64, written: u64) {
         self.read += read;
         self.written += written;
+    }
+
+    fn memory(&mut self, estimated: u64, actual: u64) {
+        self.memory = (estimated, actual);
     }
 }
 
@@ -236,6 +269,19 @@ impl Drop for MonitorSpan<'_> {
             "read": self.read,
             "written": self.written,
         }));
+        if let Some(kind) = derivation_kind(self.stage, &self.label) {
+            let mut costs = self.monitor.costs.lock().unwrap();
+            let cost = costs.entry(self.subject.clone()).or_default();
+            if let Some(kind) = kind {
+                kind.clone_into(&mut cost.kind);
+            }
+            cost.wall_us += wall_us;
+            cost.cpu_us += cpu_us;
+            cost.read += self.read;
+            cost.written += self.written;
+            cost.estimated_memory = cost.estimated_memory.max(self.memory.0);
+            cost.actual_memory = cost.actual_memory.max(self.memory.1);
+        }
         let mut totals = self.monitor.totals.lock().unwrap();
         let total = totals
             .entry((self.stage, std::mem::take(&mut self.label)))
@@ -260,6 +306,7 @@ impl Recorder for Monitor {
             cpu: ThreadTime::now(),
             read: 0,
             written: 0,
+            memory: (0, 0),
         })
     }
 }

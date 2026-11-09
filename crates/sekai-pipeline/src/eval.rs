@@ -7,7 +7,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sekai_catalog::{Derivations, Derived, Key, LocalStore};
-use sekai_convert::{Content, ConvertError, Converter, ObjectId};
+use sekai_convert::{Asset, Content, ConvertError, Converter, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject};
@@ -201,6 +201,34 @@ fn asset_error(e: &ConvertError) -> AssetError {
     }
 }
 
+/// The size in memory of the decoded members of an asset.
+fn decoded_size(asset: &Asset) -> u64 {
+    let size = |content: &Content| match content {
+        Content::Image(surface) => surface.pixels().len(),
+        Content::HdrImage(surface) => surface.pixels().len() * 2,
+        Content::Audio(pcm) => pcm.samples().len() * 2,
+        Content::Video(movie) => {
+            movie.stream.len()
+                + movie
+                    .audio
+                    .as_ref()
+                    .map_or(0, |pcm| pcm.samples().len() * 2)
+        }
+        Content::File { bytes, .. } => bytes.len(),
+    };
+    asset.members.iter().map(|m| size(&m.content) as u64).sum()
+}
+
+/// The estimated peak memory of a derivation.
+fn estimated_memory(plan: &Planned<'_>, version: &Version<'_>) -> u64 {
+    let root = plan.closure[0];
+    let index = version.index();
+    index.position(root).map_or(0, |position| {
+        let object = &index.bundles()[root.bundle].files[root.file].objects[position];
+        plan.converter.cost(root, object, version).memory
+    })
+}
+
 /// Evaluates one derivation and returns its output and the error code of a failed asset.
 pub(crate) fn derive(
     plan: &Planned<'_>,
@@ -211,8 +239,13 @@ pub(crate) fn derive(
     let index = version.index();
     let form = plan.converter.name();
     let result = {
-        let _span = recorder.span("convert", form, &plan.name);
-        plan.converter.convert(plan.closure[0], version)
+        let estimated = estimated_memory(plan, version);
+        let mut span = recorder.span("convert", form, &plan.name);
+        let result = plan.converter.convert(plan.closure[0], version);
+        if let Ok(Some(asset)) = &result {
+            span.memory(estimated, decoded_size(asset));
+        }
+        result
     };
     let mut members = Vec::new();
     let error = match result {

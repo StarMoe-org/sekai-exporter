@@ -39,6 +39,7 @@ fn make(
     job: &Job,
     store: &LocalStore,
     derivations: &dyn Derivations,
+    monitor: &Monitor,
 ) -> std::io::Result<Result<(Key, u64, bool), storage_view::ViewError>> {
     let transform = job.file.transform;
     if transform == Transform::Copy {
@@ -51,6 +52,7 @@ fn make(
         let size = std::fs::metadata(store.path(&key))?.len();
         return Ok(Ok((key, size, false)));
     }
+    let mut span = monitor.span("transform", "storage", &job.file.path);
     let member = store.read(&job.source)?;
     let bytes = match storage_view::apply(transform, &member) {
         Ok(bytes) => bytes,
@@ -58,6 +60,7 @@ fn make(
     };
     let extension = transform.extension().unwrap_or(&job.source.extension);
     let key = store.put(&bytes, extension)?;
+    span.bytes(member.len() as u64, bytes.len() as u64);
     derivations.put(fingerprint, Derived::Document(key.clone()))?;
     Ok(Ok((key, bytes.len() as u64, true)))
 }
@@ -129,8 +132,7 @@ pub(crate) fn publish(
     let span = monitor.span("publish", "storage", "");
     let (jobs, mut failures, shadowed) = jobs(evaluation, store)?;
     let results = parallel(jobs.len(), threads, |i| {
-        let _span = monitor.span("transform", "storage", &jobs[i].file.path);
-        make(&jobs[i], store, derivations)
+        make(&jobs[i], store, derivations, monitor)
     });
     derivations.flush().map_err(|e| e.to_string())?;
     let mut files = Vec::new();

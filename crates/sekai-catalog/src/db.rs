@@ -22,6 +22,9 @@ const BUNDLE_INDEXES: TableDefinition<'_, &[u8; 32], &[u8]> =
 /// Form, fingerprint, document and error code.
 type AssetValue<'a> = (&'a str, &'a str, &'a str, Option<&'a str>);
 const ASSETS: TableDefinition<'_, (&str, &str), AssetValue<'_>> = TableDefinition::new("assets");
+/// Wall time, CPU time, bytes read, bytes written, estimated and measured peak memory.
+type CostValue = (u64, u64, u64, u64, u64, u64);
+const COSTS: TableDefinition<'_, (&str, &str), CostValue> = TableDefinition::new("costs");
 const BUNDLES: TableDefinition<'_, (&str, &str), (&str, &str)> = TableDefinition::new("bundles");
 const VERSIONS: TableDefinition<'_, (&str, &str), &str> = TableDefinition::new("versions");
 const POINTERS: TableDefinition<'_, &str, &str> = TableDefinition::new("pointers");
@@ -83,6 +86,27 @@ pub struct AssetRow {
     pub error: Option<String>,
 }
 
+/// What the last evaluation of a derivation cost.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CostRow {
+    /// The kind of derivation: an asset form or a view.
+    pub kind: String,
+    /// The name of the derivation.
+    pub subject: String,
+    /// The wall-clock time in microseconds.
+    pub wall_us: u64,
+    /// The CPU time in microseconds.
+    pub cpu_us: u64,
+    /// The bytes read.
+    pub read: u64,
+    /// The bytes written.
+    pub written: u64,
+    /// The estimated peak memory in bytes.
+    pub estimated_memory: u64,
+    /// The measured peak memory in bytes.
+    pub actual_memory: u64,
+}
+
 /// The last fetch of a bundle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleRow {
@@ -112,6 +136,7 @@ impl Catalog {
         tx.open_table(DERIVATIONS).map_err(other)?;
         tx.open_table(BUNDLE_INDEXES).map_err(other)?;
         tx.open_table(ASSETS).map_err(other)?;
+        tx.open_table(COSTS).map_err(other)?;
         tx.open_table(BUNDLES).map_err(other)?;
         tx.open_table(VERSIONS).map_err(other)?;
         tx.open_table(POINTERS).map_err(other)?;
@@ -185,6 +210,29 @@ impl Catalog {
                 fingerprint: fingerprint.to_owned(),
                 document: document.parse().map_err(io::Error::other)?,
                 error: error.map(str::to_owned),
+            });
+        }
+        Ok(rows)
+    }
+
+    /// The cost of every derivation that has been measured, in (kind, subject) order.
+    pub fn costs(&self) -> io::Result<Vec<CostRow>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(COSTS).map_err(other)?;
+        let mut rows = Vec::new();
+        for entry in table.range::<(&str, &str)>(..).map_err(other)? {
+            let (key, value) = entry.map_err(other)?;
+            let (kind, subject) = key.value();
+            let (wall_us, cpu_us, read, written, estimated_memory, actual_memory) = value.value();
+            rows.push(CostRow {
+                kind: kind.to_owned(),
+                subject: subject.to_owned(),
+                wall_us,
+                cpu_us,
+                read,
+                written,
+                estimated_memory,
+                actual_memory,
             });
         }
         Ok(rows)
@@ -287,6 +335,25 @@ impl Batch {
                     row.fingerprint.as_str(),
                     document.as_str(),
                     row.error.as_deref(),
+                ),
+            )
+            .map_err(other)?;
+        Ok(())
+    }
+
+    /// Records what a derivation cost, replacing any earlier measurement.
+    pub fn put_cost(&mut self, row: &CostRow) -> io::Result<()> {
+        let mut table = self.0.open_table(COSTS).map_err(other)?;
+        table
+            .insert(
+                (row.kind.as_str(), row.subject.as_str()),
+                (
+                    row.wall_us,
+                    row.cpu_us,
+                    row.read,
+                    row.written,
+                    row.estimated_memory,
+                    row.actual_memory,
                 ),
             )
             .map_err(other)?;

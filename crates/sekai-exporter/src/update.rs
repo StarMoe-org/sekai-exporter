@@ -10,6 +10,7 @@ use std::sync::Arc;
 use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
 use sekai_catalog::{Key, LocalStore};
+use sekai_convert::tables::TableConverter;
 use sekai_format::identity::VersionIdentity;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
@@ -21,9 +22,7 @@ use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
 use crate::budget;
-use crate::export::{
-    BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, table_converters, write_ledger,
-};
+use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
 use crate::monitor::Monitor;
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -566,6 +565,17 @@ fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Err
 
 /// The value of the secret `name`: the environment variable of that name, or else the file of that
 /// name in `secrets`, without surrounding whitespace.
+/// The converters that build assets from game data tables.
+#[cfg(feature = "episode")]
+fn table_converters() -> Vec<Box<dyn TableConverter>> {
+    vec![Box::new(sekai_moesekai::episode::Episode)]
+}
+
+#[cfg(not(feature = "episode"))]
+fn table_converters() -> Vec<Box<dyn TableConverter>> {
+    Vec::new()
+}
+
 #[cfg(feature = "s3")]
 fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
     if let Ok(value) = std::env::var(name) {

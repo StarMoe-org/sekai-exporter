@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
-use sekai_convert::tables::TableConverter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::ledger::BundleLedger;
@@ -134,16 +133,6 @@ pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
     .into_iter()
     .flatten()
     .collect()
-}
-
-#[cfg(feature = "episode")]
-pub(crate) fn table_converters() -> Vec<Box<dyn TableConverter>> {
-    vec![Box::new(sekai_moesekai::episode::Episode)]
-}
-
-#[cfg(not(feature = "episode"))]
-pub(crate) fn table_converters() -> Vec<Box<dyn TableConverter>> {
-    Vec::new()
 }
 
 #[cfg(feature = "catalog-db")]

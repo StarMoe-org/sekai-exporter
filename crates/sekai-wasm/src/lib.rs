@@ -32,6 +32,8 @@ pub fn converters() -> Vec<Box<dyn Converter>> {
         Box::new(sekai_convert::video::Video),
         Box::new(sekai_convert::text::Text),
         Box::new(sekai_convert::text::Font),
+        Box::new(sekai_convert::live2d::Model),
+        Box::new(sekai_convert::live2d::Motions),
         Box::new(sekai_moesekai::scenario::Scenario),
     ]
 }

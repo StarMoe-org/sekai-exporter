@@ -104,7 +104,7 @@ impl Converter for Texture {
 
 /// The estimated peak memory of converting and encoding texture `id`: its stored image data and
 /// [`DECODED_FACTOR`] times the size of its decoded slices.
-fn texture_memory(id: ObjectId, cx: &dyn Context) -> Option<u64> {
+pub(crate) fn texture_memory(id: ObjectId, cx: &dyn Context) -> Option<u64> {
     let object = cx.object(id).ok()?;
     let fields = &object.fields;
     let width = u64::from(dimension(fields, "m_Width").ok()?);

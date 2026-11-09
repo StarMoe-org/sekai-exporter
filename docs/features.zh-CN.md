@@ -24,13 +24,13 @@
 | `video` | 通过 `ffmpeg` 程序（需带 `libx264`，不随导出器分发）把 CRI USM 文件转换为 H.264 与 AAC 的 MP4 |
 | `model` | 预制体层级、网格、蒙皮与材质，转换为 glTF |
 | `animation` | `AnimationClip`，转换为曲线文档；绑定关系允许时同时转换为 glTF 动画 |
-| `live2d` | Live2D Cubism 模型及其动作 |
+| `live2d` | Live2D Cubism 模型及其动作集，形式见 [Live2D](spec/live2d.zh-CN.md) |
 | `ugui` | UI 预制体，转换为布局文档 |
 | `text` | `TextAsset` 与字体 |
 | `timeline` | Timeline 资产，转换为时间轴文档 |
 | `particles` | 粒子系统，转换为粒子文档 |
 
-`model`、`animation`、`live2d`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。`audio` 目前尚不转换 `AudioClip`。
+`model`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。`animation` 把 `AnimationClip` 解码为 Live2D 形式所包含的[剪辑文档](spec/clip-documents.zh-CN.md)，目前尚不单独产出资产。`audio` 目前尚不转换 `AudioClip`。
 
 `sekai-moesekai` 中本游戏专有、服务于默认使用者的转换器族：
 

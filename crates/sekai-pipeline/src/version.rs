@@ -246,4 +246,23 @@ impl Context for Version<'_> {
             Chunk::Owned(bytes) => Chunk::Owned(bytes),
         })
     }
+
+    fn container(&self, from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
+        let mut entries = Vec::new();
+        for (file, index) in self.index.bundles()[from.bundle].files.iter().enumerate() {
+            let holder = ObjectId {
+                bundle: from.bundle,
+                file,
+                path_id: 0,
+            };
+            for (path, reference) in &index.container {
+                if let Resolved::Object(id) = self.index.resolve(holder, *reference)?
+                    && id.bundle == from.bundle
+                {
+                    entries.push((path.clone(), id));
+                }
+            }
+        }
+        Ok(entries)
+    }
 }

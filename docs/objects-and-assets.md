@@ -29,7 +29,7 @@ Objects are the engine's **storage form**. They are designed for the engine to l
 
 An **asset** is a self-contained result that a program outside the engine can use: an image, a model, an audio file, a scenario document, a curve document.
 
-An asset almost never maps to one object. A model is a **closure** of objects: a root prefab and everything reachable from it that the model needs. A sprite is a **region** of a texture, cut out by a rectangle stored in another object. One audio object can hold dozens of **cues**, each an asset of its own. Some assets also need the game's **tables**, which are not in any bundle.
+An asset almost never maps to one object. A model is a **closure** of objects: a root prefab and everything reachable from it that the model needs. A sprite is a **region** of a texture, cut out by a rectangle stored in another object. One audio object can hold dozens of **cues**, each a member of its asset. Some assets also need the game's **tables**, which are not in any bundle.
 
 **Exporting** turns object closures into assets. The hard question is what exactly an asset should contain, and the answer does not come from the files.
 

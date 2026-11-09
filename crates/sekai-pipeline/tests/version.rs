@@ -86,6 +86,21 @@ fn references_resolve_across_bundles() {
 }
 
 #[test]
+fn the_container_lists_the_objects_of_the_bundle() {
+    let (version, _) = Version::open(fixtures(), &NoBlockCache);
+    let small = find(&version, "small");
+    let container = version.container(small).unwrap();
+    assert!(!container.is_empty());
+    for (path, id) in &container {
+        assert_eq!(id.bundle, small.bundle);
+        let paths = version
+            .index()
+            .container_paths(id.bundle, id.file, id.path_id);
+        assert!(paths.contains(path), "{path}");
+    }
+}
+
+#[test]
 fn bundles_that_share_a_name_are_left_out() {
     let inputs = vec![
         input("fixture_data", "fixture_data"),

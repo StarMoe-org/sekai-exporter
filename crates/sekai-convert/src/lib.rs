@@ -74,6 +74,11 @@ pub trait Context {
         offset: u64,
         size: u64,
     ) -> Result<Chunk<'_>, ConvertError>;
+
+    /// The container of the bundle that holds object `from`: each path and the object it names,
+    /// in container order. Converters use it to find objects that belong together only by name,
+    /// such as the wave bank of a cue sheet or the later segments of a video.
+    fn container(&self, from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError>;
 }
 
 /// An object as a converter sees it.

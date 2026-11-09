@@ -6,4 +6,4 @@ pub mod asset;
 pub mod identity;
 pub mod publication;
 
-pub use asset::{AssetDocument, AssetError, MemberFile, SourceObject};
+pub use asset::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};

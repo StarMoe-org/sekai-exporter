@@ -63,7 +63,8 @@ pub trait Converter: Send + Sync {
 
     /// Objects that converting `root` reads and that `root` does not reach through references,
     /// such as the later segments of a split file. They and what they refer to join the closure
-    /// of the asset, so they are in its fingerprint and its `sources`. The default is none.
+    /// of the asset, so they are in its fingerprint and the conversion may read them. The default
+    /// is none.
     fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
         let _ = (root, cx);
         Vec::new()

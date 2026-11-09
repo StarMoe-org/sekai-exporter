@@ -279,6 +279,7 @@ mod tests {
                     media_type: String::new(),
                 })
                 .collect(),
+            resources: Vec::new(),
             references: Vec::new(),
             error: None,
         }

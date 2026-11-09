@@ -8,12 +8,13 @@ use sekai_catalog::{Derivations, Derived, Key, Store};
 use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
-use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject};
+use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sha2::{Digest, Sha256};
 
 use crate::metrics::Recorder;
-use crate::naming::{Candidate, assign, logical_path};
+use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
+use crate::reads::Reads;
 use crate::sched::{Limits, Need, Resident, Scheduler, Slots};
 use crate::version::Version;
 
@@ -302,14 +303,16 @@ pub(crate) fn derive_within(
     fusion: Option<&dyn Fusion>,
 ) -> io::Result<(Derived, Option<String>)> {
     let form = plan.converter.name();
+    let reads = Reads::new(version, &plan.closure);
     let result = slots.cpu(1, || {
         let mut span = recorder.span("convert", form, &plan.name);
-        let result = plan.converter.convert(plan.closure[0], version);
+        let result = plan.converter.convert(plan.closure[0], &reads);
         if let Ok(Some(asset)) = &result {
             span.memory(cost.memory, decoded_size(asset));
         }
         result
     });
+    let (objects, resources) = reads.finish();
     let encoders = if cost.class == CostClass::Wide { 2 } else { 1 };
     let mut members = Vec::new();
     let mut decoded = None;
@@ -360,7 +363,7 @@ pub(crate) fn derive_within(
         Err(e) => Some(asset_error(&e)),
     };
     let code = error.as_ref().map(|e| e.code.clone());
-    let document = build_document(plan, version, members, error);
+    let document = build_document(plan, version, &objects, &resources, members, error);
     let key = store_document(store, &document)?;
     if let (Some(fusion), Some(asset)) = (fusion, &decoded) {
         slots.cpu(1, || fusion.extra(asset, &document))?;
@@ -376,7 +379,11 @@ pub(crate) fn document(
     members: Vec<MemberFile>,
     error: AssetError,
 ) -> io::Result<Key> {
-    store_document(store, &build_document(plan, version, members, Some(error)))
+    let root = &plan.closure[..1];
+    store_document(
+        store,
+        &build_document(plan, version, root, &[], members, Some(error)),
+    )
 }
 
 fn store_document(store: &dyn Store, document: &AssetDocument) -> io::Result<Key> {
@@ -387,12 +394,20 @@ fn store_document(store: &dyn Store, document: &AssetDocument) -> io::Result<Key
 fn build_document(
     plan: &Planned<'_>,
     version: &Version<'_>,
+    objects: &[ObjectId],
+    resources: &[(usize, String)],
     members: Vec<MemberFile>,
     error: Option<AssetError>,
 ) -> AssetDocument {
     let index = version.index();
-    let sources = plan
-        .closure
+    let resources = resources
+        .iter()
+        .map(|(bundle, file)| SourceResource {
+            bundle: index.bundles()[*bundle].name.clone(),
+            file: file.clone(),
+        })
+        .collect();
+    let sources = objects
         .iter()
         .filter_map(|id| {
             let bundle = &index.bundles()[id.bundle];
@@ -412,6 +427,7 @@ fn build_document(
         form_version: plan.converter.version(),
         fingerprint: hex(&plan.fingerprint),
         sources,
+        resources,
         members,
         references: Vec::new(),
         error,
@@ -505,14 +521,16 @@ pub(crate) fn plan<'a>(
             .flatten();
         for converter in converters {
             if converter.is_root(object, script, paths) {
-                roots.push((converter.as_ref(), id, object, logical_path(path)));
+                let bundle = &index.bundles()[id.bundle].name;
+                let named = path_in_bundle(bundle, logical_path(path));
+                roots.push((converter.as_ref(), id, object, named));
             }
         }
     }
     let candidates: Vec<Candidate<'_>> = roots
         .iter()
         .map(|(_, id, object, logical)| Candidate {
-            logical,
+            logical: logical.as_ref(),
             class_id: object.class_id,
             class: &object.class,
             bundle: &index.bundles()[id.bundle].name,
@@ -529,7 +547,7 @@ pub(crate) fn plan<'a>(
     let mut derivations = Vec::new();
     for ((converter, id, _, logical), name) in roots.iter().zip(names) {
         let Some(name) = name else {
-            unnamed.push(((*logical).to_owned(), id.path_id));
+            unnamed.push((logical.to_string(), id.path_id));
             continue;
         };
         let closure = closure(index, *id, &converter.inputs(*id, version));

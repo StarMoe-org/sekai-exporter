@@ -270,6 +270,7 @@ fn asset(store: &LocalStore, name: &str, members: &[(&str, &[u8])]) -> Binding {
         fingerprint: "ab".to_owned(),
         sources: Vec::new(),
         members,
+        resources: Vec::new(),
         references: Vec::new(),
         error: None,
     };

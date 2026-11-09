@@ -22,8 +22,12 @@ pub struct AssetDocument {
     pub form_version: u32,
     /// The fingerprint, as lowercase hexadecimal.
     pub fingerprint: String,
-    /// The root object first, then the rest of the closure ordered by bundle and path ID.
+    /// The root object first, then the other objects the conversion read, ordered by bundle and
+    /// path ID.
     pub sources: Vec<SourceObject>,
+    /// The resource files the conversion read, ordered by bundle and file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<SourceResource>,
     /// The canonical file of each member, in the order the form defines.
     pub members: Vec<MemberFile>,
     /// The names of the assets this asset refers to, in ascending order.
@@ -55,6 +59,15 @@ pub struct SourceObject {
     pub path_id: i64,
     /// The class name.
     pub class: String,
+}
+
+/// A resource file of a bundle that an asset was made from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceResource {
+    /// The bundle name.
+    pub bundle: String,
+    /// The name of the file within the bundle.
+    pub file: String,
 }
 
 /// The canonical file of a member.
@@ -120,6 +133,7 @@ mod tests {
                 extension: "webp".to_owned(),
                 media_type: "image/webp".to_owned(),
             }],
+            resources: Vec::new(),
             references: vec![],
             error: None,
         }

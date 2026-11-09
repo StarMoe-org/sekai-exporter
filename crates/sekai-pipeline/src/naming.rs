@@ -1,5 +1,6 @@
 //! The names of assets: a pure function of the root objects of a version.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 const RESOURCES: &str = "assets/sekai/assetbundle/resources/";
@@ -17,6 +18,15 @@ pub fn logical_path(container_path: &str) -> &str {
     match path.rfind('.') {
         Some(dot) if !path[dot..].contains('/') => &path[..dot],
         _ => path,
+    }
+}
+
+/// The path a root of `bundle` with the logical path `logical` is named by: the logical path when
+/// it lies in the directory of the bundle, and otherwise the logical path under that directory.
+pub fn path_in_bundle<'a>(bundle: &str, logical: &'a str) -> Cow<'a, str> {
+    match logical.strip_prefix(bundle) {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => Cow::Borrowed(logical),
+        _ => Cow::Owned(format!("{bundle}/{logical}")),
     }
 }
 
@@ -119,6 +129,14 @@ mod tests {
         );
         assert_eq!(logical_path("other/a.b/c"), "other/a.b/c");
         assert_eq!(logical_path("a/b.acb.bytes"), "a/b.acb");
+    }
+
+    #[test]
+    fn a_name_stays_in_the_directory_of_its_bundle() {
+        assert_eq!(path_in_bundle("a/b", "a/b/c"), "a/b/c");
+        assert_eq!(path_in_bundle("a/b", "a/b"), "a/b");
+        assert_eq!(path_in_bundle("a/b", "a/bc/d"), "a/b/a/bc/d");
+        assert_eq!(path_in_bundle("a/b", "x/y"), "a/b/x/y");
     }
 
     #[test]

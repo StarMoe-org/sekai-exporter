@@ -117,10 +117,14 @@ fn fusion_sees_every_converted_asset_and_changes_nothing() {
     std::fs::remove_dir_all(plain).unwrap();
 }
 
-/// The texture form, also reading everything the bundle of the root lists.
-struct Widened;
+/// The texture form, which may also read everything the bundle of the root lists and may declare
+/// it.
+struct Wide {
+    declared: bool,
+    reads: bool,
+}
 
-impl Converter for Widened {
+impl Converter for Wide {
     fn name(&self) -> &'static str {
         Texture.name()
     }
@@ -134,27 +138,95 @@ impl Converter for Widened {
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        if self.reads {
+            for (_, id) in cx.container(root)? {
+                cx.object(id)?;
+            }
+        }
         Texture.convert(root, cx)
     }
 
     fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
+        if !self.declared {
+            return Vec::new();
+        }
         let entries = cx.container(root).unwrap();
         entries.into_iter().map(|(_, id)| id).collect()
     }
 }
 
+fn documents(root: &Path, converter: Box<dyn Converter>) -> Vec<AssetDocument> {
+    let evaluation = run_with(converter, root, 2, &MemoryDerivations::default());
+    let store = LocalStore::open(root).unwrap();
+    let read = |output: &sekai_pipeline::Output| {
+        AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap()
+    };
+    evaluation.outputs.iter().map(read).collect()
+}
+
 #[test]
 fn declared_inputs_join_the_sources_and_the_fingerprint() {
-    let sources = |root: &Path, converter: Box<dyn Converter>| {
-        let evaluation = run_with(converter, root, 2, &MemoryDerivations::default());
-        let store = LocalStore::open(root).unwrap();
-        let documents = evaluation.outputs.iter().map(|output| {
-            AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap()
-        });
-        documents.map(|d| d.sources.len()).sum::<usize>()
-    };
     let (narrow, wide) = (scratch("narrow"), scratch("wide"));
-    assert!(sources(&wide, Box::new(Widened)) > sources(&narrow, Box::new(Texture)));
+    let plain = documents(&narrow, Box::new(Texture));
+    let declared = documents(
+        &wide,
+        Box::new(Wide {
+            declared: true,
+            reads: true,
+        }),
+    );
+    assert!(declared.iter().all(|d| d.error.is_none()));
+    let count = |all: &[AssetDocument]| all.iter().map(|d| d.sources.len()).sum::<usize>();
+    assert!(count(&declared) > count(&plain));
+    assert!(
+        plain
+            .iter()
+            .zip(&declared)
+            .any(|(a, b)| a.fingerprint != b.fingerprint)
+    );
+    std::fs::remove_dir_all(narrow).unwrap();
+    std::fs::remove_dir_all(wide).unwrap();
+}
+
+#[test]
+fn reading_outside_the_closure_is_a_named_error() {
+    let root = scratch("undeclared");
+    let found = documents(
+        &root,
+        Box::new(Wide {
+            declared: false,
+            reads: true,
+        }),
+    );
+    let code = |d: &AssetDocument| d.error.as_ref().map(|e| e.code.clone());
+    assert!(
+        found
+            .iter()
+            .any(|d| code(d).as_deref() == Some("undeclared_read"))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sources_list_what_was_read_and_not_what_was_declared() {
+    let (narrow, wide) = (scratch("listed"), scratch("unread"));
+    let plain = documents(&narrow, Box::new(Texture));
+    let unread = documents(
+        &wide,
+        Box::new(Wide {
+            declared: true,
+            reads: false,
+        }),
+    );
+    for (a, b) in plain.iter().zip(&unread) {
+        assert_eq!(a.sources, b.sources);
+    }
+    assert!(
+        plain
+            .iter()
+            .zip(&unread)
+            .any(|(a, b)| a.fingerprint != b.fingerprint)
+    );
     std::fs::remove_dir_all(narrow).unwrap();
     std::fs::remove_dir_all(wide).unwrap();
 }

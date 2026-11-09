@@ -7,8 +7,10 @@ pub mod client;
 pub mod eval;
 mod index_record;
 pub mod lazy;
+pub mod ledger;
 pub mod metrics;
 pub mod naming;
+mod reads;
 pub mod sched;
 pub mod version;
 

@@ -6,8 +6,10 @@ use std::sync::Arc;
 
 use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
+use sekai_format::AssetDocument;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
+use sekai_pipeline::ledger::account;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes, Version, evaluate_with, parallel};
 use sekai_publish::{Binding, Plan, index, plan, tree};
@@ -190,9 +192,10 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let store = LocalStore::open(options.output.join("store"))
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
     let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
+    let converters = converters(None);
     let evaluation = evaluate_with(
         &version,
-        &converters(None),
+        &converters,
         &store,
         derivations.as_ref(),
         monitor,
@@ -209,6 +212,14 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &store,
         monitor,
     )?;
+    write_ledger(
+        &evaluation,
+        &version,
+        &converters,
+        &options.output,
+        &store,
+        monitor,
+    )?;
     let errored = evaluation.outputs.iter().filter(|o| o.error.is_some());
     println!(
         "bundles {} failed {failed} assets {} errors {} unnamed {} converted {} reused {}",
@@ -220,6 +231,67 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation.reused
     );
     Ok(failed == 0)
+}
+
+/// The classes and script classes that carry no asset content. `AssetBundle` is the table of
+/// contents of a bundle, read when the bundle is indexed. `MonoScript` names the script of other
+/// objects. `SoundBundleBuildData` and `MovieBundleBuildData` list the files of a bundle.
+const IGNORED: &[&str] = &[
+    "AssetBundle",
+    "MonoScript",
+    "SoundBundleBuildData",
+    "MovieBundleBuildData",
+];
+
+/// Writes what became of the contents of each bundle to `<output>/ledger.tsv`.
+pub(crate) fn write_ledger(
+    evaluation: &Evaluation,
+    version: &Version<'_>,
+    converters: &[Box<dyn Converter>],
+    output: &Path,
+    store: &LocalStore,
+    monitor: &Monitor,
+) -> Result<(), lexopt::Error> {
+    let _span = monitor.span("publish", "ledger", "");
+    let documents = evaluation
+        .outputs
+        .iter()
+        .map(|o| {
+            let bytes = store.read(&o.document).map_err(|e| e.to_string())?;
+            AssetDocument::from_bytes(&bytes).map_err(|e| e.to_string())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let ledgers = account(version, converters, &documents, IGNORED);
+    let mut text = String::from(
+        "bundle\tobjects\troots\tread\tignored\tunknown\tresources\tresources_read\tunknown_classes\n",
+    );
+    for l in &ledgers {
+        let classes: Vec<String> = l
+            .unknown_classes
+            .iter()
+            .map(|(class, count)| format!("{class}={count}"))
+            .collect();
+        text.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            l.bundle,
+            l.objects,
+            l.roots,
+            l.read,
+            l.ignored,
+            l.unknown,
+            l.resources,
+            l.resources_read,
+            classes.join(",")
+        ));
+    }
+    std::fs::write(output.join("ledger.tsv"), text).map_err(|e| e.to_string())?;
+    println!(
+        "ledger bundles {} complete {} unknown objects {}",
+        ledgers.len(),
+        ledgers.iter().filter(|l| l.complete()).count(),
+        ledgers.iter().map(|l| l.unknown).sum::<u64>()
+    );
+    Ok(())
 }
 
 /// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,

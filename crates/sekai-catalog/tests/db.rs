@@ -60,6 +60,7 @@ fn document(fingerprint: &str, error: Option<AssetError>) -> AssetDocument {
         fingerprint: fingerprint.to_owned(),
         sources: Vec::new(),
         members: Vec::new(),
+        resources: Vec::new(),
         references: Vec::new(),
         error,
     }

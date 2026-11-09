@@ -73,6 +73,7 @@ fn document(
         fingerprint: "ab".to_owned(),
         sources: Vec::new(),
         members,
+        resources: Vec::new(),
         references: Vec::new(),
         error,
     };

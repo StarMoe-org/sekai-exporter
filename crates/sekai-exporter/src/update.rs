@@ -20,7 +20,7 @@ use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
 use crate::budget;
-use crate::export::{BLOCK_CACHE_BYTES, converters, publish};
+use crate::export::{BLOCK_CACHE_BYTES, converters, publish, write_ledger};
 use crate::monitor::Monitor;
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -405,9 +405,10 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     }
 
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
+    let converters = converters(hca_key);
     let evaluation = evaluate_fused(
         &version,
-        &converters(hca_key),
+        &converters,
         &store,
         &derivations,
         monitor,
@@ -425,6 +426,14 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &target,
         &options.output,
         options.tree.as_deref(),
+        &store,
+        monitor,
+    )?;
+    write_ledger(
+        &evaluation,
+        &version,
+        &converters,
+        &options.output,
         &store,
         monitor,
     )?;

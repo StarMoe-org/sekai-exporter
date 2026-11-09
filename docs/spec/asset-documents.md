@@ -37,7 +37,8 @@ One document is written per asset, at `<name>.asset.json`, and is itself an obje
 | `name` | The name of the asset: its logical path and any suffix assigned by the [naming rules](../architecture.md#identity) |
 | `form`, `form_version` | The asset form and its version. Each form has a specification in this directory |
 | `fingerprint` | The [fingerprint](../pipeline.md#invariants) of the asset, as lowercase hexadecimal |
-| `sources` | The objects the asset was made from: the root first, then the rest of the closure ordered by bundle and path ID. `path_id` is a decimal string, as in [object documents](object-documents.md) |
+| `sources` | The objects the conversion read: the root first, then the others ordered by bundle and path ID. `path_id` is a decimal string, as in [object documents](object-documents.md) |
+| `resources` | Present only when the conversion read resource files: `{ "bundle": "…", "file": "…" }`, ordered by bundle and file |
 | `members` | The files of the asset, in the order the form defines. `role` is defined by the form and is unique within the asset. `sha256` names the file in the store. `size` is in bytes |
 | `references` | The names of other assets this asset refers to, in ascending order |
 | `error` | Present only when the asset could not be produced: `{ "code": "…", "message": "…" }`. `members` is then empty |

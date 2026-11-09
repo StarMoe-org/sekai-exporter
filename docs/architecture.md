@@ -100,7 +100,7 @@ The workspace has fourteen crates in a flat `crates/` directory. A crate boundar
 | 2 | `sekai-convert` | The converter interface, writers and the general-purpose converters |
 | 2 | `sekai-encode` | Encoders for decoded content. The canonical encoders are pure Rust and always present; every C dependency of an encoder is confined here, one feature each |
 | 2 | `sekai-publish` | Layouts, stores, the publication protocol and asset listings |
-| 3 | `sekai-pipeline` | The eager and lazy evaluators, the scheduler and the derivation cache |
+| 3 | `sekai-pipeline` | The eager, streaming and lazy evaluators, the scheduler and the derivation cache |
 | 3 | `sekai-moesekai` | Scenarios, episodes, virtual lives, costumes and the storage view |
 | 3 | `sekai-mysekai` | MySekai assets in the full form a game-reproducing runtime needs |
 | 4 | `sekai-exporter` | The command-line program |

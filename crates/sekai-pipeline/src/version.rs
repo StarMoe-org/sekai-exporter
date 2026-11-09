@@ -15,8 +15,12 @@ use sha2::{Digest, Sha256};
 use crate::eval::parallel;
 use crate::index_record::IndexRecord;
 
-/// How many bundles stay parsed at once.
-const OPEN_BUNDLES: usize = 4096;
+/// The estimated memory of the bundles that stay parsed, in bytes.
+const PARSED_BYTES: u64 = 512 << 20;
+
+/// The estimated memory of a parsed serialized file per byte of its metadata: the type tree, the
+/// object table and the compiled layouts.
+const PARSED_PER_METADATA_BYTE: u64 = 4;
 
 /// One bundle: its container and its serialized files.
 struct Opened {
@@ -41,6 +45,16 @@ impl Opened {
             }
         }
         Ok(Self { bundle, files })
+    }
+
+    /// The estimated memory of the parsed form, in bytes.
+    fn bytes(&self) -> u64 {
+        let metadata: u64 = self
+            .files
+            .iter()
+            .map(|(_, file, _)| file.header.metadata_size)
+            .sum();
+        metadata.saturating_mul(PARSED_PER_METADATA_BYTE)
     }
 
     fn record(&self, cache: &dyn BlockCache) -> sekai_unity::Result<IndexRecord> {
@@ -100,37 +114,92 @@ fn record(
     Ok(record)
 }
 
-/// The most recently used bundles that are parsed.
+/// The most recently used parsed bundles, by content hash, within an estimate of their memory.
 #[derive(Default)]
 struct Recent {
     tick: u64,
-    bundles: HashMap<usize, (Arc<Opened>, u64)>,
-    order: BTreeMap<u64, usize>,
+    /// The estimated memory of the bundles held.
+    bytes: u64,
+    bundles: HashMap<[u8; 32], (Arc<Opened>, u64, u64)>,
+    order: BTreeMap<u64, [u8; 32]>,
 }
 
 impl Recent {
-    fn get(&mut self, bundle: usize) -> Option<Arc<Opened>> {
+    fn get(&mut self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
         let tick = self.tick;
         self.tick += 1;
-        let (opened, used) = self.bundles.get_mut(&bundle)?;
+        let (opened, used, _) = self.bundles.get_mut(bundle)?;
         self.order.remove(used);
-        self.order.insert(tick, bundle);
+        self.order.insert(tick, *bundle);
         *used = tick;
         Some(opened.clone())
     }
 
-    fn insert(&mut self, bundle: usize, opened: Arc<Opened>) {
+    /// Holds `opened`, then lets go of the least recently used bundles until the rest fit in
+    /// `limit`. The newest bundle stays, whatever its size.
+    fn insert(&mut self, bundle: [u8; 32], opened: Arc<Opened>, limit: u64) {
+        self.remove(&bundle);
         let tick = self.tick;
         self.tick += 1;
-        if let Some((_, used)) = self.bundles.insert(bundle, (opened, tick)) {
-            self.order.remove(&used);
-        }
+        let bytes = opened.bytes();
+        self.bundles.insert(bundle, (opened, tick, bytes));
         self.order.insert(tick, bundle);
-        if self.bundles.len() > OPEN_BUNDLES
-            && let Some((_, oldest)) = self.order.pop_first()
-        {
-            self.bundles.remove(&oldest);
+        self.bytes += bytes;
+        while self.bytes > limit && self.bundles.len() > 1 {
+            let Some((_, oldest)) = self.order.pop_first() else {
+                break;
+            };
+            if let Some((_, _, bytes)) = self.bundles.remove(&oldest) {
+                self.bytes -= bytes;
+            }
         }
+    }
+
+    fn remove(&mut self, bundle: &[u8; 32]) {
+        if let Some((_, used, bytes)) = self.bundles.remove(bundle) {
+            self.order.remove(&used);
+            self.bytes -= bytes;
+        }
+    }
+}
+
+/// Parsed bundles, which versions over the same bundles can share. A bundle is held by the hash of
+/// its bytes, and the least recently used ones are let go once the estimate of their memory
+/// exceeds a limit.
+pub(crate) struct Parsed {
+    limit: u64,
+    recent: Mutex<Recent>,
+}
+
+impl Parsed {
+    /// Holds parsed bundles within an estimated `limit` bytes.
+    pub(crate) fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            recent: Mutex::default(),
+        }
+    }
+
+    fn get(&self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
+        self.recent.lock().unwrap().get(bundle)
+    }
+
+    fn insert(&self, bundle: [u8; 32], opened: Arc<Opened>) {
+        self.recent
+            .lock()
+            .unwrap()
+            .insert(bundle, opened, self.limit);
+    }
+
+    /// Lets go of the bundle whose bytes hash to `bundle`.
+    pub(crate) fn forget(&self, bundle: &[u8; 32]) {
+        self.recent.lock().unwrap().remove(bundle);
+    }
+
+    /// The estimated memory of the bundles held, in bytes.
+    #[cfg(test)]
+    fn bytes(&self) -> u64 {
+        self.recent.lock().unwrap().bytes
     }
 }
 
@@ -145,7 +214,7 @@ pub struct BundleInput {
 }
 
 /// A bundle that could not be opened or indexed, with the reason.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleError {
     /// The bundle name.
     pub name: String,
@@ -158,13 +227,13 @@ pub struct BundleError {
 /// The bundles of one version, indexed, with references resolved across bundles.
 ///
 /// A bundle is parsed when an object or a resource of it is first read, and only the most recently
-/// used bundles stay parsed.
+/// used bundles stay parsed, within an estimate of their memory.
 pub struct Version<'c> {
     /// The bytes and hash of each bundle, in the order of [`VersionIndex::bundles`].
     bundles: Vec<(Arc<dyn ByteSource>, [u8; 32])>,
     /// The hashes of the resource entries of each bundle.
     resources: Vec<Vec<[u8; 32]>>,
-    recent: Mutex<Recent>,
+    parsed: Arc<Parsed>,
     index: VersionIndex,
     cache: &'c dyn BlockCache,
 }
@@ -235,21 +304,28 @@ impl<'c> Version<'c> {
         let version = Self {
             bundles,
             resources,
-            recent: Mutex::default(),
+            parsed: Arc::new(Parsed::new(PARSED_BYTES)),
             index: VersionIndex::new(bundle_indexes),
             cache,
         };
         Ok((version, errors))
     }
 
+    /// Keeps parsed bundles in `parsed`, which other versions may share, instead of in a set of
+    /// its own.
+    pub(crate) fn sharing(mut self, parsed: Arc<Parsed>) -> Self {
+        self.parsed = parsed;
+        self
+    }
+
     /// The parsed form of a bundle.
     fn opened(&self, bundle: usize) -> Result<Arc<Opened>, ConvertError> {
-        if let Some(opened) = self.recent.lock().unwrap().get(bundle) {
+        let (source, sha256) = &self.bundles[bundle];
+        if let Some(opened) = self.parsed.get(sha256) {
             return Ok(opened);
         }
-        let (source, sha256) = &self.bundles[bundle];
         let opened = Arc::new(Opened::open(source.clone(), *sha256, self.cache)?);
-        self.recent.lock().unwrap().insert(bundle, opened.clone());
+        self.parsed.insert(*sha256, opened.clone());
         Ok(opened)
     }
 
@@ -393,5 +469,53 @@ impl Context for Version<'_> {
             }
         }
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use sekai_unity::NoBlockCache;
+
+    use super::*;
+
+    fn opened(file: &str) -> ([u8; 32], Arc<Opened>) {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../sekai-unity/tests/fixtures/lz4")
+            .join(file);
+        let bytes = std::fs::read(path).unwrap();
+        let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+        let source: Arc<dyn ByteSource> = Arc::new(Arc::<[u8]>::from(bytes));
+        let opened = Opened::open(source, sha256, &NoBlockCache).unwrap();
+        (sha256, Arc::new(opened))
+    }
+
+    #[test]
+    fn parsed_bundles_stay_within_their_estimated_memory() {
+        let (a, first) = opened("fixture_scene");
+        let (b, second) = opened("fixture_data");
+        let (size_a, size_b) = (first.bytes(), second.bytes());
+        assert!(size_a > 0 && size_b > 0);
+
+        let one = Parsed::new(size_a.max(size_b));
+        one.insert(a, first.clone());
+        one.insert(b, second.clone());
+        assert!(one.get(&a).is_none());
+        assert!(one.get(&b).is_some());
+        assert_eq!(one.bytes(), size_b);
+
+        let both = Parsed::new(size_a + size_b);
+        both.insert(a, first.clone());
+        both.insert(b, second);
+        assert!(both.get(&a).is_some());
+        assert_eq!(both.bytes(), size_a + size_b);
+        both.forget(&a);
+        assert!(both.get(&a).is_none());
+        assert_eq!(both.bytes(), size_b);
+
+        let none = Parsed::new(0);
+        none.insert(a, first);
+        assert!(none.get(&a).is_some(), "the newest bundle stays");
     }
 }

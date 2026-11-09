@@ -72,6 +72,7 @@
 | 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
 | 运行时加载库 | [`libloading`](https://crates.io/crates/libloading) | 链接 | ISC |
 | 命令行解析 | [`lexopt`](https://crates.io/crates/lexopt) | 链接 | MIT |
+| CPU 与内存采样 | [`sysinfo`](https://crates.io/crates/sysinfo)、[`cpu-time`](https://crates.io/crates/cpu-time) | 链接进命令行程序 | MIT；MIT OR Apache-2.0 |
 
 ## 运行时加载的库
 

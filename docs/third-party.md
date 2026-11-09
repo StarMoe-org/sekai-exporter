@@ -72,6 +72,7 @@ An entry is added in the same change that adds the component, and removed in the
 | Catalog | [`redb`](https://crates.io/crates/redb) | Linked when the `catalog-db` feature is enabled | MIT OR Apache-2.0 |
 | Loading libraries at run time | [`libloading`](https://crates.io/crates/libloading) | Linked | ISC |
 | Command-line parsing | [`lexopt`](https://crates.io/crates/lexopt) | Linked | MIT |
+| CPU and memory sampling | [`sysinfo`](https://crates.io/crates/sysinfo), [`cpu-time`](https://crates.io/crates/cpu-time) | Linked in the command-line program | MIT; MIT OR Apache-2.0 |
 
 ## Libraries loaded at run time
 

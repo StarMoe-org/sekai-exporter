@@ -5,6 +5,7 @@
 #[cfg(feature = "client")]
 pub mod client;
 pub mod eval;
+pub mod metrics;
 pub mod naming;
 pub mod version;
 

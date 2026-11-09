@@ -7,9 +7,12 @@ use std::sync::Arc;
 use sekai_catalog::LocalStore;
 use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
+use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, MemoryDerivations, Version, evaluate, parallel};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
+
+use crate::monitor::Monitor;
 
 const BLOCK_CACHE_BYTES: usize = 256 << 20;
 
@@ -63,6 +66,15 @@ fn read(path: &std::path::Path) -> Result<BundleInput, String> {
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
     let options = parse(args)?;
+    std::fs::create_dir_all(&options.output)
+        .map_err(|e| format!("{}: {e}", options.output.display()))?;
+    Monitor::watch(&options.output.join("metrics.jsonl"), |monitor| {
+        export(&options, monitor)
+    })
+    .map_err(|e| lexopt::Error::from(e.to_string()))?
+}
+
+fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&options.input)
         .map_err(|e| format!("{}: {e}", options.input.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
@@ -85,7 +97,10 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         }
     }
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let (version, errors) = Version::open(inputs, &cache);
+    let (version, errors) = {
+        let _span = monitor.span("open", "version", "");
+        Version::open(inputs, &cache)
+    };
     for e in &errors {
         eprintln!("{}: {}: {}", e.name, e.code, e.message);
     }
@@ -98,6 +113,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         &image(),
         &store,
         &MemoryDerivations::default(),
+        monitor,
         options.threads,
     )
     .map_err(|e| e.to_string())?;

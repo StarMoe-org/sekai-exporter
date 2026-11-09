@@ -14,6 +14,7 @@ use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sha2::{Digest, Sha256};
 
+use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path};
 use crate::version::Version;
 
@@ -217,18 +218,34 @@ fn derive(
     plan: &Planned<'_>,
     version: &Version<'_>,
     store: &LocalStore,
+    recorder: &dyn Recorder,
 ) -> io::Result<(Derived, Option<String>)> {
     let index = version.index();
-    let result = plan.converter.convert(plan.closure[0], version);
+    let form = plan.converter.name();
+    let result = {
+        let _span = recorder.span("convert", form, &plan.name);
+        plan.converter.convert(plan.closure[0], version)
+    };
     let mut members = Vec::new();
     let error = match result {
         Ok(None) => return Ok((Derived::Nothing, None)),
         Ok(Some(asset)) => {
             let mut failed = None;
             for member in &asset.members {
-                match encode(&member.content) {
+                let encoded = {
+                    let mut span = recorder.span("encode", form, &plan.name);
+                    let encoded = encode(&member.content);
+                    if let Ok(file) = &encoded {
+                        span.bytes(0, file.bytes.len() as u64);
+                    }
+                    encoded
+                };
+                match encoded {
                     Ok(file) => {
+                        let mut span = recorder.span("store", file.extension, &plan.name);
+                        span.bytes(0, file.bytes.len() as u64);
                         let key = store.put(&file.bytes, file.extension)?;
+                        drop(span);
                         members.push(MemberFile {
                             role: member.role.clone(),
                             sha256: hex(&key.sha256),
@@ -281,12 +298,6 @@ fn derive(
     Ok((Derived::Document(store.put(&bytes, "json")?), code))
 }
 
-/// The error code a stored document records.
-fn stored_error(store: &LocalStore, key: &Key) -> io::Result<Option<String>> {
-    let document = AssetDocument::from_bytes(&store.read(key)?).map_err(io::Error::other)?;
-    Ok(document.error.map(|e| e.code))
-}
-
 /// Evaluates every asset of `version`. An asset that cannot be produced is recorded with its
 /// error and the run continues; only a failure to write the store fails the run.
 pub fn evaluate(
@@ -294,9 +305,11 @@ pub fn evaluate(
     converters: &[Box<dyn Converter>],
     store: &LocalStore,
     derivations: &dyn Derivations,
+    recorder: &dyn Recorder,
     threads: usize,
 ) -> io::Result<Evaluation> {
     let index = version.index();
+    let planning = recorder.span("plan", "assets", "");
     let mut roots = Vec::new();
     for (id, object, paths) in version.objects() {
         let Some(path) = paths.iter().min() else {
@@ -321,6 +334,7 @@ pub fn evaluate(
     let names = assign(&candidates);
 
     let resources = parallel(index.bundles().len(), threads, |b| {
+        let _span = recorder.span("hash", "resources", &index.bundles()[b].name);
         version.resource_hashes(b)
     });
     let mut evaluation = Evaluation::default();
@@ -341,18 +355,18 @@ pub fn evaluate(
     }
     evaluation.unnamed.sort();
     plans.sort_by(|a, b| a.name.cmp(&b.name));
+    drop(planning);
 
     let results = parallel(plans.len(), threads, |i| -> io::Result<_> {
         let plan = &plans[i];
         if let Some(derived) = derivations.get(&plan.fingerprint) {
-            let error = match &derived {
-                Derived::Document(key) => stored_error(store, key)?,
-                Derived::Nothing => None,
-            };
-            return Ok((derived, error, true));
+            return Ok((derived, None, true));
         }
-        let (derived, error) = derive(plan, version, store)?;
-        derivations.put(plan.fingerprint, derived.clone());
+        let (derived, error) = derive(plan, version, store, recorder)?;
+        // A failed asset has no output, so the next run evaluates it again.
+        if error.is_none() {
+            derivations.put(plan.fingerprint, derived.clone());
+        }
         Ok((derived, error, false))
     });
     for (plan, result) in plans.iter().zip(results) {

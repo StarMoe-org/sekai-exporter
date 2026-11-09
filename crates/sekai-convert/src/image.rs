@@ -1,6 +1,12 @@
-//! Images from `Texture2D`, `Sprite` and sprite atlases.
+//! Images from `Texture2D`, `Cubemap`, texture arrays, 3D textures and `Sprite`.
 //!
-//! [`Texture`] produces the `texture` form, specified in `docs/spec/texture.md`.
+//! [`Texture`] produces the `texture` form, specified in `docs/spec/texture.md`, and [`Sprite`]
+//! the `sprite` form, specified in `docs/spec/sprite.md`.
+
+mod array;
+mod sprite;
+
+pub use sprite::Sprite;
 
 use sekai_codec::texture;
 use sekai_unity::Value;
@@ -11,9 +17,13 @@ use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, 
 const TEXTURE_2D: i32 = 28;
 /// The class ID of `Cubemap`.
 const CUBEMAP: i32 = 89;
+/// The class ID of `Texture3D`.
+const TEXTURE_3D: i32 = 117;
+/// The class ID of `Texture2DArray`.
+const TEXTURE_2D_ARRAY: i32 = 187;
 
-/// The whole image of a `Texture2D`, or the first face of a `Cubemap`: mip level 0 of the first
-/// slice, rows from top to bottom.
+/// The whole image of a `Texture2D`, the first face of a `Cubemap`, or every slice of a
+/// `Texture2DArray` or `Texture3D`: mip level 0, rows from top to bottom.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Texture;
 
@@ -23,7 +33,7 @@ impl Converter for Texture {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(
@@ -32,12 +42,19 @@ impl Converter for Texture {
         _script: Option<&str>,
         _container_paths: &[String],
     ) -> bool {
-        matches!(object.class_id, TEXTURE_2D | CUBEMAP)
+        matches!(
+            object.class_id,
+            TEXTURE_2D | CUBEMAP | TEXTURE_3D | TEXTURE_2D_ARRAY
+        )
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
         let object = cx.object(root)?;
         let fields = &object.fields;
+        if matches!(object.class_id, TEXTURE_3D | TEXTURE_2D_ARRAY) {
+            let members = array::slices(root, fields, cx)?;
+            return Ok(Some(Asset { members }));
+        }
         let width = dimension(fields, "m_Width")?;
         let height = dimension(fields, "m_Height")?;
         let format = field(fields, "m_TextureFormat")?

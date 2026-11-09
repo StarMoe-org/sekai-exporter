@@ -53,7 +53,7 @@ A manifest row declares a bundle hash (`hash` for `cp`, `crc` for `nuverse`) and
 - The **declared hash** decides whether a bundle is fetched again. A bundle whose declared hash matches the last run is not downloaded, and keeps its stored bytes and its index. The other declared fields can change while the declared hash stays the same, so they are recorded but not compared.
 - The **content hash** is the SHA-256 the exporter computes while the bytes arrive. Everything after the download identifies the bundle by it.
 
-A declared hash is a label, not a digest of the file. Bundles with the same declared hash can be served with different bytes under the paths of different versions, including different streamed data, and bundles with different declared hashes can hold identical objects. Runs therefore do not repeat a download to compare it, and incremental work follows the content of objects and of the resource ranges they read, as described in the [pipeline](pipeline.md#invariants).
+A declared hash is a label, not a digest of the file. Bundles with the same declared hash can be served with different bytes under the paths of different versions, including different streamed data, and bundles with different declared hashes can hold identical objects. Runs therefore do not repeat a download to compare it, and incremental work follows the content of objects and of the resource entries of their bundles, as described in the [pipeline](pipeline.md#invariants).
 
 ## Credentials
 

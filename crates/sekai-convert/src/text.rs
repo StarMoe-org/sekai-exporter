@@ -5,16 +5,8 @@
 
 use sekai_unity::Value;
 
+use crate::roots;
 use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex};
-
-/// The class ID of `TextAsset`.
-const TEXT_ASSET: i32 = 49;
-/// The class ID of `Font`.
-const FONT: i32 = 128;
-
-/// Container path endings of text assets that hold CRI audio or video, which other forms
-/// convert.
-const MEDIA_SUFFIXES: &[&str] = &[".acb.bytes", ".usm.bytes"];
 
 /// The bytes a `TextAsset` stores, as they are.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,14 +24,10 @@ impl Converter for Text {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
+        script: Option<&str>,
         container_paths: &[String],
     ) -> bool {
-        object.class_id == TEXT_ASSET
-            && !container_paths.iter().any(|path| {
-                let path = path.to_ascii_lowercase();
-                MEDIA_SUFFIXES.iter().any(|suffix| path.ends_with(suffix))
-            })
+        roots::text(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
@@ -90,10 +78,10 @@ impl Converter for Font {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
-        _container_paths: &[String],
+        script: Option<&str>,
+        container_paths: &[String],
     ) -> bool {
-        object.class_id == FONT
+        roots::font(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

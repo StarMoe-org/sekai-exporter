@@ -1,6 +1,8 @@
 //! Byte sources: anything a serialized file can be read from.
 
+use std::fs::File;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::error::{Error, Result};
@@ -63,6 +65,51 @@ pub(crate) fn check_range(what: &'static str, total: u64, offset: u64, len: usiz
             needed: len as u64,
             available: total.saturating_sub(offset),
         }),
+    }
+}
+
+/// A file, opened for each read, so that any number of files can be sources at once.
+#[derive(Debug, Clone)]
+pub struct FileSource {
+    path: PathBuf,
+    len: u64,
+}
+
+impl FileSource {
+    /// The file at `path`.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let len = std::fs::metadata(&path)
+            .map_err(|e| read_error(&path, e))?
+            .len();
+        Ok(Self { path, len })
+    }
+}
+
+fn read_error(path: &std::path::Path, error: std::io::Error) -> Error {
+    Error::Read {
+        path: path.display().to_string(),
+        message: error.to_string(),
+    }
+}
+
+impl ByteSource for FileSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read(&self, offset: u64, len: usize) -> Result<Chunk<'_>> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        check_range("file", self.len, offset, len)?;
+        let mut bytes = vec![0; len];
+        File::open(&self.path)
+            .and_then(|mut file| {
+                file.seek(SeekFrom::Start(offset))?;
+                file.read_exact(&mut bytes)
+            })
+            .map_err(|e| read_error(&self.path, e))?;
+        Ok(Chunk::Owned(bytes))
     }
 }
 

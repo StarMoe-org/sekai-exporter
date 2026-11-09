@@ -24,6 +24,6 @@ pub use error::{Error, Result};
 pub use layout::Layout;
 pub use read::{Field, Scalar, Visitor, read_object};
 pub use serialized::SerializedFile;
-pub use source::{ByteSource, Chunk};
+pub use source::{ByteSource, Chunk, FileSource};
 pub use typetree::{TypeTree, TypeTreeNode};
 pub use value::Value;

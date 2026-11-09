@@ -86,6 +86,13 @@ pub enum Error {
         /// The assembly of the entry.
         assembly: String,
     },
+    /// A file could not be read.
+    Read {
+        /// The path of the file.
+        path: String,
+        /// The reason.
+        message: String,
+    },
     /// A visitor stopped reading.
     Visitor {
         /// The reason given by the visitor.
@@ -107,6 +114,7 @@ impl Error {
             Error::TrailingBytes { .. } => "trailing_bytes",
             Error::InvalidLayout { .. } => "invalid_layout",
             Error::UnresolvedReferenceType { .. } => "unresolved_reference_type",
+            Error::Read { .. } => "read",
             Error::Visitor { .. } => "visitor",
         }
     }
@@ -138,6 +146,7 @@ impl fmt::Display for Error {
                 "{what}: needed {needed} bytes at offset {offset}, {available} available"
             ),
             Error::Signature { expected } => write!(f, "not a {expected} file"),
+            Error::Read { path, message } => write!(f, "{path}: {message}"),
             Error::Unsupported { what, value } => write!(f, "unsupported {what}: {value}"),
             Error::Decompress { block, message } => {
                 write!(f, "block {block} could not be decompressed: {message}")

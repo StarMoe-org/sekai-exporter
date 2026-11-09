@@ -6,24 +6,25 @@ use std::sync::Arc;
 
 use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
+use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
+use sekai_pipeline::{BundleInput, Evaluation, Version, evaluate, parallel};
 use sekai_publish::{Binding, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
 use crate::monitor::Monitor;
 
-const BLOCK_CACHE_BYTES: usize = 256 << 20;
+pub(crate) const BLOCK_CACHE_BYTES: usize = 256 << 20;
 
 #[cfg(feature = "image")]
-fn image() -> Vec<Box<dyn Converter>> {
+pub(crate) fn image() -> Vec<Box<dyn Converter>> {
     vec![Box::new(sekai_convert::image::Texture)]
 }
 
 #[cfg(not(feature = "image"))]
-fn image() -> Vec<Box<dyn Converter>> {
+pub(crate) fn image() -> Vec<Box<dyn Converter>> {
     Vec::new()
 }
 
@@ -76,7 +77,7 @@ fn read(path: &Path) -> Result<BundleInput, String> {
     Ok(BundleInput {
         name: path.file_name().unwrap().to_string_lossy().into_owned(),
         sha256: Sha256::digest(&bytes).into(),
-        bytes: Arc::from(bytes),
+        source: Arc::new(Arc::<[u8]>::from(bytes)),
     })
 }
 
@@ -135,44 +136,15 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     )
     .map_err(|e| e.to_string())?;
 
-    let mut listing = String::new();
-    for output in &evaluation.outputs {
-        listing.push_str(&format!(
-            "{}\t{}\t{}\t{}\n",
-            output.name,
-            output.form,
-            output.document,
-            output.error.as_deref().unwrap_or("-")
-        ));
-    }
-    std::fs::write(options.output.join("assets.tsv"), listing).map_err(|e| e.to_string())?;
-    let bindings: Vec<Binding> = evaluation
-        .outputs
-        .iter()
-        .map(|o| Binding {
-            name: o.name.clone(),
-            document: o.document.clone(),
-        })
-        .collect();
-    let publishing = monitor.span("publish", "index", "");
-    let plan = plan("local", &bindings, &store).map_err(|e| e.to_string())?;
-    let pointer = index::publish(
-        &store,
-        &options.output.join("published"),
+    publish(
+        &evaluation,
+        "local",
         "local/canonical",
-        &plan,
-    )
-    .map_err(|e| e.to_string())?;
-    drop(publishing);
-    println!("published revision {}", pointer.revision);
-    if let Some(root) = &options.tree {
-        let _span = monitor.span("publish", "tree", "");
-        let report = tree::publish(&store, root, &plan).map_err(|e| e.to_string())?;
-        println!(
-            "tree written {} unchanged {} deleted {}",
-            report.written, report.unchanged, report.deleted
-        );
-    }
+        &options.output,
+        options.tree.as_deref(),
+        &store,
+        monitor,
+    )?;
     let errored = evaluation.outputs.iter().filter(|o| o.error.is_some());
     println!(
         "bundles {} failed {failed} assets {} errors {} unnamed {} converted {} reused {}",
@@ -184,4 +156,51 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation.reused
     );
     Ok(failed == 0)
+}
+
+/// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,
+/// with `tree_root`, a path tree. Returns the pointer of the publication.
+pub(crate) fn publish(
+    evaluation: &Evaluation,
+    version: &str,
+    target: &str,
+    output: &Path,
+    tree_root: Option<&Path>,
+    store: &LocalStore,
+    monitor: &Monitor,
+) -> Result<Pointer, lexopt::Error> {
+    let mut listing = String::new();
+    for output in &evaluation.outputs {
+        listing.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            output.name,
+            output.form,
+            output.document,
+            output.error.as_deref().unwrap_or("-")
+        ));
+    }
+    std::fs::write(output.join("assets.tsv"), listing).map_err(|e| e.to_string())?;
+    let bindings: Vec<Binding> = evaluation
+        .outputs
+        .iter()
+        .map(|o| Binding {
+            name: o.name.clone(),
+            document: o.document.clone(),
+        })
+        .collect();
+    let publishing = monitor.span("publish", "index", "");
+    let plan = plan(version, &bindings, store).map_err(|e| e.to_string())?;
+    let pointer = index::publish(store, &output.join("published"), target, &plan)
+        .map_err(|e| e.to_string())?;
+    drop(publishing);
+    println!("published revision {}", pointer.revision);
+    if let Some(root) = tree_root {
+        let _span = monitor.span("publish", "tree", "");
+        let report = tree::publish(store, root, &plan).map_err(|e| e.to_string())?;
+        println!(
+            "tree written {} unchanged {} deleted {}",
+            report.written, report.unchanged, report.deleted
+        );
+    }
+    Ok(pointer)
 }

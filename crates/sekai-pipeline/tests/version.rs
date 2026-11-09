@@ -17,7 +17,7 @@ fn input(file: &str, name: &str) -> BundleInput {
     BundleInput {
         name: name.to_owned(),
         sha256: Sha256::digest(&bytes).into(),
-        bytes: Arc::from(bytes),
+        source: Arc::new(Arc::<[u8]>::from(bytes)),
     }
 }
 

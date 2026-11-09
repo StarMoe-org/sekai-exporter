@@ -92,9 +92,9 @@ The workspace has fourteen crates in a flat `crates/` directory. A crate boundar
 | 1 | `sekai-layouts` | Field layout tables for objects stored without type trees, and their loader |
 | 1 | `sekai-codec` | Texture and CRI decoding in pure Rust |
 | 1 | `sekai-catalog` | The content-addressed store and the catalog |
-| 1 | `sekai-game` | Game-specific inputs: bundle deobfuscation, manifests, downloads, game data tables, the region table |
+| 1 | `sekai-game` | Game-specific inputs: bundle deobfuscation, manifests, downloads, game data tables, region configuration. The `cdn` feature brings TLS through `rustls` and `ring`, which contains C and assembly |
 | 2 | `sekai-convert` | The converter interface, writers and the general-purpose converters |
-| 2 | `sekai-encode` | Encoders for decoded content. The canonical encoders are pure Rust and always present; every C dependency is confined here, one feature each |
+| 2 | `sekai-encode` | Encoders for decoded content. The canonical encoders are pure Rust and always present; every C dependency of an encoder is confined here, one feature each |
 | 2 | `sekai-publish` | Layouts, stores, the publication protocol and asset listings |
 | 3 | `sekai-pipeline` | The eager and lazy evaluators, the scheduler and the derivation cache |
 | 3 | `sekai-moesekai` | Scenarios, episodes, virtual lives, costumes and the storage view |

@@ -3,6 +3,7 @@
 //! Consumers depend on this crate to read the published output.
 
 pub mod asset;
+pub mod identity;
 pub mod publication;
 
 pub use asset::{AssetDocument, AssetError, MemberFile, SourceObject};

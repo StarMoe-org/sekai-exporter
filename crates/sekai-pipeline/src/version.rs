@@ -17,8 +17,11 @@ struct Opened {
 }
 
 impl Opened {
-    fn open(bytes: Arc<[u8]>, id: [u8; 32], cache: &dyn BlockCache) -> sekai_unity::Result<Self> {
-        let source: Arc<dyn ByteSource> = Arc::new(bytes);
+    fn open(
+        source: Arc<dyn ByteSource>,
+        id: [u8; 32],
+        cache: &dyn BlockCache,
+    ) -> sekai_unity::Result<Self> {
         let bundle = Bundle::open(source, id)?;
         let mut files = Vec::new();
         for (i, entry) in bundle.entries().iter().enumerate() {
@@ -53,8 +56,8 @@ pub struct BundleInput {
     /// The bundle name.
     pub name: String,
     /// The bundle bytes, already deobfuscated.
-    pub bytes: Arc<[u8]>,
-    /// The SHA-256 of `bytes`, which keys the bundle's blocks in the block cache.
+    pub source: Arc<dyn ByteSource>,
+    /// The SHA-256 of the bytes, which keys the bundle's blocks in the block cache.
     pub sha256: [u8; 32],
 }
 
@@ -109,7 +112,7 @@ impl<'c> Version<'c> {
                 });
                 continue;
             }
-            let opened = Opened::open(input.bytes, input.sha256, cache)
+            let opened = Opened::open(input.source, input.sha256, cache)
                 .and_then(|o| Ok((o.index(input.name.clone(), cache)?, o)));
             match opened {
                 Ok((index, opened)) => {

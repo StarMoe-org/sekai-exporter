@@ -92,9 +92,9 @@
 | 1 | `sekai-layouts` | 不带 type tree 的对象所用的字段布局表及其加载 |
 | 1 | `sekai-codec` | 纯 Rust 实现的贴图与 CRI 解码 |
 | 1 | `sekai-catalog` | 内容寻址的 store 与目录 |
-| 1 | `sekai-game` | 本游戏专有的输入：资源包去混淆、清单、下载、游戏数据表、区服表 |
+| 1 | `sekai-game` | 本游戏专有的输入：资源包去混淆、清单、下载、游戏数据表、区服配置。`cdn` feature 通过 `rustls` 与 `ring` 提供 TLS，其中含 C 与汇编 |
 | 2 | `sekai-convert` | 转换器接口、写出器与通用转换器 |
-| 2 | `sekai-encode` | 已解码内容的编码器。规范形式的编码器为纯 Rust 且始终存在；全部 C 依赖限于此处，每项一个 feature |
+| 2 | `sekai-encode` | 已解码内容的编码器。规范形式的编码器为纯 Rust 且始终存在；编码器的全部 C 依赖限于此处，每项一个 feature |
 | 2 | `sekai-publish` | 布局、store、发布协议与资产列表 |
 | 3 | `sekai-pipeline` | 急切与惰性两种求值器、调度器与派生缓存 |
 | 3 | `sekai-moesekai` | 剧本、剧集、虚拟演唱会、服装与 storage 视图 |

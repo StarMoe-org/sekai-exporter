@@ -36,7 +36,7 @@ fn main() {
             let sha256 = Sha256::digest(&bytes).into();
             inputs.push(BundleInput {
                 name,
-                bytes: Arc::from(bytes),
+                source: Arc::new(Arc::<[u8]>::from(bytes)),
                 sha256,
             });
         }

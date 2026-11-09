@@ -4,7 +4,8 @@
 //! digits of the SHA-256 of its bytes. The name carries no other meaning.
 
 use std::fmt;
-use std::io;
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -131,6 +132,19 @@ impl LocalStore {
         Ok(key)
     }
 
+    /// A writer for an object whose bytes arrive in parts.
+    pub fn writer(&self, extension: &str) -> io::Result<ObjectWriter<'_>> {
+        let temporary = Temporary(self.temporary());
+        Ok(ObjectWriter {
+            store: self,
+            file: BufWriter::new(File::create(&temporary.0)?),
+            temporary,
+            hash: Sha256::new(),
+            size: 0,
+            extension: extension.to_owned(),
+        })
+    }
+
     /// The keys of the objects with `extension`, in key order.
     pub fn keys(&self, extension: &str) -> io::Result<Vec<Key>> {
         let suffix = format!(".{extension}");
@@ -213,6 +227,74 @@ impl LocalStore {
     }
 }
 
+/// A temporary file, removed unless it was renamed into place.
+struct Temporary(PathBuf);
+
+impl Drop for Temporary {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// An object being written. It joins the store when it is finished, and leaves nothing behind
+/// otherwise.
+pub struct ObjectWriter<'s> {
+    store: &'s LocalStore,
+    temporary: Temporary,
+    file: BufWriter<File>,
+    hash: Sha256,
+    size: u64,
+    extension: String,
+}
+
+impl ObjectWriter<'_> {
+    /// Forgets everything written so far.
+    pub fn reset(&mut self) -> io::Result<()> {
+        // Buffered bytes must reach the file before it is truncated, not when the writer drops.
+        self.file.flush()?;
+        self.file = BufWriter::new(File::create(&self.temporary.0)?);
+        self.hash = Sha256::new();
+        self.size = 0;
+        Ok(())
+    }
+
+    /// Places the object in the store and returns its key and size. Content that is already
+    /// stored is left as it is.
+    pub fn finish(self) -> io::Result<(Key, u64)> {
+        let Self {
+            store,
+            temporary,
+            file,
+            hash,
+            size,
+            extension,
+        } = self;
+        file.into_inner().map_err(io::IntoInnerError::into_error)?;
+        let key = Key {
+            sha256: hash.finalize().into(),
+            extension,
+        };
+        let path = store.path(&key);
+        if !path.is_file() {
+            store.place(&temporary.0, &path)?;
+        }
+        Ok((key, size))
+    }
+}
+
+impl Write for ObjectWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.file.write(bytes)?;
+        self.hash.update(&bytes[..written]);
+        self.size += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +317,32 @@ mod tests {
         assert!(store.verify(&key).unwrap());
         assert_eq!(store.put(b"abc", "txt").unwrap(), key);
         assert!(!store.contains(&Key::of(b"abd", "txt")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_writer_gives_the_key_of_its_bytes() {
+        let (root, store) = store("writer");
+        let mut writer = store.writer("bin").unwrap();
+        writer.write_all(b"discarded").unwrap();
+        writer.reset().unwrap();
+        writer.write_all(b"ab").unwrap();
+        writer.write_all(b"c").unwrap();
+        let (key, size) = writer.finish().unwrap();
+        assert_eq!(key, Key::of(b"abc", "bin"));
+        assert_eq!(size, 3);
+        assert_eq!(store.read(&key).unwrap(), b"abc");
+        assert_eq!(std::fs::read_dir(root.join(INCOMING)).unwrap().count(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_abandoned_writer_leaves_nothing() {
+        let (root, store) = store("abandoned");
+        let mut writer = store.writer("bin").unwrap();
+        writer.write_all(b"abc").unwrap();
+        drop(writer);
+        assert_eq!(std::fs::read_dir(root.join(INCOMING)).unwrap().count(), 0);
         std::fs::remove_dir_all(root).unwrap();
     }
 

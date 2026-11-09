@@ -18,9 +18,39 @@ A region can list several sources in order, for example `store` first and `cp` w
 
 The game data tables have their own sources: `git`, which reads a repository of table dumps at a given commit and is the default, and `api`, which reads the game's interface and requires an account. The commit or interface version is recorded in the [table identity](#version-identity) of the version, and the hash of each row a converter reads enters that converter's fingerprints.
 
-## The region table
+## Region configuration
 
-The hosts, application identifiers, channels and platforms of each region, together with the client identity (application version, application hash, Unity version, user agent and device model), are kept in a data file in this repository. The configuration can override any entry. These values are required for the exporter to work at all, and anyone with an installed client can read them. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The region table never contains keys.**
+Regions are defined by the deployer in a JSON configuration file, which is passed to the exporter with `--config`. The exporter contains no addresses, application identifiers or client identities. An entry gives the protocol of the region (`kind`: `cp` or `nuverse`), its platform, its hosts, its address templates, the client identity (application version, application hash, asset version and hash, Unity version, user agent, device model and operating system), the names of its secrets, an optional feed and the network settings. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The configuration never contains secret values.**
+
+```json
+{
+  "regions": {
+    "example": {
+      "kind": "nuverse",
+      "platform": "ios",
+      "hosts": ["cdn-a.example.invalid", "cdn-b.example.invalid"],
+      "urls": {
+        "version": "https://{host}/{application_version}/{platform}/version",
+        "manifest": "https://{host}/{application_version}/{platform}{value}/manifest",
+        "bundle": "https://{host}/{application_version}/{download_path}/{bundle}"
+      },
+      "client": { "application_version": "1.0.0" },
+      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV" },
+      "feed": "https://feed.example.invalid/versions.json",
+      "network": { "concurrency": 8, "rate_limit": 20, "retries": 4, "back_off_ms": 500 }
+    }
+  }
+}
+```
+
+An address template replaces each `{name}` with its value:
+
+| Template | `cp` | `nuverse` |
+|---|---|---|
+| `signature` (optional) | none | not used |
+| `version` | `application_version`, `application_hash` | `host`, `application_version`, `platform` |
+| `manifest` | `profile`, `host_hash`, `asset_version`, `asset_hash`, `platform` | `host`, `application_version`, `platform`, `value` |
+| `bundle` | The names of `manifest`, and `bundle` | The names of `manifest`, and `download_path`, `bundle` |
 
 ## Version discovery
 
@@ -30,7 +60,7 @@ The client identity is taken from the first of these that is available:
 2. the configuration;
 3. an external feed of current versions.
 
-A candidate is adopted only if the region's version endpoint confirms it and it is newer than the current value. For regions whose distribution paths are keyed by the bundle version, an application version `x.y.z` that the endpoint does not recognize is retried as `x.y.0`. A value set with `force` is a pin: it is not replaced by discovery until it is removed, which allows a rollback. Each region is checked independently, so a failure in one region does not delay the others.
+A feed is a JSON document with the fields `appVersion`, `appHash`, `assetVersion`, `assetHash` and `multiPlayVersion`, optionally under `production_<platform>`. A candidate is adopted only if the region's version endpoint confirms it and it is newer than the current value. For regions whose distribution paths are keyed by the bundle version, an application version `x.y.z` that the endpoint does not recognize is retried as `x.y.0`. A value set with `force` is a pin: it is not replaced by discovery until it is removed, which allows a rollback. Each region is checked independently, so a failure in one region does not delay the others.
 
 ## Version identity
 
@@ -38,7 +68,7 @@ The state of a region has three separate parts, and each decides something diffe
 
 | Part | Fields | When it changes |
 |---|---|---|
-| **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the value of the version endpoint | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
+| **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the application version of the distribution paths and the value of the version endpoint | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
 | **Table identity** | The data version the game reports, and the table revision: the commit of the dump repository, or the interface version for the `api` source | Only table rows can differ. P1 to P3 are skipped, the index of the asset identity is reused, and only the assets whose rows changed are evaluated again |
 | **Client identity** | Application version, application hash and multiplayer version | Recorded with the version, and no asset depends on it. For `cp` it is the key that finds the asset host hash, so the asset identity is read through it |
 
@@ -62,7 +92,7 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 - Each secret has a name. Its value is read from an environment variable of that name, or from a secret file outside the repository.
 - Secret values are never written to logs, reports, the catalog or asset documents. Reports name the secret that was used, not its value.
 - The guest account is created once by a separate command that the deployer runs, and is then stored as a secret and reused. Runs do not create accounts.
-- The example configuration leaves every secret empty and states that its value must be obtained by the user from their own client.
+- The configuration holds only the name of each secret. Its value must be obtained by the user from their own client, and is written as hexadecimal.
 
 ## Network
 

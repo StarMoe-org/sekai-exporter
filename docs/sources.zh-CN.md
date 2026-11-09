@@ -18,9 +18,39 @@
 
 游戏数据表有独立的来源：`git` 按指定提交读取数据表转储仓库，为默认来源；`api` 读取游戏接口，需要账号。提交号或接口版本记入该版本的[数据表身份](#版本身份)，转换器所读取的每条记录的哈希计入该转换器的指纹。
 
-## 区服表
+## 区服配置
 
-各区服的主机、应用标识、渠道与平台，以及客户端身份（应用版本、应用哈希、Unity 版本、用户代理与设备型号），存放于本仓库的一份数据文件中，配置可覆盖其中任意一项。这些值是导出器正常工作的前提，且任何安装了客户端的人都能读取到。Unity 版本只随请求发送，读取时依据各文件内存储的格式版本。**区服表永不包含密钥。**
+区服由部署方在一份 JSON 配置文件中定义，并通过 `--config` 传给导出器。导出器本身不含任何地址、应用标识或客户端身份。每个条目给出该区服的协议（`kind`：`cp` 或 `nuverse`）、平台、主机、地址模板、客户端身份（应用版本、应用哈希、asset version 与 asset hash、Unity 版本、用户代理、设备型号与操作系统）、所用密钥的名称、可选的信息源以及网络设置。Unity 版本只随请求发送：读取器依据每个文件内存储的格式版本。**配置中绝不包含密钥的值。**
+
+```json
+{
+  "regions": {
+    "example": {
+      "kind": "nuverse",
+      "platform": "ios",
+      "hosts": ["cdn-a.example.invalid", "cdn-b.example.invalid"],
+      "urls": {
+        "version": "https://{host}/{application_version}/{platform}/version",
+        "manifest": "https://{host}/{application_version}/{platform}{value}/manifest",
+        "bundle": "https://{host}/{application_version}/{download_path}/{bundle}"
+      },
+      "client": { "application_version": "1.0.0" },
+      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV" },
+      "feed": "https://feed.example.invalid/versions.json",
+      "network": { "concurrency": 8, "rate_limit": 20, "retries": 4, "back_off_ms": 500 }
+    }
+  }
+}
+```
+
+地址模板把每个 `{name}` 替换为对应的值：
+
+| 模板 | `cp` | `nuverse` |
+|---|---|---|
+| `signature`（可选） | 无 | 不使用 |
+| `version` | `application_version`、`application_hash` | `host`、`application_version`、`platform` |
+| `manifest` | `profile`、`host_hash`、`asset_version`、`asset_hash`、`platform` | `host`、`application_version`、`platform`、`value` |
+| `bundle` | `manifest` 的全部名称，以及 `bundle` | `manifest` 的全部名称，以及 `download_path`、`bundle` |
 
 ## 版本发现
 
@@ -30,7 +60,7 @@
 2. 配置；
 3. 外部的当前版本信息源。
 
-候选值只有经该区服的版本接口确认、且比当前值更新时才会被采用。对于分发路径以资源包版本为键的区服，若版本接口不识别应用版本 `x.y.z`，则改以 `x.y.0` 重试。以 `force` 设定的值视为固定值，在被移除之前不会被版本发现替换，可用于回滚。各区服独立检查，一个区服的失败不会延误其他区服。
+信息源是一份 JSON 文档，字段为 `appVersion`、`appHash`、`assetVersion`、`assetHash` 与 `multiPlayVersion`，可以放在 `production_<platform>` 之下。候选值只有经该区服的版本接口确认、且比当前值更新时才会被采用。对于分发路径以资源包版本为键的区服，若版本接口不识别应用版本 `x.y.z`，则改以 `x.y.0` 重试。以 `force` 设定的值视为固定值，在被移除之前不会被版本发现替换，可用于回滚。各区服独立检查，一个区服的失败不会延误其他区服。
 
 ## 版本身份
 
@@ -38,7 +68,7 @@
 
 | 部分 | 字段 | 变化时 |
 |---|---|---|
-| **资产身份** | `cp`：asset version、asset hash、profile 与资源主机哈希。`nuverse`：版本端点返回的值 | 清单与资源包的地址改变，因此重新读取清单并运行 P1 至 P3 |
+| **资产身份** | `cp`：asset version、asset hash、profile 与资源主机哈希。`nuverse`：分发路径所用的应用版本与版本端点返回的值 | 清单与资源包的地址改变，因此重新读取清单并运行 P1 至 P3 |
 | **数据表身份** | 游戏给出的 data version，以及数据表修订号：转储仓库的提交号，或 `api` 来源的接口版本 | 只有数据表的记录可能不同。跳过 P1 至 P3，沿用该资产身份的索引，只重新求值记录发生变化的资产 |
 | **客户端身份** | 应用版本、应用哈希与多人游戏版本 | 随版本记录，没有资产依赖它。`cp` 的资源主机哈希要凭它查询，所以资产身份经由它读取 |
 
@@ -62,7 +92,7 @@ data version 与数据表修订号是两个字段，因为来源不同：前者�
 - 每个密钥都有一个名称，其值读取自同名的环境变量，或读取自仓库以外的密钥文件。
 - 密钥的值永不写入日志、报告、目录或资产文档。报告只记录所用密钥的名称，不记录其值。
 - 访客账号由部署方通过一条单独的命令创建一次，此后作为密钥保存并复用。运行过程中不创建账号。
-- 示例配置中每个密钥均留空，并注明其值须由使用者从自己的客户端取得。
+- 配置中只记录每个密钥的名称，其值须由使用者从自己的客户端取得，并写成十六进制。
 
 ## 网络
 

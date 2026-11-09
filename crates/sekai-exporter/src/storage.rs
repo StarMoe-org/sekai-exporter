@@ -20,8 +20,6 @@ use crate::monitor::Monitor;
 /// One file to make: its asset, its place in the view and the member it comes from.
 struct Job {
     asset: String,
-    /// Whether the asset gives up a path it shares with another one.
-    yields: bool,
     file: ViewFile,
     source: Key,
     size: u64,
@@ -122,8 +120,7 @@ fn make(
 }
 
 /// The jobs of the view, in path order, and the failures of assets that have no files. Of the
-/// assets that land on one path, a texture keeps it over a sprite, then the first by name; the
-/// count of the others is returned.
+/// assets that land on one path, the first by name keeps it; the count of the others is returned.
 fn jobs(
     evaluation: &Evaluation,
     store: &LocalStore,
@@ -148,7 +145,6 @@ fn jobs(
                 .ok_or_else(|| format!("{}: bad member hash", output.name))?;
             let job = Job {
                 asset: output.name.clone(),
-                yields: storage_view::yields_path(&document),
                 source: Key {
                     sha256,
                     extension: member.extension.clone(),
@@ -163,9 +159,7 @@ fn jobs(
                 file,
             };
             match by_path.get_mut(&job.file.path) {
-                Some(kept) if (kept.yields, &kept.asset) <= (job.yields, &job.asset) => {
-                    shadowed += 1;
-                }
+                Some(kept) if kept.asset <= job.asset => shadowed += 1,
                 Some(kept) => {
                     *kept = job;
                     shadowed += 1;

@@ -25,7 +25,7 @@ Every file comes from one member of an asset document. A file sits at `<bundle>/
 
 A text asset stored with the extension `.bytes` loses it; under `music/music_score` the file is named `<file>.txt`. A text asset with any other extension keeps it.
 
-Assets that share a name follow the naming rule in [architecture](../architecture.md). The `@Texture2D` that a texture has in its asset name is not part of `<file>`. When several assets land on one path, a texture keeps it over a sprite, then the first by asset name, and the others are left out of the view.
+Assets that share a name follow the naming rule in [architecture](../architecture.md). When several assets land on one path, the first by asset name keeps it and the others are left out of the view.
 
 ## 4. Container
 
@@ -50,4 +50,3 @@ A view is compared with a reference tree made from the same input: documents by 
 | Version | Change |
 |---|---|
 | 1 | First version |
-| 2 | A texture keeps the path it shares with a sprite of the same name |

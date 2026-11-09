@@ -51,6 +51,37 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 5. Failures are reported with the name of the stage that failed. A failed stage leaves the previous pointer in place.
 6. When a publication goes to several destinations, the pointers of different destinations are not advanced atomically together. Each destination keeps its last complete pointer, and running the publication again completes the remaining destinations.
 
+## S3-compatible buckets
+
+With the `s3` feature, `sekai-exporter update` also publishes the `index` layout to an S3-compatible bucket when the configuration file has a `publish.s3` section:
+
+```json
+{
+  "regions": { "...": {} },
+  "publish": {
+    "s3": {
+      "endpoint": "https://s3.example.invalid/bucket",
+      "region": "us-east-1",
+      "prefix": "sekai/",
+      "connections": 8,
+      "secrets": { "access_key_id": "SEKAI_S3_ACCESS_KEY_ID", "secret_access_key": "SEKAI_S3_SECRET_ACCESS_KEY" }
+    }
+  }
+}
+```
+
+| Key | Value |
+|---|---|
+| `endpoint` | The address of the bucket, path-style (`https://<host>/<bucket>`) or virtual-hosted (`https://<bucket>.<host>`) |
+| `region` | The region the requests are signed for |
+| `prefix` | Optional. Prepended to every object name; empty or ending in `/` |
+| `connections` | Optional, 8 by default. Requests in flight at once |
+| `secrets` | The names of the secrets that hold the access key ID and the secret access key. Each value is read from the environment variable of that name, or from the file of that name in the `--secrets` directory |
+
+The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer at `<prefix>published/<region>/<view>/current.json`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
+
+A publication first asks the bucket for each object it refers to and uploads only the objects it lacks or holds with another size. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes, so a second publication of the same version sends no uploads. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
+
 ## Evaluation and publishing together
 
 | Deployment | Evaluation | Place | Layout |

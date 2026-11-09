@@ -10,7 +10,7 @@ use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, Evaluation, Version, evaluate, parallel};
-use sekai_publish::{Binding, index, plan, tree};
+use sekai_publish::{Binding, Plan, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -213,7 +213,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 }
 
 /// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,
-/// with `tree_root`, a path tree. Returns the pointer of the publication.
+/// with `tree_root`, a path tree. Returns the pointer and the plan of the publication.
 pub(crate) fn publish(
     evaluation: &Evaluation,
     version: &str,
@@ -222,7 +222,7 @@ pub(crate) fn publish(
     tree_root: Option<&Path>,
     store: &LocalStore,
     monitor: &Monitor,
-) -> Result<Pointer, lexopt::Error> {
+) -> Result<(Pointer, Plan), lexopt::Error> {
     let mut listing = String::new();
     for output in &evaluation.outputs {
         listing.push_str(&format!(
@@ -256,5 +256,5 @@ pub(crate) fn publish(
             report.written, report.unchanged, report.deleted
         );
     }
-    Ok(pointer)
+    Ok((pointer, plan))
 }

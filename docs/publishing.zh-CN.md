@@ -51,6 +51,37 @@
 5. 失败以失败阶段的名称报告。失败的阶段不改变原有指针。
 6. 一次发布面向多个目标时，各目标的指针并非原子地一同推进。每个目标保留其最近一次完整的指针，再次运行发布即可补齐其余目标。
 
+## S3 兼容存储桶
+
+启用 `s3` feature 时，若配置文件有 `publish.s3` 一节，`sekai-exporter update` 还会把 `index` 布局发布到 S3 兼容的存储桶：
+
+```json
+{
+  "regions": { "...": {} },
+  "publish": {
+    "s3": {
+      "endpoint": "https://s3.example.invalid/bucket",
+      "region": "us-east-1",
+      "prefix": "sekai/",
+      "connections": 8,
+      "secrets": { "access_key_id": "SEKAI_S3_ACCESS_KEY_ID", "secret_access_key": "SEKAI_S3_SECRET_ACCESS_KEY" }
+    }
+  }
+}
+```
+
+| 键 | 值 |
+|---|---|
+| `endpoint` | 存储桶地址，路径式（`https://<主机>/<存储桶>`）或虚拟主机式（`https://<存储桶>.<主机>`） |
+| `region` | 请求签名所用的区域 |
+| `prefix` | 可选。加在每个对象名前面；为空或以 `/` 结尾 |
+| `connections` | 可选，默认 8。同时进行的请求数 |
+| `secrets` | 存放访问密钥 ID 和私有访问密钥的密钥名。每个值从同名环境变量读取，或从 `--secrets` 目录中的同名文件读取 |
+
+存储桶的结构与本地输出相同：store 的每个对象位于 `<prefix>store/<aa>/<sha256>.<extension>`，指针位于 `<prefix>published/<区服>/<视图>/current.json`。请求用 AWS Signature Version 4 签名，密钥需要在该前缀下读、列出和写对象的权限。
+
+发布先向存储桶查询它引用的每个对象，只上传存储桶没有、或大小不同的对象。每次上传都用字节的 SHA-256 签名，这也是对象的名字，因此存储桶不会存下不匹配的字节。所有对象都在存储桶里之后才写指针，且只在指针改变时写，所以同一版本第二次发布不上传任何东西。失败时发布停止并报告失败的阶段名，旧指针保持不变；再运行一次只上传仍缺少的部分。
+
 ## 求值与发布的组合
 
 | 部署形态 | 求值 | 地点 | 布局 |

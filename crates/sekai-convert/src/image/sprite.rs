@@ -6,13 +6,11 @@ use sekai_codec::{HdrSurface, Surface};
 use sekai_unity::Value;
 
 use super::{Texture, field, malformed, texture_memory};
+use crate::roots;
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
     ObjectIndex,
 };
-
-/// The class ID of `Sprite`.
-const SPRITE: i32 = 213;
 
 /// The image region and layout of a `Sprite`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -30,10 +28,10 @@ impl Converter for Sprite {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
-        _container_paths: &[String],
+        script: Option<&str>,
+        container_paths: &[String],
     ) -> bool {
-        object.class_id == SPRITE
+        roots::sprite(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

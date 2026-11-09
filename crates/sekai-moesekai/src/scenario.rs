@@ -2,14 +2,11 @@
 //!
 //! [`Scenario`] produces the `scenario` form, specified in `docs/spec/scenario.md`.
 
+use crate::roots;
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex, Value,
 };
 
-/// The class ID of `MonoBehaviour`.
-const MONO_BEHAVIOUR: i32 = 114;
-/// The script of the scene data of a story.
-const SCENE_DATA: &str = "Assembly-CSharp/Sekai.ScenarioSceneData";
 /// Fields every `MonoBehaviour` has, which say nothing about the scenario.
 const ENGINE_FIELDS: &[&str] = &["m_GameObject", "m_Enabled", "m_Script", "m_Name"];
 
@@ -30,9 +27,9 @@ impl Converter for Scenario {
         &self,
         object: &ObjectIndex,
         script: Option<&str>,
-        _container_paths: &[String],
+        container_paths: &[String],
     ) -> bool {
-        object.class_id == MONO_BEHAVIOUR && script == Some(SCENE_DATA)
+        roots::scenario(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

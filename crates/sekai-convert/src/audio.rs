@@ -6,15 +6,12 @@ use sekai_codec::DecodeError;
 use sekai_codec::cri::{Acb, HcaKey, decode_hca, hca_info, read_acb};
 use sekai_unity::Value;
 
+use crate::roots;
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
     ObjectIndex,
 };
 
-/// The class ID of `TextAsset`.
-const TEXT_ASSET: i32 = 49;
-/// The container path ending of a cue sheet.
-const CUE_SHEET: &str = ".acb.bytes";
 /// The `EncodeType` of HCA waveforms.
 const HCA: u8 = 2;
 
@@ -44,13 +41,10 @@ impl Converter for Audio {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
+        script: Option<&str>,
         container_paths: &[String],
     ) -> bool {
-        object.class_id == TEXT_ASSET
-            && container_paths
-                .iter()
-                .any(|path| path.to_ascii_lowercase().ends_with(CUE_SHEET))
+        roots::audio(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

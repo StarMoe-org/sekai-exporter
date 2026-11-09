@@ -11,19 +11,12 @@ pub use sprite::Sprite;
 use sekai_codec::texture;
 use sekai_unity::Value;
 
+use crate::roots::{self, TEXTURE_2D_ARRAY, TEXTURE_3D};
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
     ObjectIndex,
 };
 
-/// The class ID of `Texture2D`.
-const TEXTURE_2D: i32 = 28;
-/// The class ID of `Cubemap`.
-const CUBEMAP: i32 = 89;
-/// The class ID of `Texture3D`.
-const TEXTURE_3D: i32 = 117;
-/// The class ID of `Texture2DArray`.
-const TEXTURE_2D_ARRAY: i32 = 187;
 /// How many times its decoded size converting and encoding a texture needs: the decoded image
 /// and the working copies of the encoder.
 const DECODED_FACTOR: u64 = 3;
@@ -45,13 +38,10 @@ impl Converter for Texture {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
-        _container_paths: &[String],
+        script: Option<&str>,
+        container_paths: &[String],
     ) -> bool {
-        matches!(
-            object.class_id,
-            TEXTURE_2D | CUBEMAP | TEXTURE_3D | TEXTURE_2D_ARRAY
-        )
+        roots::texture(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

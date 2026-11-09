@@ -6,15 +6,12 @@ use sekai_codec::Movie;
 use sekai_codec::cri::{AudioStream, VideoStream, decode_adx_available, decode_hca, read_usm};
 use sekai_unity::Value;
 
+use crate::roots::{self, USM as SUFFIX, segment};
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
     ObjectIndex,
 };
 
-/// The class ID of `TextAsset`.
-const TEXT_ASSET: i32 = 49;
-/// The container path ending of a USM file or of one of its segments.
-const SUFFIX: &str = ".usm.bytes";
 /// The `mpeg_codec` value of MPEG-1.
 const MPEG1: u32 = 1;
 /// The `audio_codec` value of ADX.
@@ -29,15 +26,6 @@ const ENCODER_MEMORY: u64 = 256 << 20;
 /// USM files, as a video with its audio.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Video;
-
-/// The `<base>` and number of a container path of the form `<base>-<NNN>.usm.bytes`.
-fn segment(path: &str) -> Option<(&str, u32)> {
-    let (base, number) = path.strip_suffix(SUFFIX)?.rsplit_once('-')?;
-    if number.len() != 3 || !number.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    Some((base, number.parse().ok()?))
-}
 
 fn malformed(message: impl Into<String>) -> ConvertError {
     ConvertError::new("malformed", message)
@@ -134,13 +122,10 @@ impl Converter for Video {
     fn is_root(
         &self,
         object: &ObjectIndex,
-        _script: Option<&str>,
+        script: Option<&str>,
         container_paths: &[String],
     ) -> bool {
-        object.class_id == TEXT_ASSET
-            && container_paths.iter().any(|path| {
-                path.ends_with(SUFFIX) && segment(path).is_none_or(|(_, number)| number == 1)
-            })
+        roots::video(object, script, container_paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {

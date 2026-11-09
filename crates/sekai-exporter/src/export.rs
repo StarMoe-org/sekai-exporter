@@ -31,7 +31,11 @@ pub(crate) fn image() -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "image"))]
 pub(crate) fn image() -> Vec<Box<dyn Converter>> {
-    Vec::new()
+    use sekai_convert::roots::{Absent, sprite, texture};
+    vec![
+        Absent::boxed("texture", texture),
+        Absent::boxed("sprite", sprite),
+    ]
 }
 
 #[cfg(feature = "video")]
@@ -41,7 +45,8 @@ pub(crate) fn video() -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "video"))]
 pub(crate) fn video() -> Vec<Box<dyn Converter>> {
-    Vec::new()
+    use sekai_convert::roots::{Absent, video};
+    vec![Absent::boxed("video", video)]
 }
 
 #[cfg(feature = "audio")]
@@ -51,7 +56,8 @@ fn audio(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "audio"))]
 fn audio(_hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
-    Vec::new()
+    use sekai_convert::roots::{Absent, audio};
+    vec![Absent::boxed("audio", audio)]
 }
 
 #[cfg(feature = "text")]
@@ -64,7 +70,8 @@ fn text() -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "text"))]
 fn text() -> Vec<Box<dyn Converter>> {
-    Vec::new()
+    use sekai_convert::roots::{Absent, font, text};
+    vec![Absent::boxed("text", text), Absent::boxed("font", font)]
 }
 
 #[cfg(feature = "scenario")]
@@ -74,7 +81,8 @@ fn scenario() -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "scenario"))]
 fn scenario() -> Vec<Box<dyn Converter>> {
-    Vec::new()
+    use sekai_convert::roots::Absent;
+    vec![Absent::boxed("scenario", sekai_moesekai::roots::scenario)]
 }
 
 /// Every converter of this build. `hca_key` decrypts encrypted HCA audio.

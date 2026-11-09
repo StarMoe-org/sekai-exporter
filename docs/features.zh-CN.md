@@ -9,7 +9,7 @@
 1. **一个 feature 对应一个转换器族、一个视图、一个后端或一个来源。** feature 启用一个完整的模块（`#[cfg(feature = "x")] mod x;`）或一项可选依赖。函数体内不出现 `#[cfg]`。
 2. **feature 只做加法。** 任何两个 feature 都不互斥。同一格式的多个后端都编译进来时，由配置选择其一，所选后端计入其影响的每一个指纹。
 3. **feature 之间的依赖在 `Cargo.toml` 中声明。** 启用一个 feature 即启用它所需的 feature。
-4. **未编译进构建的转换器予以报告，而非跳过。** 其本应产出的每个资产以 `not_compiled` 状态及该转换器的名称记录。关闭某个 feature 不会导致输出被静默移除。
+4. **未编译进构建的转换器予以报告，而非跳过。** 其本应产出的每个资产记录为错误 `not_compiled`，并写明该转换器的名称。关闭某个 feature 不会导致输出被静默移除。
 5. **不提供运行期插件接口。** 扩展导出器的方式是新增一个模块与一个 feature。
 6. **持续集成将每个 feature 单独构建一次**（`cargo hack check --each-feature`），并分别构建不启用默认 feature、启用默认 feature 与启用全部 feature 三种组合。依赖其他 feature 而未声明的 feature 无法通过这项检查。
 
@@ -30,6 +30,8 @@
 | `timeline` | Timeline 资产，转换为时间轴文档 |
 | `particles` | 粒子系统，转换为粒子文档 |
 
+`model`、`animation`、`live2d`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。`audio` 目前尚不转换 `AudioClip`。
+
 `sekai-moesekai` 中本游戏专有、服务于默认使用者的转换器族：
 
 | Feature | 转换或产出的内容 |
@@ -40,7 +42,9 @@
 | `costume` | 供 3D 浏览的服装组合 |
 | `storage-view` | [storage 视图](publishing.zh-CN.md#storage-视图) |
 
-`sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的站点、家具与现象。
+`episode`、`virtual-live` 与 `costume` 这几个 feature 已定义，目前尚不产出任何内容。
+
+`sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的站点、家具与现象。它已定义，目前尚不产出任何内容。
 
 ## 后端
 
@@ -66,7 +70,7 @@
 | `client` | `sekai-game`、`sekai-pipeline` | `apk` 来源，以及读取客户端安装包内资产所用的字段布局表（`sekai-layouts`） |
 | `catalog-db` | `sekai-catalog` | 保存于 redb 数据库的目录 |
 | `s3` | `sekai-publish` | S3 兼容的 store |
-| `serve` | `sekai-exporter` | 以 HTTP 服务形式运行的惰性求值器 |
+| `serve` | `sekai-exporter` | 以 HTTP 服务形式运行的惰性求值器；已定义，尚未实现 |
 
 ## 预设
 

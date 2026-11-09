@@ -9,7 +9,7 @@ The exporter is assembled from Cargo features. Each converter family, view, enco
 1. **One feature is one converter family, one view, one backend or one source.** A feature enables a whole module (`#[cfg(feature = "x")] mod x;`) or an optional dependency. Function bodies contain no `#[cfg]`.
 2. **Features are additive.** No two features exclude each other. When several backends for the same format are compiled in, the configuration selects one, and the selected backend is part of every fingerprint it affects.
 3. **Dependencies between features are declared in `Cargo.toml`.** Enabling a feature enables the features it needs.
-4. **A converter that is not compiled in is reported, not skipped.** Each asset it would have produced is recorded with the status `not_compiled` and the converter's name. Turning a feature off never removes output silently.
+4. **A converter that is not compiled in is reported, not skipped.** Each asset it would have produced is recorded with the error `not_compiled` and the converter's name. Turning a feature off never removes output silently.
 5. **There is no runtime plug-in interface.** Extending the exporter means adding a module and a feature.
 6. **Continuous integration builds every feature on its own** (`cargo hack check --each-feature`), as well as the presets with no default features, with default features and with all features. A feature that depends on another without declaring it fails this check.
 
@@ -30,6 +30,8 @@ In `sekai-convert`, general to Unity content:
 | `timeline` | Timeline assets into timeline documents |
 | `particles` | Particle systems into particle documents |
 
+The features `model`, `animation`, `live2d`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. `audio` does not convert `AudioClip` yet.
+
 In `sekai-moesekai`, specific to this game, for the default consumer:
 
 | Feature | Converts or produces |
@@ -40,7 +42,9 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 | `costume` | Costume combinations for 3D viewing |
 | `storage-view` | The [storage view](publishing.md#the-storage-view) |
 
-In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs.
+The features `episode`, `virtual-live` and `costume` are defined and do not produce anything yet.
+
+In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs. It is defined and does not produce anything yet.
 
 ## Backends
 
@@ -66,7 +70,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 | `client` | `sekai-game`, `sekai-pipeline` | The `apk` source, and the field layout tables (`sekai-layouts`) for assets inside the client package |
 | `catalog-db` | `sekai-catalog` | The catalog kept in a redb database |
 | `s3` | `sekai-publish` | S3-compatible stores |
-| `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server |
+| `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server; defined and not implemented yet |
 
 ## Presets
 

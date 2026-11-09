@@ -4,6 +4,7 @@
 pub mod costume;
 #[cfg(feature = "episode")]
 pub mod episode;
+pub mod roots;
 #[cfg(feature = "scenario")]
 pub mod scenario;
 #[cfg(feature = "storage-view")]

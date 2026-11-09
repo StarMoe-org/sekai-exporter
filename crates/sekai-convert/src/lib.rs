@@ -26,6 +26,7 @@ pub mod live2d;
 pub mod model;
 #[cfg(feature = "particles")]
 pub mod particles;
+pub mod roots;
 #[cfg(feature = "text")]
 pub mod text;
 #[cfg(feature = "timeline")]

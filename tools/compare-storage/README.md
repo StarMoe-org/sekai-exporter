@@ -66,13 +66,13 @@ the run. Paths whose contents are the same are never matched. Blank lines are sk
 ## determinism.py
 
 ```bash
-python determinism.py RUN1 RUN2 [--metrics FILE]
+python determinism.py RUN1 RUN2 [--metrics FILE] [--skip-publication]
 ```
 
 Every file of `RUN1` must exist in `RUN2` with the same bytes, and the reverse. The script lists
 missing and differing paths. With `--metrics`, `FILE` is a JSON Lines file with one object per
 line, normally the `metrics.jsonl` of the second run. Each span of the `convert` stage
-(`{"kind": "span", "stage": "convert"}`) is one recomputed derivation, and the count must be 0. The exit status is 0 when everything matches, 1 otherwise, and 2 for usage errors.
+(`{"kind": "span", "stage": "convert"}`) is one recomputed derivation, and the count must be 0. With `--skip-publication`, the documents of a publication (index roots, index shards and listings) are left out of both directories, so that the store of a run that published can be compared with the store of a run that did not. The exit status is 0 when everything matches, 1 otherwise, and 2 for usage errors.
 
 ## Tests
 

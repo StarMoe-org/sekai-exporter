@@ -1,12 +1,14 @@
 """Check that two output directories of the same input are byte for byte identical.
 
 Usage:
-    python determinism.py RUN1 RUN2 [--metrics FILE]
+    python determinism.py RUN1 RUN2 [--metrics FILE] [--skip-publication]
 
 Every file in RUN1 must exist in RUN2 with the same bytes, and the reverse. With --metrics, FILE
 is the metrics file of the second run, JSON Lines with one object per line. Each span of the
 "convert" stage ({"kind": "span", "stage": "convert"}) is one recomputed derivation, and their
-count must be 0.
+count must be 0. With --skip-publication, the documents of a publication (index roots, index
+shards and listings) are left out of both directories, so that the store of a run that published
+can be compared with the store of a run that did not.
 
 Exit status: 0 if everything matches, 1 otherwise, 2 for usage errors.
 """
@@ -17,6 +19,19 @@ import os
 import sys
 
 from compare import join_relative, list_files, same_bytes
+
+PUBLICATION_FORMATS = {"index-root", "index-shard", "listing"}
+
+
+def is_publication(path):
+    if not path.endswith(".json"):
+        return False
+    try:
+        with open(path, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except ValueError:
+        return False
+    return isinstance(document, dict) and document.get("format") in PUBLICATION_FORMATS
 
 
 def count_convert_lines(path):
@@ -45,6 +60,11 @@ def main(argv=None):
     parser.add_argument(
         "--metrics", metavar="FILE", help="JSON Lines metrics file; convert lines must not occur"
     )
+    parser.add_argument(
+        "--skip-publication",
+        action="store_true",
+        help="leave out index roots, index shards and listings",
+    )
     args = parser.parse_args(argv)
     for root in (args.run1, args.run2):
         if not os.path.isdir(root):
@@ -60,6 +80,9 @@ def main(argv=None):
 
     files1 = list_files(args.run1)
     files2 = list_files(args.run2)
+    if args.skip_publication:
+        files1 = [rel for rel in files1 if not is_publication(join_relative(args.run1, rel))]
+        files2 = [rel for rel in files2 if not is_publication(join_relative(args.run2, rel))]
     set1, set2 = set(files1), set(files2)
     failed = False
     for rel in sorted(set1 - set2):

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The value of the `format` key.
 pub const FORMAT: &str = "clip";
 /// The version of the document format.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The curves, bindings and events of one animation clip, as the engine stores them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -25,7 +25,7 @@ pub struct ClipDocument {
     /// Whether the clip starts again at its end.
     #[serde(rename = "loop")]
     pub looping: bool,
-    /// One curve per binding, in stored order.
+    /// The curves, in the order of the bindings they belong to.
     pub curves: Vec<Curve>,
     /// The events, in stored order.
     pub events: Vec<Event>,
@@ -43,7 +43,7 @@ impl ClipDocument {
     }
 }
 
-/// One binding and the curve that drives it.
+/// One curve and the binding it belongs to.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Curve {
     /// The CRC-32 of the path of the target.
@@ -56,6 +56,9 @@ pub struct Curve {
     pub script: Option<String>,
     /// The binding's custom type.
     pub custom_type: u8,
+    /// The position of the curve among the curves of its binding, such as 1 for the y of a
+    /// `Transform` position.
+    pub component: u8,
     /// The curve.
     #[serde(flatten)]
     pub data: CurveData,
@@ -154,6 +157,7 @@ mod tests {
                     class_id: 114,
                     script: Some("A/B.C".into()),
                     custom_type: 0,
+                    component: 0,
                     data: CurveData::Streamed {
                         segments: vec![
                             [-f32::MAX, 0.0, 0.0, 0.0, 1.0],
@@ -167,6 +171,7 @@ mod tests {
                     class_id: 114,
                     script: None,
                     custom_type: 0,
+                    component: 0,
                     data: CurveData::Constant { value: 0.1 },
                 },
             ],
@@ -186,7 +191,7 @@ mod tests {
         let bytes = doc.to_bytes().unwrap();
         assert_eq!(
             std::str::from_utf8(&bytes).unwrap(),
-            r#"{"format":"clip","version":1,"name":"w-a01","sample_rate":60.0,"start_time":0.0,"stop_time":2.5,"loop":false,"curves":[{"path":397467875,"attribute":3702945584,"class_id":114,"script":"A/B.C","custom_type":0,"kind":"streamed","segments":[[-3.4028235e+38,0.0,0.0,0.0,1.0],[0.5,1.0,-2.0,0.25,1.0]]},{"path":1,"attribute":2,"class_id":114,"script":null,"custom_type":0,"kind":"constant","value":0.1}],"events":[{"time":0.0,"function":"F","data":"x,1","float":0.0,"int":3}]}"#
+            r#"{"format":"clip","version":2,"name":"w-a01","sample_rate":60.0,"start_time":0.0,"stop_time":2.5,"loop":false,"curves":[{"path":397467875,"attribute":3702945584,"class_id":114,"script":"A/B.C","custom_type":0,"component":0,"kind":"streamed","segments":[[-3.4028235e+38,0.0,0.0,0.0,1.0],[0.5,1.0,-2.0,0.25,1.0]]},{"path":1,"attribute":2,"class_id":114,"script":null,"custom_type":0,"component":0,"kind":"constant","value":0.1}],"events":[{"time":0.0,"function":"F","data":"x,1","float":0.0,"int":3}]}"#
         );
         assert_eq!(ClipDocument::from_bytes(&bytes).unwrap(), doc);
     }

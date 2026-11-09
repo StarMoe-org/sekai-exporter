@@ -4,8 +4,8 @@
 
 游戏的 Live2D 内容由两种形式承载：
 
-- **`live2d-model`**：游戏所加载的一个模型，包括 `.moc3` 文件、贴图、物理设置，以及属于模型本身的动作。转换器：`sekai-convert` 中的 `live2d-model`（feature `live2d`）。形式版本：1。
-- **`live2d-motions`**：游戏所加载的一组动作，即一个角色在其任一模型上播放的身体动作与表情动作。转换器：`sekai-convert` 中的 `live2d-motions`（feature `live2d`）。形式版本：1。
+- **`live2d-model`**：游戏所加载的一个模型，包括 `.moc3` 文件、贴图、物理设置，以及属于模型本身的动作。转换器：`sekai-convert` 中的 `live2d-model`（feature `live2d`）。形式版本：2。
+- **`live2d-motions`**：游戏所加载的一组动作，即一个角色在其任一模型上播放的身体动作与表情动作。转换器：`sekai-convert` 中的 `live2d-motions`（feature `live2d`）。形式版本：2。
 
 ## 1. 运行时
 
@@ -106,3 +106,5 @@ Moesekai 的 Live2D 查看器中的 Live2D 运行时，它按游戏的方式显�
 |---|---|---|
 | `live2d-model` | 1 | 首个版本 |
 | `live2d-motions` | 1 | 首个版本 |
+| `live2d-model` | 2 | 动作为版本 2 的 [clip 文档](clip-documents.zh-CN.md) |
+| `live2d-motions` | 2 | 动作为版本 2 的 [clip 文档](clip-documents.zh-CN.md) |

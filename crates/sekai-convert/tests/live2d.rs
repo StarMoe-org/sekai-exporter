@@ -638,7 +638,7 @@ fn a_motion_document_has_pinned_bytes() {
     let (_, json) = bytes(&members[1]);
     assert_eq!(
         std::str::from_utf8(json).unwrap(),
-        r#"{"format":"live2d-motion","version":1,"clip":{"format":"clip","version":1,"name":"w-a","sample_rate":60.0,"start_time":0.0,"stop_time":1.5,"loop":true,"curves":[{"path":11,"attribute":3702945584,"class_id":114,"script":"Live2D.Cubism/Live2D.Cubism.Core.CubismParameter","custom_type":0,"kind":"streamed","segments":[[-3.4028235e+38,0.0,0.0,0.5,1.0]]},{"path":14,"attribute":3702945584,"class_id":114,"script":"Live2D.Cubism/Live2D.Cubism.Core.CubismParameter","custom_type":0,"kind":"constant","value":0.1}],"events":[]}}"#
+        r#"{"format":"live2d-motion","version":1,"clip":{"format":"clip","version":2,"name":"w-a","sample_rate":60.0,"start_time":0.0,"stop_time":1.5,"loop":true,"curves":[{"path":11,"attribute":3702945584,"class_id":114,"script":"Live2D.Cubism/Live2D.Cubism.Core.CubismParameter","custom_type":0,"component":0,"kind":"streamed","segments":[[-3.4028235e+38,0.0,0.0,0.5,1.0]]},{"path":14,"attribute":3702945584,"class_id":114,"script":"Live2D.Cubism/Live2D.Cubism.Core.CubismParameter","custom_type":0,"component":0,"kind":"constant","value":0.1}],"events":[]}}"#
     );
 }
 

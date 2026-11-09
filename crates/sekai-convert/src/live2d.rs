@@ -33,7 +33,7 @@ impl Converter for Model {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(
@@ -122,7 +122,7 @@ impl Converter for Motions {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(

@@ -10,7 +10,7 @@ use crate::{Context, ConvertError, ObjectId};
 
 /// The class ID of `AnimationClip`.
 pub const ANIMATION_CLIP: i32 = 74;
-/// The class ID of `Transform`, whose bindings drive several curves each.
+/// The class ID of `Transform`, whose bindings take one curve per component of a property.
 const TRANSFORM: i32 = 4;
 /// The curve lists of the legacy representation, which clips built for the animator leave empty.
 const LEGACY_CURVES: &[&str] = &[
@@ -64,17 +64,18 @@ pub fn clip_document(clip: ObjectId, cx: &dyn Context) -> Result<ClipDocument, C
         return Err(unsupported("m_CycleOffset is not 0"));
     }
     let data = field(field(muscle, "m_Clip")?, "data")?;
-    let bindings = field(field(fields, "m_ClipBindingConstant")?, "genericBindings")?;
-    let bindings = bindings
-        .as_array()
-        .ok_or_else(|| malformed("genericBindings is not an array"))?;
-    if field(fields, "m_ClipBindingConstant")?
+    let binding_constant = field(fields, "m_ClipBindingConstant")?;
+    if binding_constant
         .get("pptrCurveMapping")
         .and_then(Value::as_array)
         .is_some_and(|items| !items.is_empty())
     {
         return Err(unsupported("the clip has reference curves"));
     }
+    let bindings = array(binding_constant, "genericBindings")?
+        .iter()
+        .map(|b| Binding::read(clip, b, cx))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut values = streamed(field(data, "m_StreamedClip")?)?;
     values.extend(dense(field(data, "m_DenseClip")?)?);
@@ -83,18 +84,19 @@ pub fn clip_document(clip: ObjectId, cx: &dyn Context) -> Result<ClipDocument, C
             value: finite(number(value)?, "a constant value")?,
         });
     }
-    if values.len() != bindings.len() {
+    let taken: usize = bindings.iter().map(|b| usize::from(b.width)).sum();
+    if values.len() != taken {
         return Err(malformed(format!(
-            "{} curves for {} bindings",
-            values.len(),
-            bindings.len()
+            "{} curves for bindings that take {taken}",
+            values.len()
         )));
     }
     let curves = bindings
         .iter()
+        .flat_map(|binding| (0..binding.width).map(move |component| (binding, component)))
         .zip(values)
-        .map(|(binding, data)| curve(clip, binding, data, cx))
-        .collect::<Result<_, _>>()?;
+        .map(|((binding, component), data)| binding.curve(component, data))
+        .collect();
     let events = fields
         .get("m_Events")
         .map(|events| {
@@ -120,43 +122,79 @@ pub fn clip_document(clip: ObjectId, cx: &dyn Context) -> Result<ClipDocument, C
     })
 }
 
-/// One binding with its curve.
-fn curve(
-    clip: ObjectId,
-    binding: &Value,
-    data: CurveData,
-    cx: &dyn Context,
-) -> Result<Curve, ConvertError> {
-    let class_id = integer(field(binding, "typeID")?, "typeID")?;
-    if class_id == i64::from(TRANSFORM) {
-        return Err(unsupported("the clip drives a Transform"));
+/// What a run of consecutive curves drives: one entry of `genericBindings`.
+struct Binding {
+    path: u32,
+    attribute: u32,
+    class_id: i32,
+    script: Option<String>,
+    custom_type: u8,
+    /// The number of curves the binding takes.
+    width: u8,
+}
+
+impl Binding {
+    fn read(clip: ObjectId, binding: &Value, cx: &dyn Context) -> Result<Self, ConvertError> {
+        for name in NON_FLOAT_BINDINGS {
+            if binding
+                .get(name)
+                .map(|v| integer(v, name))
+                .transpose()?
+                .is_some_and(|v| v != 0)
+            {
+                return Err(unsupported(format!("a binding has {name} set")));
+            }
+        }
+        let class_id = i32::try_from(integer(field(binding, "typeID")?, "typeID")?)
+            .map_err(|_| malformed("typeID is out of range"))?;
+        let attribute = unsigned(field(binding, "attribute")?, "attribute")?;
+        let width = if class_id == TRANSFORM {
+            transform_width(attribute)?
+        } else {
+            1
+        };
+        let script = match field(binding, "script")?.as_pptr() {
+            None => return Err(malformed("a binding's script is not a reference")),
+            Some(reference) => match cx.resolve(clip, reference)? {
+                None => None,
+                Some(id) => Some(script_name(&cx.object(id)?.fields)?),
+            },
+        };
+        Ok(Self {
+            path: unsigned(field(binding, "path")?, "path")?,
+            attribute,
+            class_id,
+            script,
+            custom_type: u8::try_from(integer(field(binding, "customType")?, "customType")?)
+                .map_err(|_| malformed("customType is out of range"))?,
+            width,
+        })
     }
-    for name in NON_FLOAT_BINDINGS {
-        if binding
-            .get(name)
-            .map(|v| integer(v, name))
-            .transpose()?
-            .is_some_and(|v| v != 0)
-        {
-            return Err(unsupported(format!("a binding has {name} set")));
+
+    /// The `component`th curve of the binding, with its values.
+    fn curve(&self, component: u8, data: CurveData) -> Curve {
+        Curve {
+            path: self.path,
+            attribute: self.attribute,
+            class_id: self.class_id,
+            script: self.script.clone(),
+            custom_type: self.custom_type,
+            component,
+            data,
         }
     }
-    let script = match field(binding, "script")?.as_pptr() {
-        None => return Err(malformed("a binding's script is not a reference")),
-        Some(reference) => match cx.resolve(clip, reference)? {
-            None => None,
-            Some(id) => Some(script_name(&cx.object(id)?.fields)?),
-        },
-    };
-    Ok(Curve {
-        path: unsigned(field(binding, "path")?, "path")?,
-        attribute: unsigned(field(binding, "attribute")?, "attribute")?,
-        class_id: i32::try_from(class_id).map_err(|_| malformed("typeID is out of range"))?,
-        script,
-        custom_type: u8::try_from(integer(field(binding, "customType")?, "customType")?)
-            .map_err(|_| malformed("customType is out of range"))?,
-        data,
-    })
+}
+
+/// The number of curves of a `Transform` property: position, rotation as a quaternion, scale,
+/// and rotation as Euler angles.
+fn transform_width(attribute: u32) -> Result<u8, ConvertError> {
+    match attribute {
+        1 | 3 | 4 => Ok(3),
+        2 => Ok(4),
+        _ => Err(unsupported(format!(
+            "a Transform binding has the attribute {attribute}"
+        ))),
+    }
 }
 
 /// `"<assembly>/<namespace>.<class>"` of a `MonoScript`.

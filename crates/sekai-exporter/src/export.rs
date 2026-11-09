@@ -133,6 +133,24 @@ fn story_data() -> Vec<Box<dyn Converter>> {
     ]
 }
 
+#[cfg(feature = "costume")]
+fn costume() -> Vec<Box<dyn Converter>> {
+    vec![
+        Box::new(sekai_moesekai::costume::CostumeModel),
+        Box::new(sekai_moesekai::costume::CostumeMotion),
+    ]
+}
+
+#[cfg(not(feature = "costume"))]
+fn costume() -> Vec<Box<dyn Converter>> {
+    use sekai_convert::roots::Absent;
+    use sekai_moesekai::roots::{costume_model, costume_motion};
+    vec![
+        Absent::boxed("costume-model", costume_model),
+        Absent::boxed("costume-motion", costume_motion),
+    ]
+}
+
 /// Every converter of this build. `hca_key` decrypts encrypted HCA audio.
 pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
     [
@@ -144,6 +162,7 @@ pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
         scenario(),
         virtual_live(),
         story_data(),
+        costume(),
     ]
     .into_iter()
     .flatten()

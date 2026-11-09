@@ -837,6 +837,7 @@ dependencies = [
 name = "sekai-convert"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "sekai-codec",
  "sekai-format",
  "sekai-unity",

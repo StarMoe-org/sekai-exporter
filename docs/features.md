@@ -30,7 +30,7 @@ In `sekai-convert`, general to Unity content:
 | `timeline` | Timeline assets into timeline documents |
 | `particles` | Particle systems into particle documents |
 
-The features `model`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. These four asset forms have no root rules, so a build without them reports nothing with `not_compiled`, as rule 4 describes. `animation` decodes `AnimationClip` into the [clip documents](spec/clip-documents.md) that the Live2D forms contain, and produces no assets of its own yet. `audio` does not convert `AudioClip` yet.
+The features `ugui`, `timeline` and `particles` are defined and do not convert anything yet. These three asset forms have no root rules, so a build without them reports nothing with `not_compiled`, as rule 4 describes. `model` reads a prefab into a [model file](spec/model.md) and a [component document](spec/component-documents.md), and `animation` decodes `AnimationClip` into [clip documents](spec/clip-documents.md). The Live2D and costume forms contain them; neither family produces assets of its own or glTF animation yet. `audio` does not convert `AudioClip` yet.
 
 In `sekai-moesekai`, specific to this game, for the default consumer:
 
@@ -39,9 +39,9 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 | `scenario` | Scenario objects into scenario documents |
 | `episode` | Story episodes: one table row with every asset it refers to resolved |
 | `virtual-live` | The [scripts](spec/virtual-live-script.md) of virtual lives |
-| `costume` | Costume combinations for 3D viewing |
+| `costume` | Costume parts, motions and combinations for 3D viewing, in the [costume forms](spec/costume.md) |
 
-The feature `costume` is defined and does not produce anything yet. Its asset form has no root rules either, so a build without it reports nothing with `not_compiled`.
+`costume` produces the `costume-model` and `costume-motion` forms; the combination of parts and motions that makes up each costume is not produced yet.
 
 The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
 

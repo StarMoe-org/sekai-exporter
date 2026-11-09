@@ -79,6 +79,7 @@
 | JavaScript 绑定 | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)、[`js-sys`](https://crates.io/crates/js-sys) | 在 `wasm32` 上链接 | MIT 或 Apache-2.0 |
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | 链接 | MIT |
 | 哈希 | [`sha2`](https://crates.io/crates/sha2) | 链接 | MIT OR Apache-2.0 |
+| 节点路径的 CRC-32 | [`crc32fast`](https://crates.io/crates/crc32fast) | 启用 `model` feature 时链接 | MIT OR Apache-2.0 |
 | HTTP 与 TLS | [`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |
 | 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
 | 运行时加载库 | [`libloading`](https://crates.io/crates/libloading) | 链接 | ISC |

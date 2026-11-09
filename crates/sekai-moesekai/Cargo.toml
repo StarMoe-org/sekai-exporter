@@ -23,7 +23,7 @@ image-webp = { version = "0.2.4", optional = true }
 scenario = []
 episode = ["scenario", "dep:sekai-format", "dep:serde", "dep:serde_json"]
 virtual-live = ["scenario"]
-costume = ["sekai-convert/model"]
+costume = ["sekai-convert/model", "sekai-convert/animation"]
 storage-view = [
     "sekai-convert/image",
     "sekai-convert/audio",
@@ -38,6 +38,7 @@ storage-view = [
 
 [dev-dependencies]
 png = "0.18.1"
+serde_json = "1"
 
 [lints]
 workspace = true

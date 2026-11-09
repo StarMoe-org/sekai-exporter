@@ -79,6 +79,7 @@ An entry is added in the same change that adds the component, and removed in the
 | JavaScript bindings | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen), [`js-sys`](https://crates.io/crates/js-sys) | Linked on `wasm32` | MIT or Apache-2.0 |
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | Linked | MIT |
 | Hashing | [`sha2`](https://crates.io/crates/sha2) | Linked | MIT OR Apache-2.0 |
+| CRC-32 of node paths | [`crc32fast`](https://crates.io/crates/crc32fast) | Linked when the `model` feature is enabled | MIT OR Apache-2.0 |
 | HTTP and TLS | [`ureq`](https://crates.io/crates/ureq), [`rustls`](https://crates.io/crates/rustls), [`ring`](https://crates.io/crates/ring), [`webpki-roots`](https://crates.io/crates/webpki-roots), [`socks`](https://crates.io/crates/socks) | Linked when the `cdn` or `s3` feature is enabled | MIT OR Apache-2.0; Apache-2.0 OR ISC OR MIT; Apache-2.0 AND ISC; CDLA-Permissive-2.0; MIT OR Apache-2.0 |
 | Catalog | [`redb`](https://crates.io/crates/redb) | Linked when the `catalog-db` feature is enabled | MIT OR Apache-2.0 |
 | Loading libraries at run time | [`libloading`](https://crates.io/crates/libloading) | Linked | ISC |

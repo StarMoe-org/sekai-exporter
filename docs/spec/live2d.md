@@ -4,8 +4,8 @@
 
 Two forms carry the game's Live2D content:
 
-- **`live2d-model`** is one model as the game loads it: its `.moc3` file, its textures, its physics settings and the motions that belong to the model itself. Converter: `live2d-model` in `sekai-convert` (feature `live2d`). Form version: 1.
-- **`live2d-motions`** is one set of motions as the game loads it: the body motions and the facial motions a character plays on any of its models. Converter: `live2d-motions` in `sekai-convert` (feature `live2d`). Form version: 1.
+- **`live2d-model`** is one model as the game loads it: its `.moc3` file, its textures, its physics settings and the motions that belong to the model itself. Converter: `live2d-model` in `sekai-convert` (feature `live2d`). Form version: 2.
+- **`live2d-motions`** is one set of motions as the game loads it: the body motions and the facial motions a character plays on any of its models. Converter: `live2d-motions` in `sekai-convert` (feature `live2d`). Form version: 2.
 
 ## 1. Runtime
 
@@ -106,3 +106,5 @@ Continuous integration builds model and motion bundles from synthetic objects an
 |---|---|---|
 | `live2d-model` | 1 | First version |
 | `live2d-motions` | 1 | First version |
+| `live2d-model` | 2 | Motions are [clip documents](clip-documents.md) of version 2 |
+| `live2d-motions` | 2 | Motions are [clip documents](clip-documents.md) of version 2 |

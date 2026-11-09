@@ -1,6 +1,6 @@
 [package]
 name = "sekai-pipeline"
-description = "The eager and lazy evaluators and the scheduler"
+description = "The eager, streaming and lazy evaluators and the scheduler"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -161,7 +161,7 @@ pub(crate) struct Plan<'a> {
     pub(crate) unnamed: Vec<(String, i64)>,
 }
 
-fn fingerprint(
+pub(crate) fn fingerprint(
     converter: &dyn Converter,
     name: &str,
     index: &VersionIndex,
@@ -606,7 +606,43 @@ pub(crate) fn run(
     options: &Options,
     fusion: Option<&dyn Fusion>,
 ) -> io::Result<Evaluation> {
-    let plans = &plan.derivations;
+    let ran = run_each(
+        &plan.derivations,
+        version,
+        store,
+        derivations,
+        recorder,
+        options,
+        fusion,
+    )?;
+    Ok(Evaluation {
+        outputs: ran.outputs.into_iter().flatten().collect(),
+        unnamed: plan.unnamed.clone(),
+        converted: ran.converted,
+        reused: ran.reused,
+    })
+}
+
+/// The outcome of [`run_each`].
+pub(crate) struct Ran {
+    /// The asset of each derivation, in order; `None` for a derivation with no asset.
+    pub(crate) outputs: Vec<Option<Output>>,
+    /// The derivations that ran.
+    pub(crate) converted: usize,
+    /// The derivations whose output already existed.
+    pub(crate) reused: usize,
+}
+
+/// Runs `plans` as [`run`] does and reports the asset of each derivation, in order.
+pub(crate) fn run_each(
+    plans: &[Planned<'_>],
+    version: &Version<'_>,
+    store: &dyn Store,
+    derivations: &dyn Derivations,
+    recorder: &dyn Recorder,
+    options: &Options,
+    fusion: Option<&dyn Fusion>,
+) -> io::Result<Ran> {
     let threads = if options.plain { 1 } else { options.threads };
     let recorded = parallel(plans.len(), threads, |i| -> io::Result<_> {
         let plan = &plans[i];
@@ -656,25 +692,27 @@ pub(crate) fn run(
     if !options.plain {
         derivations.flush()?;
     }
-    let mut evaluation = Evaluation {
-        unnamed: plan.unnamed.clone(),
-        ..Evaluation::default()
+    let mut ran = Ran {
+        outputs: Vec::with_capacity(plans.len()),
+        converted: 0,
+        reused: 0,
     };
     for (plan, result) in plans.iter().zip(results) {
         let (derived, error, reused) = result.expect("every derivation ran or was recorded");
         if reused {
-            evaluation.reused += 1;
+            ran.reused += 1;
         } else {
-            evaluation.converted += 1;
+            ran.converted += 1;
         }
-        if let Derived::Document(document) = derived {
-            evaluation.outputs.push(Output {
+        ran.outputs.push(match derived {
+            Derived::Document(document) => Some(Output {
                 name: plan.name.clone(),
                 form: plan.converter.name(),
                 document,
                 error,
-            });
-        }
+            }),
+            Derived::Nothing => None,
+        });
     }
-    Ok(evaluation)
+    Ok(ran)
 }

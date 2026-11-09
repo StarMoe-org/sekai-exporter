@@ -30,6 +30,16 @@ The pipeline is the eager evaluator of the [derivation graph](architecture.md). 
 - **The order of work does not affect output.** Each output depends only on its inputs, and the catalog is written in key order at the end of each batch. Store contents and the catalog contents sorted by primary key are independent of thread count and scheduling.
 - **A commit is all or nothing per version.** P8 advances the pointer only after verification. When verification fails, the stage that failed is reported by its fixed name and the previous pointer stays in place.
 
+## Streaming evaluation
+
+The streaming evaluator evaluates a version from its manifest, one bundle at a time, without indexing the whole version first.
+
+- **Units.** A unit is one bundle of the manifest with its window: the bundle and every bundle it depends on, directly or through others. The roots of a unit are the root objects of its bundle. They are named from that bundle alone, and their closures, declared inputs and script references are followed only inside the window.
+- **References outside the window.** A reference in the closure of a root to a file of a bundle outside the window makes the asset fail with the error `outside_dependencies`, whose message names the referring bundle and object and the external file. A script reference outside the window does not resolve. Every such reference is listed with the result. References to engine files that no bundle holds stay out of closures, as in the eager evaluator.
+- **Segments.** Units run in manifest order, in segments of consecutive units, bounded by a number of units and by the declared size of the bundles of their windows. The bundles of a segment are opened together and its derivations run under the scheduler. A bundle stays open, indexed and parsed until the last unit whose window holds it, which the manifest tells in advance. Parsed bundles are kept within an estimate of their memory.
+- **Results.** Every closure stays inside its own window, so documents, member files, fingerprints and names do not depend on how units are grouped into segments or on the number of threads. When the manifest lists every dependency and the names are the same, the result equals that of the eager evaluator. Assets of different bundles that receive the same name are left unnamed. Publishing follows the last unit.
+- **Errors.** Bundles that cannot be read, opened or indexed, bundles that share a name, and dependencies that the manifest does not list are reported by bundle name. The units that need them still run, and references that reach them fail as described above.
+
 ## Regions
 
 All regions run in one process. P0 to P3 run for every region in parallel. In P4 a fingerprint computed for any region is found by every other region, so content shared between regions is converted once. The download stage reuses a bundle already fetched for another region when both regions declare the same hash.

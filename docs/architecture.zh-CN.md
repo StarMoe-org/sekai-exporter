@@ -100,7 +100,7 @@
 | 2 | `sekai-convert` | 转换器接口、写出器与通用转换器 |
 | 2 | `sekai-encode` | 已解码内容的编码器。规范形式的编码器为纯 Rust 且始终存在；编码器的全部 C 依赖限于此处，每项一个 feature |
 | 2 | `sekai-publish` | 布局、store、发布协议与资产列表 |
-| 3 | `sekai-pipeline` | 急切与惰性两种求值器、调度器与派生缓存 |
+| 3 | `sekai-pipeline` | 急切、流式与惰性三种求值器、调度器与派生缓存 |
 | 3 | `sekai-moesekai` | 剧本、剧集、虚拟演唱会、服装与 storage 视图 |
 | 3 | `sekai-mysekai` | 按复刻游戏的运行时所需的完整形式产出的 MySekai 资产 |
 | 4 | `sekai-exporter` | 命令行程序 |

@@ -10,9 +10,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aes::Aes128;
 use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockModeEncrypt, KeyIvInit};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use sekai_format::identity::{AssetIdentity, ClientIdentity, VersionIdentity};
-use sekai_game::cdn::{BundleEntry, Region, Secrets, Source, open};
+use sekai_game::cdn::{BundleEntry, Region, Secrets, Source, create_account, open};
 use sekai_game::sink::Sink;
 use serde_json::json;
 
@@ -23,6 +23,7 @@ struct Request {
     method: String,
     path: String,
     cookie: String,
+    body: Vec<u8>,
 }
 
 struct Reply {
@@ -54,14 +55,20 @@ fn answer(
     let mut first = lines.next().unwrap_or("").split(' ');
     let method = first.next().unwrap_or("").to_owned();
     let path = first.next().unwrap_or("").to_owned();
-    let cookie = lines
-        .filter_map(|line| line.split_once(": "))
-        .find(|(name, _)| name.eq_ignore_ascii_case("cookie"))
-        .map_or(String::new(), |(_, value)| value.to_owned());
+    let headers: Vec<_> = lines.filter_map(|line| line.split_once(": ")).collect();
+    let header = |wanted: &str| {
+        headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+            .map_or("", |(_, value)| *value)
+    };
+    let mut body = vec![0; header("content-length").parse().unwrap_or(0)];
+    stream.read_exact(&mut body)?;
     let reply = handler(&Request {
         method,
         path,
-        cookie,
+        cookie: header("cookie").to_owned(),
+        body,
     });
     let mut text = format!(
         "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n",
@@ -104,6 +111,12 @@ fn encrypt(document: &serde_json::Value) -> Vec<u8> {
         .len();
     buffer.truncate(written);
     buffer
+}
+
+fn decrypt(body: &[u8]) -> serde_json::Value {
+    let mut buffer = body.to_vec();
+    let cipher = cbc::Decryptor::<Aes128>::new_from_slices(&KEY, &IV).unwrap();
+    rmp_serde::from_slice(cipher.decrypt_padded::<Pkcs7>(&mut buffer).unwrap()).unwrap()
 }
 
 struct SecretFiles(PathBuf);
@@ -195,38 +208,40 @@ fn cp_client(version: &str) -> serde_json::Value {
     })
 }
 
-/// A `cp` service that knows the application versions in `known`.
-fn cp_service(known: &'static [&'static str]) -> String {
-    serve(move |request| {
-        let path = request.path.as_str();
-        if path == "/signature" && request.method == "POST" {
-            return Reply {
-                status: 200,
-                set_cookie: vec!["CloudFront-Policy=p; Path=/".to_owned()],
-                body: Vec::new(),
-            };
-        }
-        if request.cookie != "CloudFront-Policy=p" {
-            return reply(403, "");
-        }
-        if let Some(rest) = path.strip_prefix("/version/") {
-            let version = rest.split('/').next().unwrap_or("");
-            if known.contains(&version) {
-                let document =
-                    json!({"profile": "prod", "assetbundleHostHash": "hh", "domain": "x"});
-                return reply(200, encrypt(&document));
-            }
-            return reply(404, "");
-        }
-        if path == "/info/prod/hh/10/abc/android" {
-            let document = json!({"version": "10", "bundles": {
-                "b/two": {"bundleName": "b/two", "hash": "h2", "fileSize": 5, "extra": [1, 2]},
-                "a/one": {"bundleName": "a/one", "hash": "h1", "fileSize": 9, "dependencies": ["b/two"]},
-            }});
+/// The answer of a `cp` service that knows the application versions in `known`.
+fn cp_answer(known: &[&str], request: &Request) -> Reply {
+    let path = request.path.as_str();
+    if path == "/signature" && request.method == "POST" {
+        return Reply {
+            status: 200,
+            set_cookie: vec!["CloudFront-Policy=p; Path=/".to_owned()],
+            body: Vec::new(),
+        };
+    }
+    if request.cookie != "CloudFront-Policy=p" {
+        return reply(403, "");
+    }
+    if let Some(rest) = path.strip_prefix("/version/") {
+        let version = rest.split('/').next().unwrap_or("");
+        if known.contains(&version) {
+            let document = json!({"profile": "prod", "assetbundleHostHash": "hh", "domain": "x"});
             return reply(200, encrypt(&document));
         }
-        reply(404, "")
-    })
+        return reply(404, "");
+    }
+    if path == "/info/prod/hh/10/abc/android" {
+        let document = json!({"version": "10", "bundles": {
+            "b/two": {"bundleName": "b/two", "hash": "h2", "fileSize": 5, "extra": [1, 2]},
+            "a/one": {"bundleName": "a/one", "hash": "h1", "fileSize": 9, "dependencies": ["b/two"]},
+        }});
+        return reply(200, encrypt(&document));
+    }
+    reply(404, "")
+}
+
+/// A `cp` service that knows the application versions in `known`.
+fn cp_service(known: &'static [&'static str]) -> String {
+    serve(move |request| cp_answer(known, request))
 }
 
 struct Collected(Vec<u8>);
@@ -247,6 +262,64 @@ impl Sink for Collected {
         self.0.clear();
         Ok(())
     }
+}
+
+/// A credential whose middle part holds the user id 123.
+const CREDENTIAL: &str = "head.eyJ1c2VySWQiOjEyM30.signature";
+
+#[test]
+fn an_account_is_created_once_and_tells_the_asset_version() {
+    let created = Arc::new(AtomicUsize::new(0));
+    let counter = created.clone();
+    let base = serve(
+        move |request| match (request.method.as_str(), request.path.as_str()) {
+            ("POST", "/prod/account") => {
+                counter.fetch_add(1, Ordering::SeqCst);
+                assert_eq!(decrypt(&request.body)["deviceModel"], "d");
+                reply(200, encrypt(&json!({"credential": CREDENTIAL})))
+            }
+            ("PUT", "/prod/login/123") => {
+                assert_eq!(decrypt(&request.body)["credential"], CREDENTIAL);
+                reply(
+                    200,
+                    encrypt(&json!({"assetVersion": "11", "assetHash": "new"})),
+                )
+            }
+            _ => cp_answer(&["1.0.0"], request),
+        },
+    );
+    let mut region = cp_region(&base, cp_client("1.0.0"), json!({}));
+    region["urls"]["account"] = json!(format!("http://{base}/{{profile}}/account"));
+    region["urls"]["login"] = json!(format!("http://{base}/{{profile}}/login/{{user_id}}"));
+    region["secrets"]["account"] = json!("TEST_ACCOUNT");
+    let config = json!({"regions": {"r": region}}).to_string();
+    let files = SecretFiles::new("account");
+    let load = || Region::load("r", &config).unwrap();
+
+    assert_eq!(
+        create_account(load(), &files.secrets()).unwrap(),
+        "TEST_ACCOUNT"
+    );
+    assert_eq!(
+        std::fs::read_to_string(files.0.join("TEST_ACCOUNT")).unwrap(),
+        CREDENTIAL
+    );
+    let error = create_account(load(), &files.secrets()).unwrap_err();
+    assert_eq!(error.code, "secret");
+    assert_eq!(created.load(Ordering::SeqCst), 1);
+
+    let identity = open(load(), &files.secrets())
+        .map_err(|e| e.to_string())
+        .unwrap();
+    let AssetIdentity::Cp {
+        asset_version,
+        asset_hash,
+        ..
+    } = identity.identity(None).unwrap().asset
+    else {
+        panic!("not a cp identity");
+    };
+    assert_eq!((asset_version.as_str(), asset_hash.as_str()), ("11", "new"));
 }
 
 #[test]

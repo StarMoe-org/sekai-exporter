@@ -93,7 +93,7 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 
 - Each secret has a name. Its value is read from an environment variable of that name, or from a secret file outside the repository.
 - Secret values are never written to logs, reports, the catalog or asset documents. Reports name the secret that was used, not its value.
-- The guest account is created once by a separate command that the deployer runs, and is then stored as a secret and reused. Runs do not create accounts.
+- The guest account is created once by `sekai-exporter account`, and is then stored as a secret and reused. Runs do not create accounts. A `cp` region that names the secret `secrets.account` and has the addresses `urls.account` and `urls.login` takes its asset version from logging in with that account.
 - The configuration holds only the name of each secret. Its value must be obtained by the user from their own client, and is written as hexadecimal.
 - `secrets.hca` is optional and names the key of encrypted HCA audio, a 64-bit number written as one to sixteen hexadecimal digits. The audio converter decrypts with it and the subkey stored in each cue sheet. Without it, encrypted audio is reported with the error `missing_key`.
 

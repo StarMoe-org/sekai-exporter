@@ -30,6 +30,8 @@ mod storage {
     }
 }
 #[cfg(feature = "cdn")]
+mod account;
+#[cfg(feature = "cdn")]
 mod update;
 
 use std::process::ExitCode;
@@ -50,6 +52,9 @@ commands:
       Bundles go to <output>/inputs, which holds game data and must stay private.
       A version that matches the last complete run is left alone unless --force
       is given. --only selects bundles by name prefix, with their dependencies.
+  account <region> --config <file> --secrets <dir>
+      Create the guest account of a region and store its credential in <dir>
+      under the name of its secret. Run this once; later runs reuse the secret.
   objects <input> <output> [--threads <n>]
       Write the object document of every bundle file directly inside <input>
       to <output>/<bundle>/_objects.json. Payloads larger than the inline limit
@@ -74,6 +79,16 @@ fn stats(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt
     Err("this build has no catalog: enable the catalog-db feature".into())
 }
 
+#[cfg(feature = "cdn")]
+fn account(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    account::run(args)
+}
+
+#[cfg(not(feature = "cdn"))]
+fn account(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no distribution sources: enable the cdn feature".into())
+}
+
 #[cfg(not(feature = "cdn"))]
 fn update(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     Err("this build has no distribution sources: enable the cdn feature".into())
@@ -85,6 +100,7 @@ fn main() -> ExitCode {
         Some("export") => export::run(args),
         Some("objects") => objects::run(args),
         Some("update") => update(args),
+        Some("account") => account(args),
         Some("stats") => stats(args),
         Some("--version") => {
             println!("sekai-exporter {}", env!("CARGO_PKG_VERSION"));

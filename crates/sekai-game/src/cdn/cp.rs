@@ -2,8 +2,11 @@
 
 use std::sync::{PoisonError, RwLock};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sekai_format::identity::{AssetIdentity, ClientIdentity, VersionIdentity};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::crypto::{Keys, Secrets};
 use super::discover::{Candidate, first_confirmed};
@@ -22,11 +25,68 @@ struct GameVersion {
     assetbundle_host_hash: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NewAccount<'a> {
+    platform: &'a str,
+    device_model: &'a str,
+    operating_system: &'a str,
+}
+
+#[derive(Deserialize)]
+struct Account {
+    credential: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Login<'a> {
+    credential: &'a str,
+    device_id: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Session {
+    asset_version: String,
+    asset_hash: String,
+}
+
 pub(super) struct Cp {
     http: Http,
     region: Region,
     keys: Keys,
     cookie: RwLock<Option<String>>,
+    credential: Option<String>,
+}
+
+/// The user id inside an account credential, a token of three dotted parts.
+fn user_id(credential: &str) -> Result<String, SourceError> {
+    let bad = || SourceError::new("secret", "the account credential holds no user id");
+    let payload = credential.split('.').nth(1).ok_or_else(bad)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).map_err(|_| bad())?;
+    let claims: Value = serde_json::from_slice(&bytes).map_err(|_| bad())?;
+    match claims.get("userId") {
+        Some(Value::Number(id)) => Ok(id.to_string()),
+        Some(Value::String(id)) => Ok(id.clone()),
+        _ => Err(bad()),
+    }
+}
+
+/// Creates the guest account of `region` and stores its credential. Returns the name of the
+/// secret.
+pub(super) fn create_account(mut region: Region, secrets: &Secrets) -> Result<String, SourceError> {
+    let name = region
+        .secrets
+        .account
+        .take()
+        .ok_or_else(|| SourceError::new("config", "the region names no account secret"))?;
+    let path = secrets.vacant(&name)?;
+    let source = Cp::new(region, secrets)?;
+    let credential = source.register()?;
+    std::fs::write(&path, credential)
+        .map_err(|e| SourceError::new("secret", format!("{}: {e}", path.display())))?;
+    Ok(name)
 }
 
 /// The signed cookies among `set_cookie` as the value of a `Cookie` header.
@@ -45,6 +105,12 @@ impl Cp {
         Ok(Self {
             http: Http::new(&region.network)?,
             keys: Keys::read(&region.secrets, secrets)?,
+            credential: region
+                .secrets
+                .account
+                .as_deref()
+                .map(|name| secrets.text(name))
+                .transpose()?,
             region,
             cookie: RwLock::new(None),
         })
@@ -91,10 +157,6 @@ impl Cp {
             .application_hash
             .as_deref()
             .ok_or_else(|| incomplete("application hash"))?;
-        let asset_version = candidate
-            .asset_version
-            .clone()
-            .ok_or_else(|| incomplete("asset version"))?;
         let client = candidate.client();
         if self
             .cookie
@@ -113,15 +175,70 @@ impl Cp {
         );
         let body = self.http.bytes(&url, &self.headers(&client))?;
         let version: GameVersion = self.keys.decode(&body)?;
+        let (asset_version, asset_hash) = match &self.credential {
+            Some(credential) if !self.region.force => {
+                let session = self.login(credential, &client, &version.profile)?;
+                (session.asset_version, session.asset_hash)
+            }
+            _ => (
+                candidate
+                    .asset_version
+                    .clone()
+                    .ok_or_else(|| incomplete("asset version"))?,
+                candidate.asset_hash.clone().unwrap_or_default(),
+            ),
+        };
         Ok(VersionIdentity {
             asset: AssetIdentity::Cp {
                 asset_version,
-                asset_hash: candidate.asset_hash.clone().unwrap_or_default(),
+                asset_hash,
                 profile: version.profile,
                 host_hash: version.assetbundle_host_hash,
             },
             client,
         })
+    }
+
+    /// Logs in with the guest account, which tells the current asset version.
+    fn login(
+        &self,
+        credential: &str,
+        client: &ClientIdentity,
+        profile: &str,
+    ) -> Result<Session, SourceError> {
+        let template = self.region.urls.login.as_deref().ok_or_else(|| {
+            SourceError::new("config", "a region with an account needs a login address")
+        })?;
+        let url = render(
+            template,
+            &[("profile", profile), ("user_id", &user_id(credential)?)],
+        );
+        let body = self.keys.encode(&Login {
+            credential,
+            device_id: None,
+        })?;
+        self.keys
+            .decode(&self.http.put(&url, &self.headers(client), &body)?)
+    }
+
+    /// Creates a guest account and returns its credential.
+    fn register(&self) -> Result<String, SourceError> {
+        let template = self.region.urls.account.as_deref().ok_or_else(|| {
+            SourceError::new("config", "the region has no address for new accounts")
+        })?;
+        let identity = self.identity(None)?;
+        let url = self.address(template, &identity, "");
+        let configured = &self.region.client;
+        let body = self.keys.encode(&NewAccount {
+            platform: &configured.operating_system,
+            device_model: &configured.device_model,
+            operating_system: &configured.operating_system,
+        })?;
+        let reply = self
+            .http
+            .post(&url, &self.headers(&identity.client), &body)?;
+        let account: Account = self.keys.decode(&reply)?;
+        Ok(account.credential)
     }
 
     fn address(&self, template: &str, identity: &VersionIdentity, bundle: &str) -> String {
@@ -193,6 +310,18 @@ impl Source for Cp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_user_id_is_read_from_the_middle_of_the_credential() {
+        let token = |claims: &str| format!("a.{}.c", URL_SAFE_NO_PAD.encode(claims));
+        assert_eq!(user_id(&token(r#"{"userId":123}"#)).unwrap(), "123");
+        assert_eq!(user_id(&token(r#"{"userId":"456"}"#)).unwrap(), "456");
+        for bad in [token("{}"), "plain".to_owned(), "a.***.c".to_owned()] {
+            let error = user_id(&bad).unwrap_err();
+            assert_eq!(error.code, "secret");
+            assert!(!error.message.contains(&bad));
+        }
+    }
 
     #[test]
     fn signed_cookies_are_read_from_one_or_several_headers() {

@@ -34,6 +34,12 @@ pub struct Urls {
     pub manifest: String,
     /// A bundle.
     pub bundle: String,
+    /// The endpoint that creates a guest account.
+    #[serde(default)]
+    pub account: Option<String>,
+    /// The endpoint that a guest account logs in to.
+    #[serde(default)]
+    pub login: Option<String>,
 }
 
 /// The identity of the client, as far as it is known before discovery.
@@ -70,6 +76,10 @@ pub struct SecretNames {
     /// audio is reported as `missing_key`.
     #[serde(default)]
     pub hca: Option<String>,
+    /// The credential of the guest account. With it, the asset version of a `cp` region comes
+    /// from logging in.
+    #[serde(default)]
+    pub account: Option<String>,
 }
 
 /// How a source uses the network.

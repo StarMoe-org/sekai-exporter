@@ -66,6 +66,7 @@
 | 组件 | 来源 | 使用方式 | 许可证 |
 |---|---|---|---|
 | 清单与接口解密 | [`aes`](https://crates.io/crates/aes)、[`cbc`](https://crates.io/crates/cbc) | 链接 | MIT OR Apache-2.0 |
+| Base64 | [`base64`](https://crates.io/crates/base64) | 随 `cdn` feature 链接，用于读取账号凭据中的用户 ID | MIT 或 Apache-2.0 |
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | 链接 | MIT |
 | 哈希 | [`sha2`](https://crates.io/crates/sha2) | 链接 | MIT OR Apache-2.0 |
 | HTTP 与 TLS | [`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |

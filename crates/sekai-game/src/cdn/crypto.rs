@@ -4,13 +4,15 @@ use std::path::PathBuf;
 
 use aes::Aes128;
 use aes::cipher::block_padding::Pkcs7;
-use aes::cipher::{BlockModeDecrypt, KeyIvInit};
+use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
+use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::SourceError;
 use super::region::SecretNames;
 
 type Decryptor = cbc::Decryptor<Aes128>;
+type Encryptor = cbc::Encryptor<Aes128>;
 
 /// Where secret values are read from: an environment variable with the name of the secret, or a
 /// file with that name in a directory outside the repository.
@@ -26,7 +28,7 @@ impl Secrets {
     }
 
     /// The text of the secret `name`, without surrounding whitespace.
-    fn text(&self, name: &str) -> Result<String, SourceError> {
+    pub(super) fn text(&self, name: &str) -> Result<String, SourceError> {
         let missing = || SourceError::new("secret", format!("the secret {name} is not set"));
         let text = match std::env::var(name) {
             Ok(text) => text,
@@ -36,6 +38,20 @@ impl Secrets {
             }
         };
         Ok(text.trim().to_owned())
+    }
+
+    /// The file a new secret `name` is written to. The secret must not be set yet.
+    pub(super) fn vacant(&self, name: &str) -> Result<PathBuf, SourceError> {
+        if self.text(name).is_ok() {
+            return Err(SourceError::new(
+                "secret",
+                format!("the secret {name} is already set"),
+            ));
+        }
+        self.directory
+            .as_ref()
+            .map(|directory| directory.join(name))
+            .ok_or_else(|| SourceError::new("secret", "no directory of secrets is given"))
     }
 
     fn read(&self, name: &str) -> Result<Vec<u8>, SourceError> {
@@ -89,6 +105,21 @@ impl Keys {
             )
         })?;
         Ok(keys)
+    }
+
+    /// Writes `document` as MessagePack and encrypts it.
+    pub(super) fn encode<T: Serialize>(&self, document: &T) -> Result<Vec<u8>, SourceError> {
+        let mut buffer =
+            rmp_serde::to_vec_named(document).map_err(|e| SourceError::new("decode", e))?;
+        let length = buffer.len();
+        buffer.resize(length + 16, 0);
+        let written = Encryptor::new_from_slices(&self.key, &self.iv)
+            .map_err(|_| SourceError::new("decode", "the key has the wrong length"))?
+            .encrypt_padded::<Pkcs7>(&mut buffer, length)
+            .map_err(|_| SourceError::new("decode", "the document does not fit its buffer"))?
+            .len();
+        buffer.truncate(written);
+        Ok(buffer)
     }
 
     /// Decrypts `body` and reads the MessagePack document inside.
@@ -151,6 +182,7 @@ mod tests {
             key: String::new(),
             iv: String::new(),
             hca: hca.map(str::to_owned),
+            account: None,
         };
         assert_eq!(secrets.hca_key(&names(None)).unwrap(), None);
         assert_eq!(

@@ -82,6 +82,18 @@ pub trait Source: Sync {
     ) -> Result<u64, SourceError>;
 }
 
+/// Creates the guest account of a region and stores its credential in the directory of secrets.
+/// Returns the name of the secret. A secret that is already set is left alone.
+pub fn create_account(region: Region, secrets: &Secrets) -> Result<String, SourceError> {
+    if region.kind != Kind::Cp {
+        return Err(SourceError::new(
+            "config",
+            "only a cp region has guest accounts",
+        ));
+    }
+    cp::create_account(region, secrets)
+}
+
 /// Opens the source of `region`, reading its secrets from `secrets`.
 pub fn open(region: Region, secrets: &Secrets) -> Result<Box<dyn Source>, SourceError> {
     if region.kind != Kind::Dir && region.urls.manifest.is_empty() {

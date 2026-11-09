@@ -792,6 +792,7 @@ name = "sekai-game"
 version = "0.0.0"
 dependencies = [
  "aes",
+ "base64",
  "cbc",
  "rmp-serde",
  "sekai-format",

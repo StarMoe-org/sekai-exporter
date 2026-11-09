@@ -5,7 +5,8 @@ use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use ureq::http::Response;
-use ureq::{Agent, Body, Proxy};
+use ureq::typestate::WithBody;
+use ureq::{Agent, Body, Proxy, RequestBuilder};
 
 use super::SourceError;
 use super::region::Network;
@@ -99,15 +100,29 @@ impl Http {
 
     /// Reads a whole response.
     pub(super) fn bytes(&self, url: &str, headers: &Headers) -> Result<Vec<u8>, SourceError> {
-        self.attempts(|_| {
-            let mut response = self.get(url, headers)?;
-            response
-                .body_mut()
-                .with_config()
-                .limit(u64::MAX)
-                .read_to_vec()
-                .map_err(|e| Failure::Retry(SourceError::new("network", format!("{url}: {e}"))))
-        })
+        self.attempts(|_| whole(url, self.get(url, headers)?))
+    }
+
+    /// Sends one POST request with `body`, without retrying it, and reads the response.
+    pub(super) fn post(
+        &self,
+        url: &str,
+        headers: &Headers,
+        body: &[u8],
+    ) -> Result<Vec<u8>, SourceError> {
+        self.pace();
+        send(self.agent.post(url), url, headers, body)
+            .map_err(|(Failure::Retry(error) | Failure::Fatal(error))| error)
+    }
+
+    /// Sends a PUT request with `body` and reads the response.
+    pub(super) fn put(
+        &self,
+        url: &str,
+        headers: &Headers,
+        body: &[u8],
+    ) -> Result<Vec<u8>, SourceError> {
+        self.attempts(|_| send(self.agent.put(url), url, headers, body))
     }
 
     /// Sends an empty POST request and returns the cookies it sets.
@@ -127,6 +142,28 @@ impl Http {
                 .collect())
         })
     }
+}
+
+fn send(
+    mut request: RequestBuilder<WithBody>,
+    url: &str,
+    headers: &Headers,
+    body: &[u8],
+) -> Result<Vec<u8>, Failure> {
+    for (name, value) in headers {
+        request = request.header(*name, value.as_str());
+    }
+    whole(url, accepted(url, request.send(body))?)
+}
+
+/// Reads a whole response.
+fn whole(url: &str, mut response: Response<Body>) -> Result<Vec<u8>, Failure> {
+    response
+        .body_mut()
+        .with_config()
+        .limit(u64::MAX)
+        .read_to_vec()
+        .map_err(|e| Failure::Retry(SourceError::new("network", format!("{url}: {e}"))))
 }
 
 fn accepted(

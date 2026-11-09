@@ -463,7 +463,7 @@ pub(crate) fn field<'v>(section: &'v Value, source: &str) -> Result<&'v Value, C
     })
 }
 
-fn array<'v>(value: &'v Value, source: &str) -> Result<&'v [Value], ConvertError> {
+pub(crate) fn array<'v>(value: &'v Value, source: &str) -> Result<&'v [Value], ConvertError> {
     value
         .as_array()
         .ok_or_else(|| malformed(format!("{source} is not an array")))

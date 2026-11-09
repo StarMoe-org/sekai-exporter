@@ -588,9 +588,11 @@ fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
     vec![
         Box::new(sekai_mysekai::alone::AloneActions),
         Box::new(sekai_mysekai::characters::Characters),
+        Box::new(sekai_mysekai::client_config::ClientConfig),
         Box::new(sekai_mysekai::communication::CommunicationActions),
         Box::new(sekai_mysekai::emoticon::Emoticons),
         Box::new(sekai_mysekai::facial::FacialTables),
+        Box::new(sekai_mysekai::fixture_areas::FixtureAreas),
         Box::new(sekai_mysekai::fixtures::Fixtures),
         Box::new(sekai_mysekai::talks::FixtureTalks),
         Box::new(sekai_mysekai::talks::Talks),

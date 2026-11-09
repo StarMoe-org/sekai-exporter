@@ -193,3 +193,101 @@ pub(crate) fn document(value: &impl Serialize) -> Result<Asset, ConvertError> {
         }],
     })
 }
+
+#[cfg(test)]
+pub(crate) mod testing {
+    use std::collections::HashMap;
+
+    use sekai_convert::tables::{AssetEntry, TableContext};
+    use sekai_convert::{Asset, Content, ConvertError, Value};
+    use sekai_format::AssetDocument;
+    use serde_json::Value as Json;
+
+    /// A version of game data tables and of documents in packages.
+    #[derive(Default)]
+    pub(crate) struct FakeVersion {
+        tables: HashMap<&'static str, Json>,
+        packages: Vec<(&'static str, Vec<AssetEntry>)>,
+        documents: HashMap<&'static str, Json>,
+    }
+
+    impl FakeVersion {
+        pub(crate) fn with_table(mut self, name: &'static str, rows: Json) -> Self {
+            self.tables.insert(name, rows);
+            self
+        }
+
+        /// Adds the asset `name` of the form `form` to `package`, whose document is `value`.
+        pub(crate) fn with_asset(
+            mut self,
+            package: &'static str,
+            name: &'static str,
+            form: &'static str,
+            value: Json,
+        ) -> Self {
+            self.packages.push((
+                package,
+                vec![AssetEntry {
+                    name: name.to_owned(),
+                    form,
+                }],
+            ));
+            self.documents.insert(name, value);
+            self
+        }
+    }
+
+    impl TableContext for FakeVersion {
+        fn table(&self, name: &str) -> Result<Vec<u8>, ConvertError> {
+            let rows = self
+                .tables
+                .get(name)
+                .ok_or_else(|| ConvertError::new("missing_table", name))?;
+            Ok(rows.to_string().into_bytes())
+        }
+
+        fn bundles(&self) -> Vec<&str> {
+            self.packages.iter().map(|(package, _)| *package).collect()
+        }
+
+        fn assets(&self, bundle: &str) -> &[AssetEntry] {
+            self.packages
+                .iter()
+                .find(|(package, _)| *package == bundle)
+                .map_or(&[], |(_, assets)| assets.as_slice())
+        }
+
+        fn document(&self, name: &str) -> Result<AssetDocument, ConvertError> {
+            Err(ConvertError::new("missing_asset", name))
+        }
+
+        fn member(&self, name: &str, _role: &str) -> Result<Vec<u8>, ConvertError> {
+            let value = self
+                .documents
+                .get(name)
+                .ok_or_else(|| ConvertError::new("missing_asset", name))?;
+            Ok(value.to_string().into_bytes())
+        }
+    }
+
+    /// The JSON document of a one-member asset.
+    pub(crate) fn json_of(asset: &Asset) -> Json {
+        let [member] = asset.members.as_slice() else {
+            panic!("{asset:?}");
+        };
+        let Content::File { bytes, .. } = &member.content else {
+            panic!("the document is not a file");
+        };
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    /// A structure of the fields `fields`.
+    pub(crate) fn structure(fields: &[(&str, Value)]) -> Value {
+        Value::Struct(
+            fields
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect(),
+        )
+    }
+}

@@ -2,10 +2,13 @@
 
 pub mod alone;
 pub mod characters;
+pub mod client_config;
 pub mod communication;
 mod constants;
 pub mod emoticon;
 pub mod facial;
+pub mod fixture_areas;
+pub mod fixture_reactions;
 pub mod fixtures;
 mod lua;
 mod particle;

@@ -26,6 +26,9 @@ const FACIAL_TABLES: &[&str] = &[
     "Assembly-CSharp/Sekai.Mysekai.NPCAvatarDefaultFacialDataList",
 ];
 
+const FIXTURE_META: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureBundleMeta";
+const FIXTURE_REACTIONS: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureReactionDataSet";
+
 /// The package directory of the overhead items of the MySekai characters.
 const EMOTICONS: &str = "/mysekai/effect/emoticon/";
 const GAME_OBJECT: i32 = 1;
@@ -94,6 +97,16 @@ pub fn font(object: &ObjectIndex, _script: Option<&str>, _paths: &[String]) -> b
 /// The roots of the `facial-table` form.
 pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == MONO_BEHAVIOUR && script.is_some_and(|name| FACIAL_TABLES.contains(&name))
+}
+
+/// The roots of the `fixture-meta` form.
+pub fn fixture_meta(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR && script == Some(FIXTURE_META)
+}
+
+/// The roots of the `fixture-reactions` form.
+pub fn fixture_reactions(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR && script == Some(FIXTURE_REACTIONS)
 }
 
 /// The roots of the `emoticon` form.

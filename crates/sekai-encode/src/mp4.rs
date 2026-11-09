@@ -17,9 +17,10 @@ use crate::EncodeError;
 pub const NAME: &str = "mp4-h264-aac";
 
 /// The encoder version.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
-/// The threads of one x264 encoder.
+/// The threads of one x264 encoder. They encode slices of the same frame, so the output does not
+/// depend on how the threads are timed.
 const VIDEO_THREADS: &str = "2";
 /// The longest error text kept from the program.
 const MESSAGE_LEN: usize = 400;
@@ -129,6 +130,8 @@ fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -
             "yuv420p",
             "-threads",
             VIDEO_THREADS,
+            "-x264-params",
+            "sliced-threads=1",
             "-map_metadata",
             "-1",
             "-fflags",
@@ -216,6 +219,7 @@ mod tests {
         assert!(args.iter().any(|a| a == "libx264"));
         assert!(args.iter().any(|a| a == "aac"));
         assert!(args.iter().any(|a| a == "+faststart"));
+        assert!(args.iter().any(|a| a == "sliced-threads=1"));
         assert!(!args.iter().any(|a| a == "-vf"));
     }
 

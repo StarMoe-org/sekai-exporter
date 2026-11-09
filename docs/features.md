@@ -38,10 +38,10 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 |---|---|
 | `scenario` | Scenario objects into scenario documents |
 | `episode` | Story episodes: one table row with every asset it refers to resolved |
-| `virtual-live` | Virtual lives: timeline, scenario and voice |
+| `virtual-live` | The [scripts](spec/virtual-live-script.md) of virtual lives |
 | `costume` | Costume combinations for 3D viewing |
 
-The features `virtual-live` and `costume` are defined and do not produce anything yet. Their asset forms have no root rules either, so a build without them reports nothing with `not_compiled`.
+The feature `costume` is defined and does not produce anything yet. Its asset form has no root rules either, so a build without it reports nothing with `not_compiled`.
 
 The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
 
@@ -77,7 +77,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 
 | Preset | Contents |
 |---|---|
-| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, `image`, `audio`, `video`, `model`, `animation`, `live2d`, `text`, `scenario`, `episode`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
+| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, `image`, `audio`, `video`, `model`, `animation`, `live2d`, `text`, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
 | `preset-mysekai` | `default` and `mysekai` |
 | `preset-client` | `default` and `client` |
 | `full` | Every feature |

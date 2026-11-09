@@ -7,7 +7,7 @@ use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex, Value,
 };
 
-/// Fields every `MonoBehaviour` has, which say nothing about the scenario.
+/// Fields every `MonoBehaviour` has, which say nothing about what it holds.
 const ENGINE_FIELDS: &[&str] = &["m_GameObject", "m_Enabled", "m_Script", "m_Name"];
 
 /// The scene data of a story as a JSON document.
@@ -33,38 +33,47 @@ impl Converter for Scenario {
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
-        let object = cx.object(root)?;
-        let Value::Struct(fields) = &object.fields else {
-            return Err(ConvertError::new(
-                "malformed",
-                "the fields are not a structure",
-            ));
-        };
-        let mut out = String::from("{");
-        let mut first = true;
-        for (name, value) in fields {
-            if ENGINE_FIELDS.contains(&name.as_str()) {
-                continue;
-            }
-            if !first {
-                out.push(',');
-            }
-            first = false;
-            string(&mut out, name);
-            out.push(':');
-            json(&mut out, value, name)?;
-        }
-        out.push('}');
-        Ok(Some(Asset {
-            members: vec![Member {
-                role: "scenario".into(),
-                content: Content::File {
-                    extension: "json".into(),
-                    bytes: out.into_bytes(),
-                },
-            }],
-        }))
+        fields_document(root, cx, "scenario").map(Some)
     }
+}
+
+/// An asset of one member `role`: the serialized fields of `root` as a JSON document.
+pub(crate) fn fields_document(
+    root: ObjectId,
+    cx: &dyn Context,
+    role: &str,
+) -> Result<Asset, ConvertError> {
+    let object = cx.object(root)?;
+    let Value::Struct(fields) = &object.fields else {
+        return Err(ConvertError::new(
+            "malformed",
+            "the fields are not a structure",
+        ));
+    };
+    let mut out = String::from("{");
+    let mut first = true;
+    for (name, value) in fields {
+        if ENGINE_FIELDS.contains(&name.as_str()) {
+            continue;
+        }
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        string(&mut out, name);
+        out.push(':');
+        json(&mut out, value, name)?;
+    }
+    out.push('}');
+    Ok(Asset {
+        members: vec![Member {
+            role: role.into(),
+            content: Content::File {
+                extension: "json".into(),
+                bytes: out.into_bytes(),
+            },
+        }],
+    })
 }
 
 /// Writes `value`, the field `path`, as JSON.

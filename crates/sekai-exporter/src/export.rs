@@ -103,6 +103,20 @@ fn scenario() -> Vec<Box<dyn Converter>> {
     vec![Absent::boxed("scenario", sekai_moesekai::roots::scenario)]
 }
 
+#[cfg(feature = "virtual-live")]
+fn virtual_live() -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_moesekai::virtual_live::VirtualLiveScript)]
+}
+
+#[cfg(not(feature = "virtual-live"))]
+fn virtual_live() -> Vec<Box<dyn Converter>> {
+    use sekai_convert::roots::Absent;
+    vec![Absent::boxed(
+        "virtual-live-script",
+        sekai_moesekai::roots::virtual_live_script,
+    )]
+}
+
 #[cfg(feature = "episode")]
 fn story_data() -> Vec<Box<dyn Converter>> {
     use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
@@ -128,6 +142,7 @@ pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
         text(),
         live2d(),
         scenario(),
+        virtual_live(),
         story_data(),
     ]
     .into_iter()

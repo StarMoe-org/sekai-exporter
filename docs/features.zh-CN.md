@@ -38,10 +38,10 @@
 |---|---|
 | `scenario` | 剧本对象，转换为剧本文档 |
 | `episode` | 剧情的一话：一条数据表记录，以及其所引用的全部已解析资产 |
-| `virtual-live` | 虚拟演唱会：时间轴、剧本与语音 |
+| `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.md) |
 | `costume` | 供 3D 浏览的服装组合 |
 
-`virtual-live` 与 `costume` 这两个 feature 已定义，目前尚不产出任何内容。它们的资产形式同样没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容。
+`costume` 这个 feature 已定义，目前尚不产出任何内容。它的资产形式同样没有根规则，因此不含它的构建不会以 `not_compiled` 报告任何内容。
 
 [storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建会拒绝 `update --storage`，并且不会以 `not_compiled` 报告任何资产。
 
@@ -77,7 +77,7 @@
 
 | 预设 | 内容 |
 |---|---|
-| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、`image`、`audio`、`video`、`model`、`animation`、`live2d`、`text`、`scenario`、`episode`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
+| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、`image`、`audio`、`video`、`model`、`animation`、`live2d`、`text`、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
 | `preset-mysekai` | `default` 加 `mysekai` |
 | `preset-client` | `default` 加 `client` |
 | `full` | 全部 feature |

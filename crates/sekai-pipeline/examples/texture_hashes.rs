@@ -48,7 +48,12 @@ fn main() {
     }
     let converter = Texture;
     for (id, object, paths) in version.objects() {
-        if !converter.is_root(object, paths) {
+        let script = version
+            .index()
+            .position(id)
+            .and_then(|position| version.index().script(id.bundle, id.file, position))
+            .flatten();
+        if !converter.is_root(object, script, paths) {
             continue;
         }
         let result = match converter.convert(id, &version) {

@@ -108,7 +108,7 @@ impl Converter for Broken {
         1
     }
 
-    fn is_root(&self, object: &ObjectIndex, _: &[String]) -> bool {
+    fn is_root(&self, object: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
         object.class == "Texture2D"
     }
 

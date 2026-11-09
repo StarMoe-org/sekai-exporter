@@ -43,9 +43,16 @@ pub trait Converter: Send + Sync {
     /// The converter version. It changes only when the converter's output changes.
     fn version(&self) -> u32;
 
-    /// Whether `object` is the root of an asset of this form. `container_paths` are the paths
-    /// under which bundles list the object.
-    fn is_root(&self, object: &ObjectIndex, container_paths: &[String]) -> bool;
+    /// Whether `object` is the root of an asset of this form. `script` is the script the object
+    /// refers to, as in [`Object::script`]: `"<assembly>/<namespace>.<class>"`, or `None` when
+    /// the object refers to no script or the script does not resolve. `container_paths` are the
+    /// paths under which bundles list the object.
+    fn is_root(
+        &self,
+        object: &ObjectIndex,
+        script: Option<&str>,
+        container_paths: &[String],
+    ) -> bool;
 
     /// Produces the asset whose root is `root`.
     ///

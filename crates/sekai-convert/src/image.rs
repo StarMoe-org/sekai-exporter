@@ -26,7 +26,12 @@ impl Converter for Texture {
         1
     }
 
-    fn is_root(&self, object: &ObjectIndex, _container_paths: &[String]) -> bool {
+    fn is_root(
+        &self,
+        object: &ObjectIndex,
+        _script: Option<&str>,
+        _container_paths: &[String],
+    ) -> bool {
         matches!(object.class_id, TEXTURE_2D | CUBEMAP)
     }
 

@@ -284,8 +284,12 @@ pub fn evaluate(
         let Some(path) = paths.iter().min() else {
             continue;
         };
+        let script = index
+            .position(id)
+            .and_then(|position| index.script(id.bundle, id.file, position))
+            .flatten();
         for converter in converters {
-            if converter.is_root(object, paths) {
+            if converter.is_root(object, script, paths) {
                 roots.push((converter.as_ref(), id, object, logical_path(path)));
             }
         }

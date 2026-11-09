@@ -8,7 +8,7 @@ The pipeline is the eager evaluator of the [derivation graph](architecture.md). 
 
 | Stage | Work | Output |
 |---|---|---|
-| P0 Plan | Read the current asset version, application version and game data revision of each region | Nothing to do if all of them match the last complete run |
+| P0 Plan | Read the [asset identity and table identity](sources.md#version-identity) of each region | Nothing to do if both match the last complete run. If only the table identity changed, P1 to P3 are skipped and the index of the asset identity is reused |
 | P1 Manifest | Download and parse the manifest; select bundles by name | The bundle list with declared hashes, sizes and dependencies |
 | P2 Fetch | Download each selected bundle, deobfuscate it and hash it while it streams, and write it to the store | Bundle inputs, identified by content hash |
 | P3 Index | For each bundle, read every object's fields, skipping large arrays by length; record class, name, container path, content hash and references | Object rows and reference edges |
@@ -22,8 +22,8 @@ The pipeline is the eager evaluator of the [derivation graph](architecture.md). 
 
 ## Invariants
 
-- **Increments follow object content, not bundles.** A bundle that is rebuilt without changing its objects leaves every object hash, and therefore every asset fingerprint, unchanged. P2 and P3 run only for bundles whose declared hash changed; the index of an unchanged bundle is reused.
-- **Fingerprints contain everything that determines the bytes:** the converter name and version, the content hash of each object in the closure, the hash of each table row the converter reads, and the encoder name, version and parameters. Configuration does not change output paths, formats or encoder parameters; those are defined by converters and views.
+- **Increments follow object content, not bundles.** A bundle that is rebuilt without changing its objects leaves every object hash, and therefore every asset fingerprint, unchanged. P2 and P3 run only for bundles whose [declared hash](sources.md#declared-hashes-and-content-hashes) changed; the index of an unchanged bundle is reused.
+- **Fingerprints contain everything that determines the bytes:** the converter name and version, the content hash of each object in the closure, the hash of each byte range the converter reads from a resource entry, the hash of each table row the converter reads, and the encoder name, version and parameters. Configuration does not change output paths, formats or encoder parameters; those are defined by converters and views.
 - **Asset errors and run failures are different things.** An asset error is the result of evaluating an asset: a named error that is as deterministic as a successful output. It does not affect other assets, it does not stop the version from being committed, and it is listed with the version. Because it has no successful output, the next run evaluates it again. Missing members, such as a bundle that the asset list names but the source does not serve, are asset errors. A run failure is a failed download, a failed write or a crash. Only run failures stop a commit.
 - **The order of work does not affect output.** Each output depends only on its inputs, and the catalog is written in key order at the end of each batch. Store contents and the catalog contents sorted by primary key are independent of thread count and scheduling.
 - **A commit is all or nothing per version.** P8 advances the pointer only after verification. When verification fails, the stage that failed is reported by its fixed name and the previous pointer stays in place.

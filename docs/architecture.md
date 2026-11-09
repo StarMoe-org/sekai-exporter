@@ -40,7 +40,7 @@ A **view** is a function that produces bindings. A view that only rearranges pat
 | Concept | Definition |
 |---|---|
 | Region and source | `jp`, `en`, `tw`, `kr`, `cn`. The source is `cdn` for downloaded bundles or `client` for assets inside the client package |
-| Version | The asset version and asset hash from the manifest; for the `client` source, the application version |
+| Version | The asset identity and table identity of a region, see [Version identity](sources.md#version-identity); for the `client` source, the application version |
 | Bundle | The bundle name from the manifest; for the `client` source, the player data file name |
 | Object | `(bundle, path ID)` |
 | Class | The native class name. For a `MonoBehaviour`, `assembly/namespace.class`, resolved through `m_Script` and its `MonoScript`, across files where necessary |

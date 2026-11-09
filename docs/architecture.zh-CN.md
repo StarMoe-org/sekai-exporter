@@ -40,7 +40,7 @@
 | 概念 | 定义 |
 |---|---|
 | 区服与来源 | `jp`、`en`、`tw`、`kr`、`cn`。来源为 `cdn`（下载的资源包）或 `client`（客户端安装包内的资产） |
-| 版本 | 清单中的 asset version 与 asset hash；`client` 来源为应用版本 |
+| 版本 | 区服的资产身份与数据表身份，见[版本身份](sources.zh-CN.md#版本身份)；`client` 来源为应用版本 |
 | 资源包 | 清单中的 bundle 名称；`client` 来源为 player data 文件名 |
 | 对象 | `(资源包, path ID)` |
 | 类 | 原生类名。`MonoBehaviour` 为 `程序集/命名空间.类名`，经 `m_Script` 及其 `MonoScript` 解析，必要时跨文件解析 |

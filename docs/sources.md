@@ -16,7 +16,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 
 A region can list several sources in order, for example `store` first and `cp` when the store does not have the bundle.
 
-The game data tables have their own sources: `git`, which reads a repository of table dumps at a given commit and is the default, and `api`, which reads the game's interface and requires an account. The commit or interface version is recorded with the version, and the hash of each row a converter reads enters that converter's fingerprints.
+The game data tables have their own sources: `git`, which reads a repository of table dumps at a given commit and is the default, and `api`, which reads the game's interface and requires an account. The commit or interface version is recorded in the [table identity](#version-identity) of the version, and the hash of each row a converter reads enters that converter's fingerprints.
 
 ## The region table
 
@@ -32,6 +32,29 @@ The client identity is taken from the first of these that is available:
 
 A candidate is adopted only if the region's version endpoint confirms it and it is newer than the current value. For regions whose distribution paths are keyed by the bundle version, an application version `x.y.z` that the endpoint does not recognize is retried as `x.y.0`. A value set with `force` is a pin: it is not replaced by discovery until it is removed, which allows a rollback. Each region is checked independently, so a failure in one region does not delay the others.
 
+## Version identity
+
+The state of a region has three separate parts, and each decides something different.
+
+| Part | Fields | When it changes |
+|---|---|---|
+| **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the value of the version endpoint | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
+| **Table identity** | The data version the game reports, and the table revision: the commit of the dump repository, or the interface version for the `api` source | Only table rows can differ. P1 to P3 are skipped, the index of the asset identity is reused, and only the assets whose rows changed are evaluated again |
+| **Client identity** | Application version, application hash and multiplayer version | Recorded with the version, and no asset depends on it. For `cp` it is the key that finds the asset host hash, so the asset identity is read through it |
+
+The data version and the table revision are separate fields because they come from different places: the game assigns one, and the repository that holds the dump assigns the other. A change of either one changes the table identity.
+
+A committed version is named by its asset identity and table identity together, so an update of the tables alone is a new version that shares every unaffected output with the previous one.
+
+## Declared hashes and content hashes
+
+A manifest row declares a bundle hash (`hash` for `cp`, `crc` for `nuverse`), and for `cp` also a `crc` and a size. These are two different kinds of hash from the SHA-256 that identifies a stored input:
+
+- The **declared hash** decides whether a bundle is fetched again. A bundle whose declared hash matches the last run is not downloaded, and keeps its stored bytes and its index. The other declared fields can change while the declared hash stays the same, so they are recorded but not compared.
+- The **content hash** is the SHA-256 the exporter computes while the bytes arrive. Everything after the download identifies the bundle by it.
+
+A declared hash is a label, not a digest of the file. Bundles with the same declared hash can be served with different bytes under the paths of different versions, including different streamed data, and bundles with different declared hashes can hold identical objects. Runs therefore do not repeat a download to compare it, and incremental work follows the content of objects and of the resource ranges they read, as described in the [pipeline](pipeline.md#invariants).
+
 ## Credentials
 
 Manifests and interface responses are encrypted. The decryption keys, the keys for encrypted CRI audio and video, and the guest account used by the Japanese version are **secrets**.
@@ -43,7 +66,7 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 
 ## Network
 
-Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a rate limit, retries with back-off and host rotation. Manifests carry no content digest, so the exporter checks the length of each bundle and records its SHA-256. When a downloaded bundle differs from what its manifest entry declares, the bundle is accepted as the game accepts it, and the difference is counted in the report.
+Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a rate limit, retries with back-off and host rotation. Manifests carry no content digest and their declared size is not the size of the download, so the exporter checks each bundle against the length of its response and records its SHA-256.
 
 ## The input store
 

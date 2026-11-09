@@ -6,9 +6,12 @@
 pub mod asset;
 pub mod audio;
 pub mod clip;
+pub mod components;
 pub mod episode;
+pub mod gltf;
 pub mod identity;
 pub mod live2d;
+pub mod number;
 pub mod publication;
 pub mod story;
 

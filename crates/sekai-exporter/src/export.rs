@@ -1,14 +1,14 @@
 //! `sekai-exporter export`: canonical assets for a directory of bundles.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sekai_catalog::LocalStore;
+use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, MemoryDerivations, Version, evaluate, parallel};
+use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -24,6 +24,17 @@ fn image() -> Vec<Box<dyn Converter>> {
 #[cfg(not(feature = "image"))]
 fn image() -> Vec<Box<dyn Converter>> {
     Vec::new()
+}
+
+#[cfg(feature = "catalog-db")]
+fn derivations(output: &Path, store: &LocalStore) -> std::io::Result<Box<dyn Derivations>> {
+    let catalog = sekai_catalog::db::Catalog::open_or_rebuild(&output.join("catalog.redb"), store)?;
+    Ok(Box::new(catalog.into_derivations()))
+}
+
+#[cfg(not(feature = "catalog-db"))]
+fn derivations(_output: &Path, _store: &LocalStore) -> std::io::Result<Box<dyn Derivations>> {
+    Ok(Box::new(sekai_pipeline::MemoryDerivations::default()))
 }
 
 struct Options {
@@ -54,7 +65,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     })
 }
 
-fn read(path: &std::path::Path) -> Result<BundleInput, String> {
+fn read(path: &Path) -> Result<BundleInput, String> {
     let mut bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     deobfuscate(&mut bytes).map_err(|e| e.to_string())?;
     Ok(BundleInput {
@@ -108,11 +119,12 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 
     let store = LocalStore::open(options.output.join("store"))
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
+    let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
     let evaluation = evaluate(
         &version,
         &image(),
         &store,
-        &MemoryDerivations::default(),
+        derivations.as_ref(),
         monitor,
         options.threads,
     )
@@ -131,11 +143,13 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     std::fs::write(options.output.join("assets.tsv"), listing).map_err(|e| e.to_string())?;
     let errored = evaluation.outputs.iter().filter(|o| o.error.is_some());
     println!(
-        "bundles {} failed {failed} assets {} errors {} unnamed {}",
+        "bundles {} failed {failed} assets {} errors {} unnamed {} converted {} reused {}",
         version.index().bundles().len(),
         evaluation.outputs.len(),
         errored.count(),
-        evaluation.unnamed.len()
+        evaluation.unnamed.len(),
+        evaluation.converted,
+        evaluation.reused
     );
     Ok(failed == 0)
 }

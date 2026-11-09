@@ -4,6 +4,8 @@
 
 #[cfg(feature = "catalog-db")]
 pub mod db;
+pub mod derivation;
 pub mod store;
 
+pub use derivation::{Derivations, Derived, MemoryDerivations};
 pub use store::{Key, LocalStore};

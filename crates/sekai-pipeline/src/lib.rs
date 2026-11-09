@@ -9,5 +9,6 @@ pub mod metrics;
 pub mod naming;
 pub mod version;
 
-pub use eval::{Derivations, Derived, Evaluation, MemoryDerivations, Output, evaluate, parallel};
+pub use eval::{Evaluation, Output, evaluate, parallel};
+pub use sekai_catalog::{Derivations, Derived, MemoryDerivations};
 pub use version::{BundleError, BundleInput, Version};

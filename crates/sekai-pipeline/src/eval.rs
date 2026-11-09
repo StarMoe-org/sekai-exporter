@@ -1,12 +1,12 @@
 //! The eager evaluator: names, fingerprints, conversion, canonical encoding and the store.
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Derivations, Derived, Key, LocalStore};
 use sekai_convert::{Content, ConvertError, Converter, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
@@ -17,37 +17,6 @@ use sha2::{Digest, Sha256};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path};
 use crate::version::Version;
-
-/// What a fingerprint produced.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Derived {
-    /// The asset document.
-    Document(Key),
-    /// The root holds no asset of its form.
-    Nothing,
-}
-
-/// The outputs of earlier evaluations, by fingerprint.
-pub trait Derivations: Sync {
-    /// The output of `fingerprint`, if it has been evaluated.
-    fn get(&self, fingerprint: &[u8; 32]) -> Option<Derived>;
-    /// Records the output of `fingerprint`.
-    fn put(&self, fingerprint: [u8; 32], derived: Derived);
-}
-
-/// [`Derivations`] held in memory.
-#[derive(Debug, Default)]
-pub struct MemoryDerivations(Mutex<BTreeMap<[u8; 32], Derived>>);
-
-impl Derivations for MemoryDerivations {
-    fn get(&self, fingerprint: &[u8; 32]) -> Option<Derived> {
-        self.0.lock().unwrap().get(fingerprint).cloned()
-    }
-
-    fn put(&self, fingerprint: [u8; 32], derived: Derived) {
-        self.0.lock().unwrap().insert(fingerprint, derived);
-    }
-}
 
 /// One asset of an evaluated version.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,16 +328,17 @@ pub fn evaluate(
 
     let results = parallel(plans.len(), threads, |i| -> io::Result<_> {
         let plan = &plans[i];
-        if let Some(derived) = derivations.get(&plan.fingerprint) {
+        if let Some(derived) = derivations.get(&plan.fingerprint)? {
             return Ok((derived, None, true));
         }
         let (derived, error) = derive(plan, version, store, recorder)?;
         // A failed asset has no output, so the next run evaluates it again.
         if error.is_none() {
-            derivations.put(plan.fingerprint, derived.clone());
+            derivations.put(plan.fingerprint, derived.clone())?;
         }
         Ok((derived, error, false))
     });
+    derivations.flush()?;
     for (plan, result) in plans.iter().zip(results) {
         let (derived, error, reused) = result?;
         if reused {

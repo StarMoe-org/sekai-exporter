@@ -6,6 +6,7 @@
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
@@ -33,6 +34,44 @@ impl Key {
         let hex = hex(&self.sha256);
         format!("{}/{hex}.{}", &hex[..2], self.extension)
     }
+}
+
+/// The name of a key is not `<sha256>.<extension>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidKey(pub String);
+
+impl fmt::Display for InvalidKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} is not the name of a store object", self.0)
+    }
+}
+
+impl std::error::Error for InvalidKey {}
+
+impl FromStr for Key {
+    type Err = InvalidKey;
+
+    fn from_str(name: &str) -> Result<Self, InvalidKey> {
+        let invalid = || InvalidKey(name.to_owned());
+        let (hash, extension) = name.split_once('.').ok_or_else(invalid)?;
+        Ok(Self {
+            sha256: parse_hex(hash).ok_or_else(invalid)?,
+            extension: extension.to_owned(),
+        })
+    }
+}
+
+/// The 32 bytes written as lowercase hexadecimal in `text`.
+pub fn parse_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 || !text.is_ascii() {
+        return None;
+    }
+    let mut bytes = [0; 32];
+    let (pairs, _) = text.as_bytes().as_chunks::<2>();
+    for (byte, pair) in bytes.iter_mut().zip(pairs) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
 }
 
 impl fmt::Display for Key {
@@ -90,6 +129,29 @@ impl LocalStore {
         std::fs::write(&temporary, bytes)?;
         self.place(&temporary, &path)?;
         Ok(key)
+    }
+
+    /// The keys of the objects with `extension`, in key order.
+    pub fn keys(&self, extension: &str) -> io::Result<Vec<Key>> {
+        let suffix = format!(".{extension}");
+        let mut keys = Vec::new();
+        for directory in std::fs::read_dir(&self.root)? {
+            let directory = directory?;
+            if !directory.file_type()?.is_dir() || directory.file_name() == INCOMING {
+                continue;
+            }
+            for file in std::fs::read_dir(directory.path())? {
+                let name = file?.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(&suffix)
+                    && let Ok(key) = name.parse()
+                {
+                    keys.push(key);
+                }
+            }
+        }
+        keys.sort();
+        Ok(keys)
     }
 
     /// Reads an object.

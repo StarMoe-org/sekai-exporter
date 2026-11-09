@@ -50,6 +50,7 @@ In `sekai-encode`:
 |---|---|---|
 | (always) | PNG | `png` |
 | (always) | Lossless WebP, the canonical image form | `image-webp` |
+| (always) | OpenEXR, the canonical HDR image form | `exr` |
 | (always) | FLAC, the canonical audio form | `flacenc` |
 | `webp` | Lossy WebP | libwebp, statically linked |
 | `mp3` | MP3 | LAME, loaded at run time |

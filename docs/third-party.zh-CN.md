@@ -28,7 +28,9 @@
 
 | 组件 | 来源 | 使用方式 | 许可证 |
 |---|---|---|---|
-| ASTC 解码 | Khronos ASTC 规范；[astc-encoder](https://github.com/ARM-software/astc-encoder) | 规范；参考：解码像素逐字节比对 | Apache-2.0（astc-encoder） |
+| ASTC 解码（LDR 与 HDR） | Khronos ASTC 规范；[astc-encoder](https://github.com/ARM-software/astc-encoder) | 规范；参考：解码值逐位比对 | Apache-2.0（astc-encoder） |
+| crunch DXT5 解码 | [crunch](https://github.com/Unity-Technologies/crunch)（`unity` 分支） | 流布局译自 `crn_decomp.h`；参考：比对解包后的块 | ZLIB |
+| BC3 解码 | Khronos Data Format Specification | 规范；DXT 块按其公式以精确算术比对 | — |
 | ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
@@ -43,6 +45,7 @@
 | CRI ACB 表、AWB 归档 | [vgmstream](https://github.com/vgmstream/vgmstream) | 参考：与其读取和解码的结果比对 | ISC |
 | USM 解复用 | [WannaCRI](https://github.com/donmai-me/WannaCRI) | 参考：分离出的流逐字节比对 | MIT |
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
+| OpenEXR 写出（规范 HDR 图像形式） | [`exr`](https://crates.io/crates/exr) | 链接 | BSD-3-Clause |
 | FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |
 | 测试中读取 FLAC | [`claxon`](https://crates.io/crates/claxon) | 仅在测试中链接：写出的 FLAC 解回后逐采样比对 | Apache-2.0 |
 | AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |

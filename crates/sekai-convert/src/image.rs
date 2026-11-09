@@ -56,17 +56,21 @@ impl Converter for Texture {
                 "a {width} x {height} texture stores image data"
             )));
         }
-        let surface = match stream {
-            Some(s) => {
-                let bytes = cx.resource(root, &s.path, s.offset, s.size)?;
-                texture::decode(format, width, height, &bytes)?
+        let decode = |data: &[u8]| {
+            if texture::is_hdr(format) {
+                texture::decode_hdr(format, width, height, data).map(Content::HdrImage)
+            } else {
+                texture::decode(format, width, height, data).map(Content::Image)
             }
-            None => texture::decode(format, width, height, inline)?,
+        };
+        let content = match stream {
+            Some(s) => decode(&cx.resource(root, &s.path, s.offset, s.size)?)?,
+            None => decode(inline)?,
         };
         Ok(Some(Asset {
             members: vec![Member {
                 role: "image".into(),
-                content: Content::Image(surface),
+                content,
             }],
         }))
     }

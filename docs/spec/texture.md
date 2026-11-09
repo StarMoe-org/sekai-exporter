@@ -12,7 +12,7 @@ One member:
 
 | Role | Content |
 |---|---|
-| `image` | The image: 8-bit RGBA with straight (not premultiplied) alpha, rows from top to bottom |
+| `image` | The image, rows from top to bottom: 8-bit RGBA with straight (not premultiplied) alpha or, for an HDR format, linear RGBA in binary16 |
 
 The image is mip level 0 of the first slice. For a `Cubemap` this is the first face (+X). The width and height are `m_Width` and `m_Height`.
 
@@ -25,7 +25,9 @@ Each texel format expands to RGBA as follows:
 | 4 RGBA32 | `(r, g, b, a)` |
 | 7 RGB565 | Each channel widened by repeating its high bits: `r << 3 \| r >> 2`, `g << 2 \| g >> 4`, `b << 3 \| b >> 2`; alpha 255 |
 | 34 ETC_RGB4 | ETC1, alpha 255 |
+| 29 DXT5Crunched | Crunch-compressed BC3. Colours follow the S3TC formulas: endpoints are `c / 31` and `c / 63`, interpolation is exact, and the result is rounded to the nearest 8-bit value |
 | 47 ETC2_RGBA8 | ETC2 colour with EAC alpha |
+| 66 to 71 ASTC_HDR | ASTC in the HDR profile, footprints 4x4, 5x5, 6x6, 8x8, 10x10 and 12x12, as binary16 values |
 | 48–53 ASTC 4×4 to 12×12 | ASTC LDR decoded to 8 bits per channel, as ARM's reference decoder does in its LDR profile |
 
 ## 3. Sources
@@ -45,20 +47,19 @@ Each texel format expands to RGBA as follows:
 | The format is not in the table in section 2 | Error `unsupported` |
 | The image data is shorter than mip level 0 | Error `truncated` |
 | An ASTC block is illegal | Error `malformed` |
-| An ASTC block uses HDR endpoints | Error `unsupported` |
+| A block of an LDR ASTC format uses HDR endpoints | Error `unsupported` |
+| A crunch file is damaged, or has other dimensions than the texture | Error `malformed` or `truncated` |
 | The stream path names no entry of the bundle | Error `missing_resource` |
-
-Crunch-compressed formats and HDR formats are reported as `unsupported`.
 
 ## 4. Container
 
-The member is decoded content, which the evaluator encodes. The canonical file is lossless WebP, written by the `webp-lossless` encoder (version 1) with the fixed parameters of that encoder. Views that need another container, such as PNG, produce it from the same decoded image with their own encoder.
+The member is decoded content, which the evaluator encodes. The canonical file is lossless WebP, written by the `webp-lossless` encoder (version 1) with the fixed parameters of that encoder. The canonical file of an HDR image is OpenEXR with half-float RGBA channels and ZIP compression, written by the `exr` encoder (version 1), which stores every decoded value exactly; browsers cannot show it, so a view that needs an 8-bit image clamps each value to 0..=1, multiplies it by 255 and rounds it. Views that need another container, such as PNG, produce it from the same decoded image with their own encoder.
 
 ## 5. Correctness
 
 Unity stores texture rows from bottom to top; the form turns them to top to bottom, the order of PNG and WebP. The stored colour values are kept unchanged, so the result is the same picture Unity uploads to the GPU, before any sampling or colour space conversion.
 
-The decoders are checked byte for byte against independent reference decoders: ASTC against ARM's `astcenc` in its 8-bit LDR mode, ETC1 and ETC2 against a reference ETC decoder, and the uncompressed formats against a direct expansion of the bytes. The checks run on synthetic textures built with the Unity editor (`crates/sekai-codec/tests`) and, by anyone who has the game data, on real bundles with the scripts in `tools/compare-texture`. `compare_converter.py` checks the whole converter, including the fields and the resource files, texture by texture.
+The decoders are checked byte for byte against independent reference decoders: ASTC against ARM's `astcenc` in its 8-bit LDR mode and, as binary16 values, in its HDR profile, crunch against the blocks unpacked by Unity's crunch library and exact arithmetic from the S3TC formulas, ETC1 and ETC2 against a reference ETC decoder, and the uncompressed formats against a direct expansion of the bytes. The checks run on synthetic textures built with the Unity editor (`crates/sekai-codec/tests`) and, by anyone who has the game data, on real bundles with the scripts in `tools/compare-texture`. `compare_converter.py` checks the whole converter, including the fields and the resource files, texture by texture.
 
 ## 6. Version
 

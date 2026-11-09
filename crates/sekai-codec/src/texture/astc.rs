@@ -1,8 +1,8 @@
-//! ASTC decoding: LDR profile, two-dimensional blocks.
+//! ASTC decoding: LDR and HDR profiles, two-dimensional blocks.
 //!
 //! Written from the ASTC chapter of the Khronos Data Format Specification. Where the
 //! specification decodes an illegal block to an error colour, this decoder reports the block as
-//! malformed; HDR content is reported as unsupported.
+//! malformed; HDR content in an image of an LDR format is reported as unsupported.
 
 use super::decode_blocks;
 use crate::DecodeError;
@@ -67,7 +67,7 @@ const WEIGHTS: [&[u8]; 12] = [
       34, 36, 38, 40, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64],
 ];
 
-/// Decodes an image of `block_width` by `block_height` blocks into RGBA in stored row order.
+/// Decodes an LDR image of `block_width` by `block_height` blocks into RGBA in stored row order.
 pub(super) fn decode(
     block_width: usize,
     block_height: usize,
@@ -75,6 +75,34 @@ pub(super) fn decode(
     height: usize,
     data: &[u8],
 ) -> Result<Vec<u8>, DecodeError> {
+    let mut texels = [[0; 4]; MAX_TEXELS];
+    let mut bytes = [[0; 4]; MAX_TEXELS];
+    decode_blocks(
+        (block_width, block_height, BLOCK_BYTES),
+        width,
+        height,
+        data,
+        "ASTC image",
+        |block, out| {
+            let block = u128::from_le_bytes(block.try_into().expect("a whole block"));
+            decode_block(block, block_width, block_height, false, &mut texels)?;
+            for (byte, texel) in bytes.iter_mut().zip(&texels) {
+                *byte = texel.map(|value| (value >> 8) as u8);
+            }
+            out(&bytes);
+            Ok(())
+        },
+    )
+}
+
+/// Decodes an HDR image into binary16 RGBA in stored row order.
+pub(super) fn decode_hdr(
+    block_width: usize,
+    block_height: usize,
+    width: usize,
+    height: usize,
+    data: &[u8],
+) -> Result<Vec<u16>, DecodeError> {
     let mut texels = [[0; 4]; MAX_TEXELS];
     decode_blocks(
         (block_width, block_height, BLOCK_BYTES),
@@ -84,7 +112,7 @@ pub(super) fn decode(
         "ASTC image",
         |block, out| {
             let block = u128::from_le_bytes(block.try_into().expect("a whole block"));
-            decode_block(block, block_width, block_height, &mut texels)?;
+            decode_block(block, block_width, block_height, true, &mut texels)?;
             out(&texels);
             Ok(())
         },
@@ -302,8 +330,9 @@ fn block_mode(mode: u32, block_width: usize, block_height: usize) -> Result<Mode
     })
 }
 
-fn void_extent(block: u128, texels: &mut [[u8; 4]]) -> Result<(), DecodeError> {
-    if bits(block, 9, 1) == 1 {
+fn void_extent(block: u128, hdr: bool, texels: &mut [[u16; 4]]) -> Result<(), DecodeError> {
+    let float = bits(block, 9, 1) == 1;
+    if float && !hdr {
         return Err(DecodeError::Unsupported {
             what: "ASTC HDR constant block",
             value: 1,
@@ -317,13 +346,39 @@ fn void_extent(block: u128, texels: &mut [[u8; 4]]) -> Result<(), DecodeError> {
         return Err(illegal("constant block with an empty extent"));
     }
     let color = [64, 80, 96, 112].map(|start| bits(block, start, 16));
-    texels.fill(color.map(to_byte));
+    texels.fill(color.map(|value| {
+        if hdr && !float {
+            unorm_to_half(value)
+        } else {
+            value as u16
+        }
+    }));
     Ok(())
 }
 
-/// The eight-bit form of a 16-bit colour value.
-fn to_byte(value: u32) -> u8 {
-    (value >> 8) as u8
+/// The binary16 form of a 16-bit unsigned normalized value.
+fn unorm_to_half(value: u32) -> u16 {
+    if value == 0xFFFF {
+        return 0x3C00;
+    }
+    if value < 4 {
+        return (value << 8) as u16;
+    }
+    let zeros = value.leading_zeros() - 16;
+    ((((value << (zeros + 1)) & 0xFFFF) >> 6) | (14 - zeros) << 10) as u16
+}
+
+/// The binary16 form of a 16-bit value of the logarithmic number system of HDR endpoints.
+fn lns_to_half(value: u32) -> u16 {
+    let mantissa = value & 0x7FF;
+    let curved = if mantissa < 512 {
+        mantissa * 3
+    } else if mantissa < 1536 {
+        mantissa * 4 - 512
+    } else {
+        mantissa * 5 - 2048
+    };
+    (((value >> 11) << 10 | curved >> 3).min(0x7BFF)) as u16
 }
 
 /// Splits the pair `a`, `b`: moves the top bit of `a` into `b` and returns `a` as a signed
@@ -341,8 +396,15 @@ fn blue_contract([r, g, b, a]: [i32; 4]) -> [i32; 4] {
     [(r + b) >> 1, (g + b) >> 1, b, a]
 }
 
-/// The pair of endpoints of colour endpoint format `format`, from its encoded values.
-fn endpoints(format: u32, v: &[i32]) -> Result<[[i32; 4]; 2], DecodeError> {
+/// The endpoints of a partition: their 16-bit values, and which channels are logarithmic.
+#[derive(Clone, Copy, Default)]
+struct Endpoints {
+    pair: [[u32; 4]; 2],
+    lns: [bool; 4],
+}
+
+/// The endpoints of colour endpoint format `format`, from its encoded values.
+fn endpoints(format: u32, v: &[i32], hdr: bool) -> Result<Endpoints, DecodeError> {
     let pair = match format {
         0 => [[v[0], v[0], v[0], 255], [v[1], v[1], v[1], 255]],
         1 => {
@@ -399,14 +461,215 @@ fn endpoints(format: u32, v: &[i32]) -> Result<[[i32; 4]; 2], DecodeError> {
                 [blue_contract(moved), blue_contract(base)]
             }
         }
-        _ => {
+        _ if !hdr => {
             return Err(DecodeError::Unsupported {
                 what: "ASTC HDR endpoint format",
                 value: format.into(),
             });
         }
+        _ => return Ok(hdr_endpoints(format, v)),
     };
-    Ok(pair.map(|point| point.map(|c| c.clamp(0, 255))))
+    Ok(Endpoints {
+        pair: pair.map(|point| point.map(|c| c.clamp(0, 255) as u32 * 257)),
+        lns: [false; 4],
+    })
+}
+
+fn bit(value: i32, index: u32) -> i32 {
+    (value >> index) & 1
+}
+
+/// The endpoints of an HDR endpoint format: 2, 3, 7, 11, 14 or 15.
+fn hdr_endpoints(format: u32, v: &[i32]) -> Endpoints {
+    let [first, second] = match format {
+        2 => hdr_luminance_large(v),
+        3 => hdr_luminance_small(v),
+        7 => hdr_rgb_scale(v),
+        _ => hdr_rgb(v),
+    };
+    let ([a0, a1], alpha_lns) = match format {
+        14 => ([v[6] as u32 * 257, v[7] as u32 * 257], false),
+        15 => (hdr_alpha(v[6], v[7]), true),
+        _ => ([0x7800, 0x7800], true),
+    };
+    let point = |[r, g, b]: [i32; 3], a| [(r as u32) << 4, (g as u32) << 4, (b as u32) << 4, a];
+    Endpoints {
+        pair: [point(first, a0), point(second, a1)],
+        lns: [true, true, true, alpha_lns],
+    }
+}
+
+fn hdr_luminance_large(v: &[i32]) -> [[i32; 3]; 2] {
+    let (y0, y1) = if v[1] >= v[0] {
+        (v[0] << 4, v[1] << 4)
+    } else {
+        ((v[1] << 4) + 8, (v[0] << 4) - 8)
+    };
+    [[y0; 3], [y1; 3]]
+}
+
+fn hdr_luminance_small(v: &[i32]) -> [[i32; 3]; 2] {
+    let (y0, delta) = if v[0] & 0x80 != 0 {
+        ((v[1] & 0xE0) << 4 | (v[0] & 0x7F) << 2, (v[1] & 0x1F) << 2)
+    } else {
+        ((v[1] & 0xF0) << 4 | (v[0] & 0x7F) << 1, (v[1] & 0xF) << 1)
+    };
+    [[y0; 3], [(y0 + delta).min(0xFFF); 3]]
+}
+
+fn hdr_rgb_scale(v: &[i32]) -> [[i32; 3]; 2] {
+    let modeval = (v[0] & 0xC0) >> 6 | bit(v[1], 7) << 2 | bit(v[2], 7) << 3;
+    let (major, mode) = if modeval & 0xC != 0xC {
+        (modeval >> 2, modeval & 3)
+    } else if modeval != 0xF {
+        (modeval & 3, 4)
+    } else {
+        (0, 5)
+    };
+    let moved = [
+        bit(v[1], 6),
+        bit(v[1], 5),
+        bit(v[2], 6),
+        bit(v[2], 5),
+        bit(v[3], 7),
+        bit(v[3], 6),
+        bit(v[3], 5),
+    ];
+    let mut values = [v[0] & 0x3F, v[1] & 0x1F, v[2] & 0x1F, v[3] & 0x1F];
+    // Which value takes which moved bit at which position, in the modes of the mask.
+    const PLACEMENT: [(usize, i32, usize, u32); 17] = [
+        (1, 0x30, 0, 6),
+        (1, 0x3A, 1, 5),
+        (2, 0x30, 2, 6),
+        (2, 0x3A, 3, 5),
+        (3, 0x3D, 6, 5),
+        (3, 0x2D, 5, 6),
+        (3, 0x04, 4, 7),
+        (0, 0x3B, 4, 6),
+        (0, 0x04, 3, 6),
+        (0, 0x10, 5, 7),
+        (0, 0x0F, 2, 7),
+        (0, 0x05, 1, 8),
+        (0, 0x0A, 0, 8),
+        (0, 0x05, 0, 9),
+        (0, 0x02, 6, 9),
+        (0, 0x01, 3, 10),
+        (0, 0x02, 5, 10),
+    ];
+    for (target, modes, source, position) in PLACEMENT {
+        if modes >> mode & 1 != 0 {
+            values[target] |= moved[source] << position;
+        }
+    }
+    let shift = [1, 1, 2, 3, 4, 5][mode as usize];
+    let [mut red, mut green, mut blue, scale] = values.map(|value| value << shift);
+    if mode != 5 {
+        green = red - green;
+        blue = red - blue;
+    }
+    match major {
+        1 => std::mem::swap(&mut red, &mut green),
+        2 => std::mem::swap(&mut red, &mut blue),
+        _ => {}
+    }
+    [
+        [red - scale, green - scale, blue - scale].map(|c| c.max(0)),
+        [red, green, blue].map(|c| c.max(0)),
+    ]
+}
+
+fn hdr_rgb(v: &[i32]) -> [[i32; 3]; 2] {
+    let modeval = bit(v[1], 7) | bit(v[2], 7) << 1 | bit(v[3], 7) << 2;
+    let major = bit(v[4], 7) | bit(v[5], 7) << 1;
+    if major == 3 {
+        return [
+            [v[0] << 4, v[2] << 4, (v[4] & 0x7F) << 5],
+            [v[1] << 4, v[3] << 4, (v[5] & 0x7F) << 5],
+        ];
+    }
+    let mut a = v[0] | (v[1] & 0x40) << 2;
+    let mut b0 = v[2] & 0x3F;
+    let mut b1 = v[3] & 0x3F;
+    let mut c = v[1] & 0x3F;
+    let mut d0 = v[4] & 0x7F;
+    let mut d1 = v[5] & 0x7F;
+    let moved = [
+        bit(v[2], 6),
+        bit(v[3], 6),
+        bit(v[4], 6),
+        bit(v[5], 6),
+        bit(v[4], 5),
+        bit(v[5], 5),
+    ];
+    let in_mode = |modes: i32| modes >> modeval & 1 != 0;
+    if in_mode(0xA4) {
+        a |= moved[0] << 9;
+    }
+    if in_mode(0x8) {
+        a |= moved[2] << 9;
+    }
+    if in_mode(0x50) {
+        a |= moved[4] << 9 | moved[5] << 10;
+    }
+    if in_mode(0xA0) {
+        a |= moved[1] << 10;
+    }
+    if in_mode(0xC0) {
+        a |= moved[2] << 11;
+    }
+    if in_mode(0x4) {
+        c |= moved[1] << 6;
+    }
+    if in_mode(0xE8) {
+        c |= moved[3] << 6;
+    }
+    if in_mode(0x20) {
+        c |= moved[2] << 7;
+    }
+    if in_mode(0x5B) {
+        b0 |= moved[0] << 6;
+        b1 |= moved[1] << 6;
+    }
+    if in_mode(0x12) {
+        b0 |= moved[2] << 7;
+        b1 |= moved[3] << 7;
+    }
+    if in_mode(0xAF) {
+        d0 |= moved[4] << 5;
+        d1 |= moved[5] << 5;
+    }
+    if in_mode(0x5) {
+        d0 |= moved[2] << 6;
+        d1 |= moved[3] << 6;
+    }
+    let unused = 32 - [7, 6, 7, 6, 5, 6, 5, 6][modeval as usize];
+    let (d0, d1) = ((d0 << unused) >> unused, (d1 << unused) >> unused);
+    let shift = (modeval >> 1) ^ 3;
+    let [a, b0, b1, c, d0, d1] = [a, b0, b1, c, d0, d1].map(|value| value << shift);
+    let mut second = [a, a - b0, a - b1].map(|channel| channel.clamp(0, 4095));
+    let mut first = [a - c, a - b0 - c - d0, a - b1 - c - d1].map(|channel| channel.clamp(0, 4095));
+    if major != 0 {
+        let other = major as usize;
+        first.swap(0, other);
+        second.swap(0, other);
+    }
+    [first, second]
+}
+
+fn hdr_alpha(v6: i32, v7: i32) -> [u32; 2] {
+    let modeval = bit(v6, 7) | (v7 >> 6 & 2);
+    let (mut base, mut delta) = (v6 & 0x7F, v7 & 0x7F);
+    let (first, second) = if modeval == 3 {
+        (base << 5, delta << 5)
+    } else {
+        base |= (delta << (modeval + 1)) & 0x780;
+        delta &= 0x3F >> modeval;
+        delta ^= 32 >> modeval;
+        delta -= 32 >> modeval;
+        let base = base << (4 - modeval);
+        (base, (base + (delta << (4 - modeval))).clamp(0, 0xFFF))
+    };
+    [(first as u32) << 4, (second as u32) << 4]
 }
 
 /// The partition of a texel, for a seed that already includes the partition count.
@@ -457,10 +720,11 @@ fn decode_block(
     block: u128,
     block_width: usize,
     block_height: usize,
-    texels: &mut [[u8; 4]],
+    hdr: bool,
+    texels: &mut [[u16; 4]],
 ) -> Result<(), DecodeError> {
     if bits(block, 0, 9) == 0x1FC {
-        return void_extent(block, texels);
+        return void_extent(block, hdr, texels);
     }
     let mode = block_mode(bits(block, 0, 11), block_width, block_height)?;
     let partitions = bits(block, 11, 2) + 1;
@@ -520,11 +784,11 @@ fn decode_block(
         &mut encoded[..value_count as usize],
     );
     let values = encoded.map(|value| unquantize_color(color_range, value.into()));
-    let mut colors = [[[0; 4]; 2]; 4];
+    let mut colors = [Endpoints::default(); 4];
     let mut next = 0;
     for (color, &format) in colors.iter_mut().zip(formats) {
         let count = ((format >> 2) as usize + 1) * 2;
-        *color = endpoints(format, &values[next..next + count])?;
+        *color = endpoints(format, &values[next..next + count], hdr)?;
         next += count;
     }
 
@@ -574,15 +838,22 @@ fn decode_block(
             } else {
                 select_partition(seed, partitions, x as u32, y as u32, small)
             };
-            let [low, high] = colors[partition];
-            for (c, byte) in texel.iter_mut().enumerate() {
+            let Endpoints {
+                pair: [low, high],
+                lns,
+            } = colors[partition];
+            for (c, value) in texel.iter_mut().enumerate() {
                 let w = if second_plane == Some(c) {
                     second
                 } else {
                     first
                 };
-                let (c0, c1) = (low[c] as u32 * 257, high[c] as u32 * 257);
-                *byte = to_byte((c0 * (64 - w) + c1 * w + 32) >> 6);
+                let mixed = (low[c] * (64 - w) + high[c] * w + 32) >> 6;
+                *value = match (hdr, lns[c]) {
+                    (false, _) => mixed as u16,
+                    (true, true) => lns_to_half(mixed),
+                    (true, false) => unorm_to_half(mixed),
+                };
             }
         }
     }

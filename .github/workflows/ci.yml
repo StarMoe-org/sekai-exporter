@@ -75,3 +75,4 @@ jobs:
           done
       - run: cargo build -p sekai-codec --features texture --example decode_stream
       - run: python tools/compare-texture/fuzz_astc.py target/debug/examples/decode_stream 20000
+      - run: python tools/compare-texture/fuzz_astc_hdr.py target/debug/examples/decode_stream 20000

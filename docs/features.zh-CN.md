@@ -50,6 +50,7 @@
 |---|---|---|
 | （始终启用） | PNG | `png` |
 | （始终启用） | 无损 WebP，图片的规范形式 | `image-webp` |
+| （始终启用） | OpenEXR，规范 HDR 图像形式 | `exr` |
 | （始终启用） | FLAC，音频的规范形式 | `flacenc` |
 | `webp` | 有损 WebP | libwebp，静态链接 |
 | `mp3` | MP3 | LAME，运行时加载 |

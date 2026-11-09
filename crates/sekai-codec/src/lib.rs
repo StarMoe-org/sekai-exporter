@@ -14,4 +14,4 @@ pub mod texture;
 
 pub use error::DecodeError;
 pub use pcm::Pcm;
-pub use surface::Surface;
+pub use surface::{HdrSurface, Surface};

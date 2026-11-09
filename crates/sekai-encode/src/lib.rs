@@ -1,6 +1,6 @@
 //! Encoders that write decoded images and audio in standard formats.
 //!
-//! The encoders of the canonical forms (PNG, lossless WebP and FLAC) are pure Rust and always
+//! The encoders of the canonical forms (PNG, lossless WebP, OpenEXR and FLAC) are pure Rust and always
 //! present. Encoders that need a C library are features and are available only in native builds.
 //!
 //! Every encoder module has the same shape: a [`NAME`](png::NAME) and a
@@ -13,6 +13,7 @@ mod error;
 
 #[cfg(feature = "aac")]
 pub mod aac;
+pub mod exr;
 pub mod flac;
 #[cfg(feature = "mp3")]
 pub mod mp3;

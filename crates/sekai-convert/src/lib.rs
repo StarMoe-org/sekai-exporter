@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-pub use sekai_codec::{DecodeError, Pcm, Surface};
+pub use sekai_codec::{DecodeError, HdrSurface, Pcm, Surface};
 pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
 pub use sekai_unity::{Chunk, Value};
 
@@ -114,6 +114,8 @@ pub struct Member {
 pub enum Content {
     /// An image, encoded by the evaluator.
     Image(Surface),
+    /// An HDR image, encoded by the evaluator.
+    HdrImage(HdrSurface),
     /// Audio, encoded by the evaluator.
     Audio(Pcm),
     /// Finished bytes, written as they are.

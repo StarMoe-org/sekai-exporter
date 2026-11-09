@@ -3,10 +3,26 @@
 //!
 //! Request: little-endian `format: i32`, `width: u32`, `height: u32`, `length: u32`, then the
 //! data. Reply: one status byte (0 decoded, 1 failed) and, when decoded, the
-//! `width * height * 4` bytes of the surface; when failed, a little-endian `length: u32` and the
+//! `width * height * 4` bytes of the surface, or for an HDR format the `width * height * 8` bytes
+//! of its little-endian binary16 values; when failed, a little-endian `length: u32` and the
 //! UTF-8 error.
 
 use std::io::{self, Read, Write};
+
+use sekai_codec::{DecodeError, texture};
+
+/// The bytes of the decoded image.
+fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    if texture::is_hdr(format) {
+        let surface = texture::decode_hdr(format, width, height, data)?;
+        return Ok(surface
+            .pixels()
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect());
+    }
+    texture::decode(format, width, height, data).map(|surface| surface.into_pixels())
+}
 
 fn main() -> io::Result<()> {
     let mut input = io::stdin().lock();
@@ -21,10 +37,10 @@ fn main() -> io::Result<()> {
         let field = |i: usize| u32::from_le_bytes(header[i..i + 4].try_into().expect("four bytes"));
         data.resize(field(12) as usize, 0);
         input.read_exact(&mut data)?;
-        match sekai_codec::texture::decode(field(0) as i32, field(4), field(8), &data) {
-            Ok(surface) => {
+        match decode(field(0) as i32, field(4), field(8), &data) {
+            Ok(bytes) => {
                 output.write_all(&[0])?;
-                output.write_all(surface.pixels())?;
+                output.write_all(&bytes)?;
             }
             Err(error) => {
                 let text = error.to_string();

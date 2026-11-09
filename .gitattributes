@@ -2,5 +2,6 @@
 *.png binary
 *.webp binary
 *.bin binary
+*.crn binary
 *.hca binary
 *.adx binary

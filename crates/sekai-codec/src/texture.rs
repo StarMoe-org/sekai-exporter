@@ -1,12 +1,14 @@
 //! Texture decoding.
 //!
-//! [`decode`] is the one entry point. Each format family is a submodule that it dispatches to
-//! by the Unity format number; a family decodes to RGBA in stored row order.
+//! [`decode`] is the entry point of the formats with eight bits per channel and [`decode_hdr`]
+//! of the HDR formats; [`is_hdr`] tells them apart. Each format family is a submodule dispatched
+//! to by the Unity format number; a family decodes to RGBA in stored row order.
 
 mod astc;
+mod crunch;
 mod etc;
 
-use crate::{DecodeError, Surface};
+use crate::{DecodeError, HdrSurface, Surface};
 
 /// Decodes the first image of `data` in the Unity texture format `format` (`m_TextureFormat`).
 ///
@@ -15,13 +17,7 @@ use crate::{DecodeError, Surface};
 /// them from top to bottom. A format no decoder covers is reported as
 /// [`DecodeError::Unsupported`].
 pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surface, DecodeError> {
-    let (w, h) = (width as usize, height as usize);
-    if w == 0 || h == 0 {
-        return Err(DecodeError::Malformed {
-            what: "texture",
-            message: format!("empty image of {width} x {height}"),
-        });
-    }
+    let (w, h) = dimensions(width, height)?;
     let mut pixels = match format {
         // The colour is zero, as in the 32-bit pixels Unity reads from this format.
         1 => texels(1, w, h, data, "Alpha8 image", |t| [0, 0, 0, t[0]]),
@@ -32,6 +28,7 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surfa
             let (r, g, b) = ((v >> 11) as u8, (v >> 5 & 63) as u8, (v & 31) as u8);
             [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
         }),
+        29 => crunch::decode(w, h, data),
         34 => etc::decode_etc1(w, h, data),
         47 => etc::decode_etc2_rgba8(w, h, data),
         48 => astc::decode(4, 4, w, h, data),
@@ -49,8 +46,53 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surfa
     Surface::new(width, height, pixels)
 }
 
+/// Whether the Unity texture format `format` decodes with [`decode_hdr`].
+pub fn is_hdr(format: i32) -> bool {
+    matches!(format, 66..=71)
+}
+
+/// Decodes the first image of `data` in the HDR Unity texture format `format`.
+///
+/// `data` and the row order are as in [`decode`]. A format that is not HDR is reported as
+/// [`DecodeError::Unsupported`].
+pub fn decode_hdr(
+    format: i32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+) -> Result<HdrSurface, DecodeError> {
+    let (w, h) = dimensions(width, height)?;
+    let footprint = match format {
+        66 => 4,
+        67 => 5,
+        68 => 6,
+        69 => 8,
+        70 => 10,
+        71 => 12,
+        _ => {
+            return Err(DecodeError::Unsupported {
+                what: "HDR texture format",
+                value: format.into(),
+            });
+        }
+    };
+    let mut pixels = astc::decode_hdr(footprint, footprint, w, h, data)?;
+    flip_rows(&mut pixels, w);
+    HdrSurface::new(width, height, pixels)
+}
+
+fn dimensions(width: u32, height: u32) -> Result<(usize, usize), DecodeError> {
+    if width == 0 || height == 0 {
+        return Err(DecodeError::Malformed {
+            what: "texture",
+            message: format!("empty image of {width} x {height}"),
+        });
+    }
+    Ok((width as usize, height as usize))
+}
+
 /// Reverses the rows of an RGBA image.
-fn flip_rows(pixels: &mut [u8], width: usize) {
+fn flip_rows<T>(pixels: &mut [T], width: usize) {
     let stride = width * 4;
     let rows = pixels.len() / stride;
     for y in 0..rows / 2 {
@@ -74,21 +116,22 @@ fn texels(
     })
 }
 
-/// Decodes a block-compressed image into RGBA in stored row order.
+/// Decodes a block-compressed image into RGBA values of type `T` in stored row order.
 ///
 /// `shape` is the block width, height and size in bytes. For each block in stored order,
 /// `decode_block` gets its bytes and a function to call with its texels; texels beyond the edge
 /// of the image are dropped.
-fn decode_blocks<F>(
+fn decode_blocks<T, F>(
     shape: (usize, usize, usize),
     width: usize,
     height: usize,
     data: &[u8],
     what: &'static str,
     mut decode_block: F,
-) -> Result<Vec<u8>, DecodeError>
+) -> Result<Vec<T>, DecodeError>
 where
-    F: FnMut(&[u8], &mut dyn FnMut(&[[u8; 4]])) -> Result<(), DecodeError>,
+    T: Copy + Default,
+    F: FnMut(&[u8], &mut dyn FnMut(&[[T; 4]])) -> Result<(), DecodeError>,
 {
     let (block_width, block_height, block_bytes) = shape;
     let columns = width.div_ceil(block_width);
@@ -112,7 +155,7 @@ where
         .checked_mul(height)
         .and_then(|texels| texels.checked_mul(4))
         .ok_or_else(too_large)?;
-    let mut pixels = vec![0; size];
+    let mut pixels = vec![T::default(); size];
     let stride = width * 4;
     for (index, block) in data[..needed].chunks_exact(block_bytes).enumerate() {
         let x0 = index % columns * block_width;

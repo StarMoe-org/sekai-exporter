@@ -4,8 +4,8 @@
 use std::fs;
 use std::path::Path;
 
-use sekai_codec::DecodeError;
-use sekai_codec::texture::decode;
+use sekai_codec::texture::{decode, decode_hdr, is_hdr};
+use sekai_codec::{DecodeError, HdrSurface};
 use sha2::{Digest, Sha256};
 
 fn sha256(bytes: &[u8]) -> String {
@@ -42,6 +42,81 @@ fn fixtures_decode_to_the_reference_pixels() {
         let surface = decode(format, width, height, &data).unwrap();
         assert_eq!(sha256(surface.pixels()), expected, "format {format}");
     }
+}
+
+/// The crunch and ASTC HDR fixtures, in the form of [`fixtures`].
+fn compressed_fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textures");
+    fs::read_to_string(root.join("compressed.txt"))
+        .unwrap()
+        .lines()
+        .map(|line| {
+            let fields: Vec<_> = line.split(' ').collect();
+            (
+                fields[0].parse().unwrap(),
+                fields[1].parse().unwrap(),
+                fields[2].parse().unwrap(),
+                fs::read(root.join(fields[3])).unwrap(),
+                fields[4].to_owned(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn crunch_and_hdr_fixtures_decode_to_the_reference_pixels() {
+    let fixtures = compressed_fixtures();
+    assert_eq!(fixtures.len(), 4);
+    for (format, width, height, data, expected) in fixtures {
+        let found = if is_hdr(format) {
+            let surface = decode_hdr(format, width, height, &data).unwrap();
+            let bytes: Vec<u8> = surface
+                .pixels()
+                .iter()
+                .flat_map(|value| value.to_le_bytes())
+                .collect();
+            sha256(&bytes)
+        } else {
+            sha256(decode(format, width, height, &data).unwrap().pixels())
+        };
+        assert_eq!(found, expected, "format {format}");
+    }
+}
+
+#[test]
+fn a_crunch_file_is_checked() {
+    let (format, width, height, data, _) = compressed_fixtures().swap_remove(0);
+    assert_eq!(format, 29);
+    assert!(matches!(
+        decode(format, width, height, &data[..32]),
+        Err(DecodeError::Truncated { .. })
+    ));
+    assert!(matches!(
+        decode(format, width + 1, height, &data),
+        Err(DecodeError::Malformed { .. })
+    ));
+    let mut bad = data;
+    bad[0] ^= 1;
+    assert!(matches!(
+        decode(format, width, height, &bad),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn the_hdr_view_clamps_and_rounds() {
+    let surface = HdrSurface::new(1, 1, vec![0x3C00, 0x4000, 0x3800, 0xBC00]).unwrap();
+    assert_eq!(surface.to_surface().pixels(), [255, 255, 128, 0]);
+}
+
+#[test]
+fn only_the_astc_hdr_formats_are_hdr() {
+    assert!((66..=71).all(is_hdr));
+    assert!(!is_hdr(65) && !is_hdr(72) && !is_hdr(50));
+    assert!(matches!(
+        decode_hdr(50, 4, 4, &[0; 16]),
+        Err(DecodeError::Unsupported { value: 50, .. })
+    ));
 }
 
 #[test]

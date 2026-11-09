@@ -28,7 +28,9 @@ An entry is added in the same change that adds the component, and removed in the
 
 | Component | Source | Use | Licence |
 |---|---|---|---|
-| ASTC decoding | Khronos ASTC specification; [astc-encoder](https://github.com/ARM-software/astc-encoder) | Specification; reference: decoded pixels are compared byte by byte | Apache-2.0 (astc-encoder) |
+| ASTC decoding, LDR and HDR | Khronos ASTC specification; [astc-encoder](https://github.com/ARM-software/astc-encoder) | Specification; reference: decoded values are compared bit by bit | Apache-2.0 (astc-encoder) |
+| Crunched DXT5 decoding | [crunch](https://github.com/Unity-Technologies/crunch) (branch `unity`) | Stream layout translated from `crn_decomp.h`; reference: unpacked blocks are compared | ZLIB |
+| BC3 decoding | Khronos Data Format Specification | Specification; DXT blocks are compared with exact arithmetic from its formulas | — |
 | ETC1, ETC2 and EAC decoding | Khronos Data Format Specification; [texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | Specification; reference: decoded pixels are compared byte by byte | MIT (texture2ddecoder) |
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
@@ -43,6 +45,7 @@ An entry is added in the same change that adds the component, and removed in the
 | CRI ACB tables, AWB archives | [vgmstream](https://github.com/vgmstream/vgmstream) | Reference: results are compared with what it reads and decodes | ISC |
 | USM demultiplexing | [WannaCRI](https://github.com/donmai-me/WannaCRI) | Reference: separated streams are compared byte by byte | MIT |
 | HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
+| OpenEXR writing (the canonical HDR image form) | [`exr`](https://crates.io/crates/exr) | Linked | BSD-3-Clause |
 | FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
 | FLAC reading in tests | [`claxon`](https://crates.io/crates/claxon) | Linked in tests only: written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | AAC writing | [FFmpeg libavcodec](https://ffmpeg.org/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later |

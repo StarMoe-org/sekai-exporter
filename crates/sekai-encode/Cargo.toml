@@ -9,10 +9,12 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+exr = { version = "1.74.3", default-features = false }
 flacenc = { version = "0.5.1", default-features = false }
 image-webp = "0.2.4"
 png = "0.18.1"
 sekai-codec.workspace = true
+smallvec = "1"
 libloading = { version = "0.9", optional = true }
 webp = { version = "0.3", optional = true, default-features = false }
 

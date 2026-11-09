@@ -4,7 +4,8 @@
 
 use sekai_convert::image::{Sprite, Texture};
 use sekai_convert::{
-    Asset, Chunk, Content, Context, ConvertError, Converter, Object, ObjectId, PPtr, Value,
+    Asset, Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
+    ObjectIndex, PPtr, Value,
 };
 
 /// One file of one bundle, holding the given objects.
@@ -305,4 +306,51 @@ fn texture_arrays_of_other_formats_or_sizes_are_errors() {
     );
     let file = File(vec![array(117, 48, 1, 1, 3, vec![0; 16])]);
     assert_eq!(Texture.convert(id(5), &file).unwrap_err().code, "malformed");
+}
+
+fn index(path_id: i64, class_id: i32, size: u32) -> ObjectIndex {
+    ObjectIndex {
+        path_id,
+        class_id,
+        class: String::new(),
+        name: None,
+        script: None,
+        script_name: None,
+        references: Vec::new(),
+        size,
+        sha256: [0; 32],
+        error: None,
+    }
+}
+
+#[test]
+fn texture_costs_come_from_the_header() {
+    let file = File(vec![
+        sprite(0, 0, 0, rect(0.0, 0.0, 4.0, 3.0)),
+        texture(),
+        array(187, 48, 2, 2, 3, vec![0; 96]),
+    ]);
+    // 48 stored bytes, and three times the 48 bytes of the decoded 4 x 3 image.
+    let heavy = |memory| Cost {
+        class: CostClass::Heavy,
+        memory,
+    };
+    assert_eq!(
+        Texture.cost(id(2), &index(2, 28, 1000), &file),
+        heavy(48 + 3 * 48)
+    );
+    assert_eq!(
+        Sprite.cost(id(1), &index(1, 213, 500), &file),
+        heavy(48 + 3 * 48)
+    );
+    // Half-float slices take eight bytes a texel.
+    assert_eq!(
+        Texture.cost(id(5), &index(5, 187, 10), &file),
+        heavy(96 + 3 * 2 * 2 * 3 * 8)
+    );
+    // An object that cannot be read is estimated from its stored size.
+    assert_eq!(
+        Texture.cost(id(9), &index(9, 28, 100), &file),
+        heavy(4 * 100)
+    );
 }

@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{HcaKey, decode_adx, decode_hca, read_acb, read_awb, read_usm};
+use sekai_codec::cri::{HcaKey, decode_adx, decode_hca, hca_info, read_acb, read_awb, read_usm};
 use sha2::{Digest, Sha256};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -502,4 +502,22 @@ fn adx_of_another_encoding_type_is_unsupported() {
         decode_adx(&data),
         Err(DecodeError::Unsupported { .. })
     ));
+}
+
+#[test]
+fn the_header_gives_the_stored_length() {
+    for name in ["sine_mono.hca", "sine_stereo.hca", "random_v3.hca"] {
+        let data = fixture(name);
+        let info = hca_info(&data).unwrap();
+        let pcm = decode_hca(&data, None).unwrap();
+        assert_eq!(info.channels, pcm.channels(), "{name}");
+        assert_eq!(info.sample_rate, pcm.sample_rate(), "{name}");
+        // The frames hold whole blocks of 1024 samples, including the encoder delay and padding.
+        let decoded = (pcm.samples().len() / usize::from(pcm.channels())) as u64;
+        assert!(
+            info.frames >= decoded && info.frames.is_multiple_of(1024),
+            "{name}"
+        );
+    }
+    assert!(hca_info(b"not a stream").is_err());
 }

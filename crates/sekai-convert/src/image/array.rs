@@ -7,7 +7,7 @@ use super::{StreamData, dimension, field, malformed};
 use crate::{Content, Context, ConvertError, Member, ObjectId};
 
 /// `GraphicsFormat.R16G16B16A16_SFloat`.
-const RGBA_HALF: i64 = 48;
+pub(super) const RGBA_HALF: i64 = 48;
 /// `GraphicsFormat.RGBA_ASTC6X6_UNorm`.
 const ASTC_6X6: i64 = 134;
 /// `TextureFormat.ASTC_6x6`, which stores the same blocks.

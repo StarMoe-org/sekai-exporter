@@ -4,7 +4,8 @@
 
 use sekai_convert::text::{Font, Text};
 use sekai_convert::{
-    Chunk, Content, Context, ConvertError, Converter, Object, ObjectId, ObjectIndex, PPtr, Value,
+    Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
+    ObjectIndex, PPtr, Value,
 };
 
 /// One bundle with one file, holding the given objects and container.
@@ -192,4 +193,22 @@ fn a_font_without_data_is_no_asset() {
 fn other_font_data_is_unsupported() {
     let e = Font.convert(id(1), &font(b"wOFF\0\0")).unwrap_err();
     assert_eq!(e.code, "unsupported");
+}
+
+#[test]
+fn text_has_the_default_cost() {
+    let bundle = Bundle {
+        objects: Vec::new(),
+        container: Vec::new(),
+    };
+    let mut object = index(49);
+    object.size = 250;
+    assert_eq!(
+        Text.cost(id(1), &object, &bundle),
+        Cost {
+            class: CostClass::Light,
+            memory: 250 * Cost::PAYLOAD_FACTOR,
+        }
+    );
+    assert_eq!(Cost::light(u64::MAX).memory, u64::MAX);
 }

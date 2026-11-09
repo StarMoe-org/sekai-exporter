@@ -699,6 +699,16 @@ fn decode_frame(
     Ok(())
 }
 
+/// The channel count, sample rate and stored length of a stream, read from its header.
+pub(super) fn info(data: &[u8]) -> Result<super::HcaInfo, DecodeError> {
+    let header = parse_header(data)?;
+    Ok(super::HcaInfo {
+        channels: header.channels as u16,
+        sample_rate: header.sample_rate,
+        frames: (header.frame_count * FRAME_SAMPLES) as u64,
+    })
+}
+
 /// Decodes a stream to PCM, without its encoder delay and padding.
 pub(super) fn decode(data: &[u8], key: Option<HcaKey>) -> Result<Pcm, DecodeError> {
     let header = parse_header(data)?;

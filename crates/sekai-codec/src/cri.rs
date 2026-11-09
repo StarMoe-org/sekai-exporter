@@ -27,6 +27,22 @@ pub struct HcaKey {
     pub subkey: u16,
 }
 
+/// What the header of an HCA stream says about its audio.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HcaInfo {
+    /// The channel count.
+    pub channels: u16,
+    /// The sample rate in hertz.
+    pub sample_rate: u32,
+    /// The samples per channel that the frames hold, including the encoder delay and padding.
+    pub frames: u64,
+}
+
+/// Reads the header of one HCA stream without decoding its frames.
+pub fn hca_info(data: &[u8]) -> Result<HcaInfo, DecodeError> {
+    hca::info(data)
+}
+
 /// Decodes one ADX stream to PCM.
 ///
 /// Streams that are not version 4, encoding type 3 with four-bit samples, including encrypted

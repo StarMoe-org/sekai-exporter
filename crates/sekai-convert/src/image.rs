@@ -11,7 +11,10 @@ pub use sprite::Sprite;
 use sekai_codec::texture;
 use sekai_unity::Value;
 
-use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex};
+use crate::{
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
+    ObjectIndex,
+};
 
 /// The class ID of `Texture2D`.
 const TEXTURE_2D: i32 = 28;
@@ -21,6 +24,9 @@ const CUBEMAP: i32 = 89;
 const TEXTURE_3D: i32 = 117;
 /// The class ID of `Texture2DArray`.
 const TEXTURE_2D_ARRAY: i32 = 187;
+/// How many times its decoded size converting and encoding a texture needs: the decoded image
+/// and the working copies of the encoder.
+const DECODED_FACTOR: u64 = 3;
 
 /// The whole image of a `Texture2D`, the first face of a `Cubemap`, or every slice of a
 /// `Texture2DArray` or `Texture3D`: mip level 0, rows from top to bottom.
@@ -96,6 +102,48 @@ impl Converter for Texture {
             }],
         }))
     }
+
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        Cost {
+            class: CostClass::Heavy,
+            memory: texture_memory(root, cx)
+                .unwrap_or_else(|| Cost::light(u64::from(object.size)).memory),
+        }
+    }
+}
+
+/// The estimated peak memory of converting and encoding texture `id`: its stored image data and
+/// [`DECODED_FACTOR`] times the size of its decoded slices.
+fn texture_memory(id: ObjectId, cx: &dyn Context) -> Option<u64> {
+    let object = cx.object(id).ok()?;
+    let fields = &object.fields;
+    let width = u64::from(dimension(fields, "m_Width").ok()?);
+    let height = u64::from(dimension(fields, "m_Height").ok()?);
+    let (depth, pixel, stored) = if matches!(object.class_id, TEXTURE_3D | TEXTURE_2D_ARRAY) {
+        let format = fields.get("m_Format")?.as_i64()?;
+        (
+            u64::from(dimension(fields, "m_Depth").ok()?),
+            if format == array::RGBA_HALF { 8 } else { 4 },
+            fields.get("m_DataSize")?.as_u64()?,
+        )
+    } else {
+        let format = fields.get("m_TextureFormat")?.as_i64()?;
+        let hdr = i32::try_from(format).is_ok_and(texture::is_hdr);
+        let stream = fields
+            .get("m_StreamData")
+            .and_then(|s| StreamData::read(s).ok())
+            .filter(|s| !s.path.is_empty());
+        let stored = match stream {
+            Some(s) => s.size,
+            None => fields.get("image data")?.as_bytes()?.len() as u64,
+        };
+        (1, if hdr { 8 } else { 4 }, stored)
+    };
+    let decoded = width
+        .saturating_mul(height)
+        .saturating_mul(depth)
+        .saturating_mul(pixel);
+    Some(stored.saturating_add(decoded.saturating_mul(DECODED_FACTOR)))
 }
 
 /// `m_StreamData`: where a texture's image data is stored outside the object.

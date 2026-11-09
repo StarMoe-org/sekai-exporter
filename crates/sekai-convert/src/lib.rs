@@ -60,6 +60,51 @@ pub trait Converter: Send + Sync {
     /// object's fields show it holds no asset of this form, such as a font texture that the
     /// engine fills at run time; this is not an error.
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError>;
+
+    /// What converting `root` and encoding its members is expected to need, estimated from the
+    /// headers of the objects it reads. `object` is the index of `root`.
+    ///
+    /// The estimate only guides scheduling: it is not part of any fingerprint and does not
+    /// change any output. When the headers cannot be read, a converter returns its estimate for
+    /// the stored size and lets [`Converter::convert`] report the error. The default is
+    /// [`Cost::light`] for the stored size of `root`.
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        let _ = (root, cx);
+        Cost::light(u64::from(object.size))
+    }
+}
+
+/// How converting and encoding an asset uses the processor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CostClass {
+    /// Little work for its size, such as copying bytes or writing a document.
+    Light,
+    /// Processor-bound work on one thread, such as decoding a texture or audio.
+    Heavy,
+    /// Work whose encoding runs on two threads at once, such as a video.
+    Wide,
+}
+
+/// What converting and encoding one asset is expected to need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cost {
+    /// How the work uses the processor.
+    pub class: CostClass,
+    /// The estimated peak memory of the conversion and the encoding of its members, in bytes.
+    pub memory: u64,
+}
+
+impl Cost {
+    /// How many times its stored size an object is taken to need when nothing more is known.
+    pub const PAYLOAD_FACTOR: u64 = 4;
+
+    /// Light work on an object of `size` stored bytes: [`Cost::PAYLOAD_FACTOR`] times the size.
+    pub fn light(size: u64) -> Self {
+        Self {
+            class: CostClass::Light,
+            memory: size.saturating_mul(Self::PAYLOAD_FACTOR),
+        }
+    }
 }
 
 /// What a converter reads through.

@@ -12,7 +12,9 @@ pub mod naming;
 pub mod sched;
 pub mod version;
 
-pub use eval::{Evaluation, Options, Output, evaluate, evaluate_with, parallel};
+pub use eval::{
+    Evaluation, Fusion, Options, Output, evaluate, evaluate_fused, evaluate_with, parallel,
+};
 pub use lazy::Lazy;
 pub use sekai_catalog::{BundleIndexes, Derivations, Derived, MemoryDerivations, NoBundleIndexes};
 pub use version::{BundleError, BundleInput, Version};

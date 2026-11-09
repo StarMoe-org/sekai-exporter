@@ -88,11 +88,12 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The root and every object reachable from it through references, root first and the rest in
-/// order.
-fn closure(index: &VersionIndex, root: ObjectId) -> Vec<ObjectId> {
+/// The root, the declared `inputs` and every object reachable from them through references, root
+/// first and the rest in order.
+fn closure(index: &VersionIndex, root: ObjectId, inputs: &[ObjectId]) -> Vec<ObjectId> {
     let mut seen = BTreeSet::from([root]);
-    let mut queue = vec![root];
+    seen.extend(inputs);
+    let mut queue: Vec<ObjectId> = seen.iter().copied().collect();
     while let Some(id) = queue.pop() {
         let Some(position) = index.position(id) else {
             continue;
@@ -108,6 +109,13 @@ fn closure(index: &VersionIndex, root: ObjectId) -> Vec<ObjectId> {
     }
     seen.remove(&root);
     std::iter::once(root).chain(seen).collect()
+}
+
+/// Further files of an asset, made while its members are still decoded. They must not change any
+/// canonical output.
+pub trait Fusion: Sync {
+    /// Makes the files for `asset`, whose members are those of `document`, in the same order.
+    fn extra(&self, asset: &Asset, document: &AssetDocument) -> io::Result<()>;
 }
 
 /// A derivation to evaluate.
@@ -273,7 +281,7 @@ pub(crate) fn derive(
     });
     alone
         .run(&[Need::default()], |_, slots| {
-            derive_within(plan, cost, slots, version, store, recorder)
+            derive_within(plan, cost, slots, version, store, recorder, None)
         })
         .pop()
         .expect("the derivation ran")
@@ -291,6 +299,7 @@ pub(crate) fn derive_within(
     version: &Version<'_>,
     store: &dyn Store,
     recorder: &dyn Recorder,
+    fusion: Option<&dyn Fusion>,
 ) -> io::Result<(Derived, Option<String>)> {
     let form = plan.converter.name();
     let result = slots.cpu(1, || {
@@ -303,6 +312,7 @@ pub(crate) fn derive_within(
     });
     let encoders = if cost.class == CostClass::Wide { 2 } else { 1 };
     let mut members = Vec::new();
+    let mut decoded = None;
     let error = match result {
         Ok(None) => return Ok((Derived::Nothing, None)),
         Ok(Some(asset)) => {
@@ -344,12 +354,17 @@ pub(crate) fn derive_within(
                     }
                 }
             }
+            decoded = Some(asset);
             failed
         }
         Err(e) => Some(asset_error(&e)),
     };
     let code = error.as_ref().map(|e| e.code.clone());
-    let key = write_document(plan, version, store, members, error)?;
+    let document = build_document(plan, version, members, error);
+    let key = store_document(store, &document)?;
+    if let (Some(fusion), Some(asset)) = (fusion, &decoded) {
+        slots.cpu(1, || fusion.extra(asset, &document))?;
+    }
     Ok((Derived::Document(key), code))
 }
 
@@ -361,16 +376,20 @@ pub(crate) fn document(
     members: Vec<MemberFile>,
     error: AssetError,
 ) -> io::Result<Key> {
-    write_document(plan, version, store, members, Some(error))
+    store_document(store, &build_document(plan, version, members, Some(error)))
 }
 
-fn write_document(
+fn store_document(store: &dyn Store, document: &AssetDocument) -> io::Result<Key> {
+    let bytes = document.to_bytes().map_err(io::Error::other)?;
+    store.put(&bytes, "json")
+}
+
+fn build_document(
     plan: &Planned<'_>,
     version: &Version<'_>,
-    store: &dyn Store,
     members: Vec<MemberFile>,
     error: Option<AssetError>,
-) -> io::Result<Key> {
+) -> AssetDocument {
     let index = version.index();
     let sources = plan
         .closure
@@ -385,7 +404,7 @@ fn write_document(
             })
         })
         .collect();
-    let document = AssetDocument {
+    AssetDocument {
         format: FORMAT.to_owned(),
         version: VERSION,
         name: plan.name.clone(),
@@ -396,9 +415,7 @@ fn write_document(
         members,
         references: Vec::new(),
         error,
-    };
-    let bytes = document.to_bytes().map_err(io::Error::other)?;
-    store.put(&bytes, "json")
+    }
 }
 
 /// Evaluates every asset of `version`. An asset that cannot be produced is recorded with its
@@ -431,9 +448,40 @@ pub fn evaluate_with(
     recorder: &dyn Recorder,
     options: &Options,
 ) -> io::Result<Evaluation> {
+    evaluate_fused(
+        version,
+        converters,
+        store,
+        derivations,
+        recorder,
+        options,
+        None,
+    )
+}
+
+/// Evaluates every asset of `version` as [`evaluate_with`] does, and has `fusion` make further
+/// files of each asset that is converted. Plain mode does not use it.
+pub fn evaluate_fused(
+    version: &Version<'_>,
+    converters: &[Box<dyn Converter>],
+    store: &dyn Store,
+    derivations: &dyn Derivations,
+    recorder: &dyn Recorder,
+    options: &Options,
+    fusion: Option<&dyn Fusion>,
+) -> io::Result<Evaluation> {
     let threads = if options.plain { 1 } else { options.threads };
     let plan = plan(version, converters, recorder, threads);
-    run(&plan, version, store, derivations, recorder, options)
+    let fusion = fusion.filter(|_| !options.plain);
+    run(
+        &plan,
+        version,
+        store,
+        derivations,
+        recorder,
+        options,
+        fusion,
+    )
 }
 
 /// Chooses the roots of `version`, names them and computes the closure and fingerprint of each
@@ -484,7 +532,7 @@ pub(crate) fn plan<'a>(
             unnamed.push(((*logical).to_owned(), id.path_id));
             continue;
         };
-        let closure = closure(index, *id);
+        let closure = closure(index, *id, &converter.inputs(*id, version));
         let fingerprint = fingerprint(*converter, &name, index, &closure, &resources);
         derivations.push(Planned {
             converter: *converter,
@@ -538,6 +586,7 @@ pub(crate) fn run(
     derivations: &dyn Derivations,
     recorder: &dyn Recorder,
     options: &Options,
+    fusion: Option<&dyn Fusion>,
 ) -> io::Result<Evaluation> {
     let plans = &plan.derivations;
     let threads = if options.plain { 1 } else { options.threads };
@@ -575,7 +624,7 @@ pub(crate) fn run(
     let derived = scheduler.run(&needs, |j, slots| -> io::Result<_> {
         let (i, cost) = pending[order[j]];
         let plan = &plans[i];
-        let (derived, error) = derive_within(plan, cost, slots, version, store, recorder)?;
+        let (derived, error) = derive_within(plan, cost, slots, version, store, recorder, fusion)?;
         // A failed asset has no output, so the next run evaluates it again.
         if !options.plain && error.is_none() {
             derivations.put(plan.fingerprint, derived.clone())?;

@@ -160,6 +160,18 @@ fn segments_are_joined_in_number_order() {
 }
 
 #[test]
+fn every_segment_is_an_input() {
+    let bundle = Bundle(vec![
+        ("a/m-002.usm.bytes".into(), vec![2]),
+        ("a/m-001.usm.bytes".into(), vec![1]),
+        ("a/other-001.usm.bytes".into(), vec![3]),
+        ("a/whole.usm.bytes".into(), vec![4]),
+    ]);
+    assert_eq!(Video.inputs(id(1), &bundle), [id(1), id(0)]);
+    assert_eq!(Video.inputs(id(3), &bundle), [id(3)]);
+}
+
+#[test]
 fn a_missing_segment_is_an_error() {
     let data = movie(1, FIRST);
     let bundle = Bundle(vec![

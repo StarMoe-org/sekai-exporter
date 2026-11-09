@@ -6,6 +6,7 @@
 use std::fmt;
 
 use sekai_codec::{Pcm, Surface};
+use sekai_convert::Content;
 use sekai_encode::{mp3, png};
 use sekai_format::AssetDocument;
 
@@ -203,12 +204,28 @@ fn decode_flac(bytes: &[u8]) -> Result<Pcm, ViewError> {
     Pcm::new(info.sample_rate, channels, samples).map_err(malformed)
 }
 
-/// Makes the file of a view from the bytes of its member. `Transform::Copy` is not applied.
-pub fn apply(transform: Transform, member: &[u8]) -> Result<Vec<u8>, ViewError> {
-    let encoded = |e: sekai_encode::EncodeError| ViewError {
+fn encoded(e: sekai_encode::EncodeError) -> ViewError {
+    ViewError {
         code: e.code(),
         message: e.to_string(),
-    };
+    }
+}
+
+/// Makes the file of a view from a member that is still decoded, with the bytes [`apply`] gives
+/// for the member's file. `None` if the transform does not read this kind of content.
+pub fn apply_decoded(
+    transform: Transform,
+    content: &Content,
+) -> Option<Result<Vec<u8>, ViewError>> {
+    match (transform, content) {
+        (Transform::Png, Content::Image(surface)) => Some(png::encode(surface).map_err(encoded)),
+        (Transform::Mp3, Content::Audio(pcm)) => Some(mp3::encode(pcm, MP3_KBPS).map_err(encoded)),
+        _ => None,
+    }
+}
+
+/// Makes the file of a view from the bytes of its member. `Transform::Copy` is not applied.
+pub fn apply(transform: Transform, member: &[u8]) -> Result<Vec<u8>, ViewError> {
     match transform {
         Transform::Copy => Ok(member.to_vec()),
         Transform::Png => png::encode(&decode_webp(member)?).map_err(encoded),
@@ -219,7 +236,25 @@ pub fn apply(transform: Transform, member: &[u8]) -> Result<Vec<u8>, ViewError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sekai_encode::webp_lossless;
     use sekai_format::asset::{MemberFile, SourceObject};
+
+    #[test]
+    fn a_decoded_image_gives_the_png_of_its_webp() {
+        let pixels = (0..16 * 4).map(|v| (v * 3) as u8).collect();
+        let surface = Surface::new(4, 4, pixels).unwrap();
+        let webp = webp_lossless::encode(&surface).unwrap();
+        let direct = apply_decoded(Transform::Png, &Content::Image(surface))
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct, apply(Transform::Png, &webp).unwrap());
+    }
+
+    #[test]
+    fn a_transform_does_not_read_other_content() {
+        let pcm = Pcm::new(48000, 1, vec![0; 4]).unwrap();
+        assert!(apply_decoded(Transform::Png, &Content::Audio(pcm)).is_none());
+    }
 
     fn document(name: &str, form: &str, bundle: &str, members: &[(&str, &str)]) -> AssetDocument {
         AssetDocument {

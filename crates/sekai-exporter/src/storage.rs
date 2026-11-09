@@ -1,10 +1,12 @@
 //! Publishes the `storage` view of an evaluation as a path tree.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::Path;
 
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Derivations, Derived, Key, LocalStore};
+use sekai_convert::Asset;
 use sekai_format::AssetDocument;
 use sekai_format::publication::AssetFailure;
 use sekai_moesekai::storage_view::{self, Transform, ViewFile};
@@ -32,6 +34,58 @@ fn fingerprint(transform: Transform, source: &Key) -> [u8; 32] {
         transform.identity()
     );
     Sha256::digest(text.as_bytes()).into()
+}
+
+/// Makes the transformed files of the view from decoded members, so that publishing does not
+/// decode them again.
+pub(crate) struct Fusion<'a> {
+    store: &'a LocalStore,
+    derivations: &'a dyn Derivations,
+    monitor: &'a Monitor,
+}
+
+impl<'a> Fusion<'a> {
+    pub(crate) fn new(
+        store: &'a LocalStore,
+        derivations: &'a dyn Derivations,
+        monitor: &'a Monitor,
+    ) -> Self {
+        Self {
+            store,
+            derivations,
+            monitor,
+        }
+    }
+}
+
+impl sekai_pipeline::Fusion for Fusion<'_> {
+    fn extra(&self, asset: &Asset, document: &AssetDocument) -> io::Result<()> {
+        for file in storage_view::files(document) {
+            let member = &document.members[file.member];
+            let Some(sha256) = parse_hex(&member.sha256) else {
+                continue;
+            };
+            let source = Key {
+                sha256,
+                extension: member.extension.clone(),
+            };
+            let fingerprint = fingerprint(file.transform, &source);
+            if file.transform == Transform::Copy || self.derivations.get(&fingerprint)?.is_some() {
+                continue;
+            }
+            let mut span = self.monitor.span("transform", "storage", &file.path);
+            let content = &asset.members[file.member].content;
+            // A failure is reported when the view is published.
+            let Some(Ok(bytes)) = storage_view::apply_decoded(file.transform, content) else {
+                continue;
+            };
+            let extension = file.transform.extension().unwrap_or(&source.extension);
+            let key = self.store.put(&bytes, extension)?;
+            span.bytes(0, bytes.len() as u64);
+            self.derivations.put(fingerprint, Derived::Document(key))?;
+        }
+        Ok(())
+    }
 }
 
 /// Makes a file of the view, or finds it from an earlier run.

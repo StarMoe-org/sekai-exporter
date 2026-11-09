@@ -13,7 +13,8 @@ use sekai_convert::{
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::{
-    BundleInput, Evaluation, MemoryDerivations, Options, Version, evaluate, evaluate_with,
+    BundleInput, Evaluation, Fusion, MemoryDerivations, Options, Version, evaluate, evaluate_fused,
+    evaluate_with,
 };
 use sekai_unity::NoBlockCache;
 use sha2::{Digest, Sha256};
@@ -61,6 +62,101 @@ fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sekai-eval-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     dir
+}
+
+/// Counts the assets it is given and checks that their members match their documents.
+#[derive(Default)]
+struct CountingFusion(std::sync::atomic::AtomicUsize);
+
+impl Fusion for CountingFusion {
+    fn extra(&self, asset: &Asset, document: &AssetDocument) -> std::io::Result<()> {
+        assert_eq!(asset.members.len(), document.members.len());
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn run_fused(root: &Path, plain: bool, fusion: &CountingFusion) -> Evaluation {
+    let (version, errors) = Version::open(
+        vec![input("fixture_scene"), input("fixture_data")],
+        &NoBlockCache,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    let store = LocalStore::open(root).unwrap();
+    let options = Options {
+        threads: 2,
+        memory: u64::MAX,
+        resident: None,
+        plain,
+    };
+    evaluate_fused(
+        &version,
+        &[Box::new(Texture) as Box<dyn Converter>],
+        &store,
+        &MemoryDerivations::default(),
+        &NoRecorder,
+        &options,
+        Some(fusion),
+    )
+    .unwrap()
+}
+
+#[test]
+fn fusion_sees_every_converted_asset_and_changes_nothing() {
+    let (fused, plain) = (scratch("fused"), scratch("fused-plain"));
+    let seen = CountingFusion::default();
+    let with_fusion = run_fused(&fused, false, &seen);
+    let count = seen.0.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(count, with_fusion.outputs.len());
+    assert!(count > 0);
+    let unused = CountingFusion::default();
+    let without = run_fused(&plain, true, &unused);
+    assert_eq!(unused.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(with_fusion.outputs, without.outputs);
+    std::fs::remove_dir_all(fused).unwrap();
+    std::fs::remove_dir_all(plain).unwrap();
+}
+
+/// The texture form, also reading everything the bundle of the root lists.
+struct Widened;
+
+impl Converter for Widened {
+    fn name(&self) -> &'static str {
+        Texture.name()
+    }
+
+    fn version(&self) -> u32 {
+        Texture.version()
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        Texture.is_root(object, script, paths)
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        Texture.convert(root, cx)
+    }
+
+    fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
+        let entries = cx.container(root).unwrap();
+        entries.into_iter().map(|(_, id)| id).collect()
+    }
+}
+
+#[test]
+fn declared_inputs_join_the_sources_and_the_fingerprint() {
+    let sources = |root: &Path, converter: Box<dyn Converter>| {
+        let evaluation = run_with(converter, root, 2, &MemoryDerivations::default());
+        let store = LocalStore::open(root).unwrap();
+        let documents = evaluation.outputs.iter().map(|output| {
+            AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap()
+        });
+        documents.map(|d| d.sources.len()).sum::<usize>()
+    };
+    let (narrow, wide) = (scratch("narrow"), scratch("wide"));
+    assert!(sources(&wide, Box::new(Widened)) > sources(&narrow, Box::new(Texture)));
+    std::fs::remove_dir_all(narrow).unwrap();
+    std::fs::remove_dir_all(wide).unwrap();
 }
 
 #[test]

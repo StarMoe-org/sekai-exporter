@@ -16,7 +16,7 @@ One member:
 
 ## 3. Sources
 
-The root object is a `TextAsset` whose container path ends in `.usm.bytes`. A file can be split into segments, stored in one bundle at the container paths `<base>-001.usm.bytes`, `<base>-002.usm.bytes` and so on. The segment numbered 001 is the root; the bytes of all segments are joined in number order, and the result is the USM file.
+The root object is a `TextAsset` whose container path ends in `.usm.bytes`. A file can be split into segments, stored in one bundle at the container paths `<base>-001.usm.bytes`, `<base>-002.usm.bytes` and so on. The segment numbered 001 is the root; the bytes of all segments are joined in number order, and the result is the USM file. Every segment is listed in the `sources` of the asset.
 
 An ADX audio track can end before the sample count of its header. The whole frames it holds are decoded.
 

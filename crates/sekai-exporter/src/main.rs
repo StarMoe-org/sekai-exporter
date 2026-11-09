@@ -13,9 +13,30 @@ mod storage {
     use std::path::Path;
 
     use sekai_catalog::{Derivations, LocalStore};
+    use sekai_convert::Asset;
+    use sekai_format::AssetDocument;
     use sekai_pipeline::Evaluation;
 
     use crate::monitor::Monitor;
+
+    /// Makes no further files in a build without the storage view.
+    pub(crate) struct Fusion;
+
+    impl Fusion {
+        pub(crate) fn new(
+            _store: &LocalStore,
+            _derivations: &dyn Derivations,
+            _monitor: &Monitor,
+        ) -> Self {
+            Self
+        }
+    }
+
+    impl sekai_pipeline::Fusion for Fusion {
+        fn extra(&self, _asset: &Asset, _document: &AssetDocument) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     /// Refuses to publish a view that this build does not have.
     pub(crate) fn publish(

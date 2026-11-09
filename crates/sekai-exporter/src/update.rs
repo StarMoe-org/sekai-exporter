@@ -15,7 +15,7 @@ use sekai_game::cdn::{self, BundleEntry, Region, Secrets, Source};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Version, evaluate_with, parallel};
+use sekai_pipeline::{BundleInput, Version, evaluate_fused, parallel};
 use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
@@ -382,13 +382,18 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         return Ok(false);
     }
 
-    let evaluation = evaluate_with(
+    let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
+    let evaluation = evaluate_fused(
         &version,
         &converters(hca_key),
         &store,
         &derivations,
         monitor,
         &budget::options(options.threads, options.memory, options.plain),
+        options
+            .storage
+            .is_some()
+            .then_some(&fusion as &dyn sekai_pipeline::Fusion),
     )
     .map_err(|e| e.to_string())?;
     let target = format!("{region_name}/canonical");

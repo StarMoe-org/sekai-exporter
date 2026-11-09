@@ -61,6 +61,14 @@ pub trait Converter: Send + Sync {
     /// engine fills at run time; this is not an error.
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError>;
 
+    /// Objects that converting `root` reads and that `root` does not reach through references,
+    /// such as the later segments of a split file. They and what they refer to join the closure
+    /// of the asset, so they are in its fingerprint and its `sources`. The default is none.
+    fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
+        let _ = (root, cx);
+        Vec::new()
+    }
+
     /// What converting `root` and encoding its members is expected to need, estimated from the
     /// headers of the objects it reads. `object` is the index of `root`.
     ///

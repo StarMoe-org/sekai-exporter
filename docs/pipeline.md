@@ -14,7 +14,7 @@ The pipeline is the eager evaluator of the [derivation graph](architecture.md). 
 | P3 Index | For each bundle, read every object's fields, skipping large arrays by length; record class, name, container path, content hash and references | Object rows and reference edges |
 | P3b Resolve | After every bundle is indexed: resolve external files to bundles, `m_Script` to class names, and write object documents | A fully resolved object graph for the version |
 | **Barrier** | Asset closures and names depend on the whole version | |
-| P4 Plan assets | Each converter selects its root objects and computes closures over the reference edges; names are assigned (see [Identity](architecture.md#identity)); fingerprints are computed | Derivations to evaluate; derivations whose fingerprint already has an output are reused without reading any bytes |
+| P4 Plan assets | Each converter selects its root objects and computes closures over the reference edges and the further inputs it declares; names are assigned (see [Identity](architecture.md#identity)); fingerprints are computed | Derivations to evaluate; derivations whose fingerprint already has an output are reused without reading any bytes |
 | P5 Convert | Evaluate convert and transform derivations under the scheduler | Asset documents and file bytes |
 | P6 Write | Write bytes to the store, skipping content that already exists; record derivations in the catalog | Store objects and catalog rows |
 | P7 Views | Each enabled view produces bindings; views that need other bytes produce transform derivations | Bindings |

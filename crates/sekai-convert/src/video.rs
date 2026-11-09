@@ -57,15 +57,15 @@ fn script(id: ObjectId, cx: &dyn Context) -> Result<Vec<u8>, ConvertError> {
         .ok_or_else(|| malformed("m_Script is missing or is not a string"))
 }
 
-/// The bytes of the USM file `root` starts, joined from its segments in number order.
-fn file(root: ObjectId, cx: &dyn Context) -> Result<Vec<u8>, ConvertError> {
+/// The objects holding the USM file `root` starts, in number order.
+fn parts(root: ObjectId, cx: &dyn Context) -> Result<Vec<ObjectId>, ConvertError> {
     let entries = cx.container(root)?;
     let own = entries
         .iter()
         .find(|(path, id)| *id == root && path.ends_with(SUFFIX))
         .ok_or_else(|| malformed("the object has no USM container path"))?;
     let Some((base, _)) = segment(&own.0) else {
-        return script(root, cx);
+        return Ok(vec![root]);
     };
     let mut parts: Vec<(u32, ObjectId)> = entries
         .iter()
@@ -84,8 +84,13 @@ fn file(root: ObjectId, cx: &dyn Context) -> Result<Vec<u8>, ConvertError> {
             format!("segment {expected} of {base} is missing"),
         ));
     }
+    Ok(parts.into_iter().map(|(_, id)| id).collect())
+}
+
+/// The bytes of the USM file `root` starts, joined from its segments in number order.
+fn file(root: ObjectId, cx: &dyn Context) -> Result<Vec<u8>, ConvertError> {
     let mut data = Vec::new();
-    for (_, id) in parts {
+    for id in parts(root, cx)? {
         data.extend(script(id, cx)?);
     }
     Ok(data)
@@ -163,6 +168,12 @@ impl Converter for Video {
                 content: Content::Video(movie),
             }],
         }))
+    }
+
+    /// The segments of the file. A file whose segments cannot be listed reports that from
+    /// [`Converter::convert`].
+    fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
+        parts(root, cx).unwrap_or_default()
     }
 
     /// Four times the file, taken as the stored size of `root` times its segment count: the

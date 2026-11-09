@@ -46,7 +46,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 | Store writes | Content-addressed; content that already exists is skipped. A local store materializes path trees with hard links |
 | Catalog | One redb file with batched write transactions; read transactions see a snapshot and do not wait for writes |
 
-Fused encoding does not change fingerprints: each output is the same bytes it would be without fusion, and comparing fused and unfused evaluation in continuous integration is planned together with fused encoding.
+Fused encoding does not change fingerprints: each output is the same bytes it would be without fusion, and a test compares fused evaluation with plain evaluation.
 
 ## Measurement
 

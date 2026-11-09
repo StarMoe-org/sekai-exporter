@@ -5,8 +5,11 @@ use std::fmt::Write as _;
 use sekai_codec::{HdrSurface, Surface};
 use sekai_unity::Value;
 
-use super::{Texture, field, malformed};
-use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex};
+use super::{Texture, field, malformed, texture_memory};
+use crate::{
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
+    ObjectIndex,
+};
 
 /// The class ID of `Sprite`.
 const SPRITE: i32 = 213;
@@ -89,6 +92,14 @@ impl Converter for Sprite {
                 },
             ],
         }))
+    }
+
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        Cost {
+            class: CostClass::Heavy,
+            memory: sprite_memory(root, cx)
+                .unwrap_or_else(|| Cost::light(u64::from(object.size)).memory),
+        }
     }
 }
 
@@ -222,6 +233,15 @@ fn float(value: &Value, name: &str) -> Result<f32, ConvertError> {
         .map(|v| v as f32)
         .filter(|v| v.is_finite())
         .ok_or_else(|| malformed(format!("{name} holds a value that is not a finite number")))
+}
+
+/// The estimated peak memory of a sprite: that of decoding and encoding its whole texture, which
+/// also covers the cropped image.
+fn sprite_memory(root: ObjectId, cx: &dyn Context) -> Option<u64> {
+    let object = cx.object(root).ok()?;
+    let rd = object.fields.get("m_RD")?;
+    let texture = pptr(rd, "texture", root, cx).ok()??;
+    texture_memory(texture, cx)
 }
 
 /// The object a reference field of `value` points to.

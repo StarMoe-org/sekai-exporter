@@ -2,11 +2,11 @@
 
 #![cfg(feature = "audio")]
 
-use sekai_codec::cri::{HcaKey, decode_hca};
+use sekai_codec::cri::{HcaKey, decode_hca, hca_info};
 use sekai_convert::audio::Audio;
 use sekai_convert::{
-    Asset, Chunk, Content, Context, ConvertError, Converter, Object, ObjectId, ObjectIndex, PPtr,
-    Pcm, Value,
+    Asset, Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
+    ObjectIndex, PPtr, Pcm, Value,
 };
 
 const KEY: u64 = 0x0123456789ABCDE;
@@ -318,4 +318,26 @@ fn a_damaged_sheet_is_an_error() {
     );
     let e = convert(Audio::new(None), b"not a sheet".to_vec()).unwrap_err();
     assert!(matches!(e.code, "malformed" | "truncated"), "{e}");
+}
+
+#[test]
+fn the_cost_counts_the_samples_of_every_member() {
+    let bytes = |name: &str| {
+        let info = hca_info(&hca(name)).unwrap();
+        info.frames * u64::from(info.channels) * 2
+    };
+    // The members are mono, stereo and mono again, and stereo.
+    let samples = 2 * (bytes("sine_mono.hca") + bytes("sine_stereo.hca"));
+    let data = sheet(&[(1, 0, "mono"), (2, 0, "variations"), (1, 1, "stereo")], 0);
+    let mut object = index(49);
+    object.size = 1000;
+    assert_eq!(
+        Audio::new(None).cost(ROOT, &object, &Bundle(data)),
+        Cost {
+            class: CostClass::Heavy,
+            memory: 2 * 1000 + samples + samples / 2,
+        }
+    );
+    let damaged = Audio::new(None).cost(ROOT, &object, &Bundle(b"not a sheet".to_vec()));
+    assert_eq!(damaged.memory, 4 * 1000);
 }

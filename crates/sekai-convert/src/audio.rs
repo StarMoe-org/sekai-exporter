@@ -3,10 +3,13 @@
 //! [`Audio`] produces the `audio` form, specified in `docs/spec/audio.md`.
 
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{Acb, HcaKey, decode_hca, read_acb};
+use sekai_codec::cri::{Acb, HcaKey, decode_hca, hca_info, read_acb};
 use sekai_unity::Value;
 
-use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex};
+use crate::{
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
+    ObjectIndex,
+};
 
 /// The class ID of `TextAsset`.
 const TEXT_ASSET: i32 = 49;
@@ -90,6 +93,53 @@ impl Converter for Audio {
         }
         Ok(Some(Asset { members }))
     }
+
+    /// The cue sheet twice, the samples of every member, and the encoded form of the largest
+    /// member, taken as half the samples.
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        let stored = u64::from(object.size);
+        let memory = match samples(root, cx) {
+            Some(bytes) => stored
+                .saturating_mul(2)
+                .saturating_add(bytes)
+                .saturating_add(bytes / 2),
+            None => Cost::light(stored).memory,
+        };
+        Cost {
+            class: CostClass::Heavy,
+            memory,
+        }
+    }
+}
+
+/// The size of the 16-bit samples of every member the cue sheet `root` gives, from the headers of
+/// its streams. Waveforms the converter cannot decode are left out.
+fn samples(root: ObjectId, cx: &dyn Context) -> Option<u64> {
+    let object = cx.object(root).ok()?;
+    let acb = read_acb(object.fields.get("m_Script")?.as_bytes()?).ok()?;
+    let bank = acb.memory_awb.as_ref()?;
+    let mut total = 0u64;
+    for cue in &acb.cues {
+        let mut seen = Vec::new();
+        for &w in &cue.waveforms {
+            if seen.contains(&w) {
+                continue;
+            }
+            seen.push(w);
+            let Some(stream) = acb
+                .waveforms
+                .get(w)
+                .and_then(|waveform| waveform.memory_awb_id)
+                .and_then(|id| bank.stream(id))
+            else {
+                continue;
+            };
+            if let Ok(info) = hca_info(stream.data) {
+                total = total.saturating_add(info.frames * u64::from(info.channels) * 2);
+            }
+        }
+    }
+    Some(total)
 }
 
 impl Audio {

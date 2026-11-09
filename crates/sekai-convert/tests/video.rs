@@ -4,7 +4,8 @@
 
 use sekai_convert::video::Video;
 use sekai_convert::{
-    Chunk, Content, Context, ConvertError, Converter, Object, ObjectId, ObjectIndex, PPtr, Value,
+    Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
+    ObjectIndex, PPtr, Value,
 };
 
 fn id(path_id: i64) -> ObjectId {
@@ -198,5 +199,41 @@ fn other_streams_are_named_errors() {
     assert_eq!(
         Video.convert(id(0), &scrambled).unwrap_err().code,
         "unsupported"
+    );
+}
+
+#[test]
+fn the_cost_of_a_movie_counts_its_segments() {
+    let object = ObjectIndex {
+        path_id: 1,
+        class_id: 49,
+        class: "TextAsset".into(),
+        name: None,
+        script: None,
+        script_name: None,
+        references: Vec::new(),
+        size: 1000,
+        sha256: [0; 32],
+        error: None,
+    };
+    let bundle = Bundle(vec![
+        ("a/m-002.usm.bytes".into(), Vec::new()),
+        ("a/m-001.usm.bytes".into(), Vec::new()),
+        ("a/m-003.usm.bytes".into(), Vec::new()),
+        ("a/other-001.usm.bytes".into(), Vec::new()),
+        ("a/single.usm.bytes".into(), Vec::new()),
+    ]);
+    let wide = |memory| Cost {
+        class: CostClass::Wide,
+        memory,
+    };
+    let encoder = 256 << 20;
+    assert_eq!(
+        Video.cost(id(1), &object, &bundle),
+        wide(4 * 3 * 1000 + encoder)
+    );
+    assert_eq!(
+        Video.cost(id(4), &object, &bundle),
+        wide(4 * 1000 + encoder)
     );
 }

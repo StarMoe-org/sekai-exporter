@@ -6,7 +6,10 @@ use sekai_codec::Movie;
 use sekai_codec::cri::{AudioStream, VideoStream, decode_adx_available, decode_hca, read_usm};
 use sekai_unity::Value;
 
-use crate::{Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex};
+use crate::{
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
+    ObjectIndex,
+};
 
 /// The class ID of `TextAsset`.
 const TEXT_ASSET: i32 = 49;
@@ -20,6 +23,8 @@ const ADX: u32 = 2;
 const HCA: u32 = 4;
 /// The start code an MPEG-1 video stream begins with.
 const SEQUENCE_HEADER: [u8; 4] = [0, 0, 1, 0xB3];
+/// The memory of the encoder process, which runs beside the evaluator.
+const ENCODER_MEMORY: u64 = 256 << 20;
 
 /// USM files, as a video with its audio.
 #[derive(Debug, Clone, Copy, Default)]
@@ -159,6 +164,33 @@ impl Converter for Video {
             }],
         }))
     }
+
+    /// Four times the file, taken as the stored size of `root` times its segment count: the
+    /// joined file, the elementary stream, the decoded audio and the encoded movie. The encoder
+    /// process adds a fixed amount.
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        let file = u64::from(object.size).saturating_mul(segments(root, cx).unwrap_or(1));
+        Cost {
+            class: CostClass::Wide,
+            memory: file.saturating_mul(4).saturating_add(ENCODER_MEMORY),
+        }
+    }
+}
+
+/// The number of segments of the USM file `root` starts, from the container of its bundle.
+fn segments(root: ObjectId, cx: &dyn Context) -> Option<u64> {
+    let entries = cx.container(root).ok()?;
+    let (path, _) = entries
+        .iter()
+        .find(|(path, id)| *id == root && path.ends_with(SUFFIX))?;
+    let Some((base, _)) = segment(path) else {
+        return Some(1);
+    };
+    let count = entries
+        .iter()
+        .filter(|(path, _)| segment(path).is_some_and(|(other, _)| other == base))
+        .count();
+    Some(count as u64)
 }
 
 #[cfg(test)]

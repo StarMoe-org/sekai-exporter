@@ -28,6 +28,7 @@
 | [来源](docs/sources.zh-CN.md) | 输入、区服、版本发现与凭据 |
 | [发布](docs/publishing.zh-CN.md) | store、布局、资产文档与发布协议 |
 | [Feature](docs/features.zh-CN.md) | crate、Cargo feature 与预设 |
+| [Live2D 动作](docs/live2d-motion.zh-CN.md) | 游戏如何保存 Live2D 动作，以及其规范形式为何是 clip 的曲线 |
 | [对象文档](docs/spec/object-documents.zh-CN.md) | 对象文档的规范 |
 | [贴图](docs/spec/texture.md) | 贴图形式的规范（英文） |
 | [术语表](docs/glossary.md) | 文档与代码中统一使用的术语 |

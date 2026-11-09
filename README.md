@@ -28,6 +28,7 @@ Why the project is built around converting rather than unpacking is explained in
 | [Sources](docs/sources.md) | Inputs, regions, version discovery and credentials |
 | [Publishing](docs/publishing.md) | Stores, layouts, asset documents and the publication protocol |
 | [Features](docs/features.md) | Crates, Cargo features and presets |
+| [Live2D motions](docs/live2d-motion.md) | How the game stores Live2D motions, and why their canonical form is the clip's curves |
 | [Object documents](docs/spec/object-documents.md) | The specification of object documents |
 | [Texture](docs/spec/texture.md) | The specification of the texture form |
 | [Glossary](docs/glossary.md) | Terms used throughout the documents and the code |

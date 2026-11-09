@@ -205,6 +205,13 @@ impl<'a> Table<'a> {
         }
     }
 
+    pub(super) fn float(&self, row: usize, name: &str) -> Result<Option<f32>, DecodeError> {
+        Ok(match self.value(row, name)? {
+            Some(Value::Float(value)) => Some(value),
+            _ => None,
+        })
+    }
+
     pub(super) fn text(&self, row: usize, name: &str) -> Result<Option<&'a str>, DecodeError> {
         match self.value(row, name)? {
             Some(Value::Text(value)) => Ok(Some(value)),

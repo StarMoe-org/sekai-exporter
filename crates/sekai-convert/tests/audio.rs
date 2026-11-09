@@ -8,6 +8,7 @@ use sekai_convert::{
     Asset, Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
     ObjectIndex, PPtr, Pcm, Value,
 };
+use sekai_format::audio::CueTable;
 
 const KEY: u64 = 0x0123456789ABCDE;
 const SUBKEY: u16 = 0x4A1C;
@@ -232,11 +233,24 @@ fn members(asset: &Asset) -> Vec<(&str, &Pcm)> {
     asset
         .members
         .iter()
+        .filter(|m| m.role != "cues")
         .map(|m| match &m.content {
             Content::Audio(pcm) => (m.role.as_str(), pcm),
             other => panic!("not audio: {other:?}"),
         })
         .collect()
+}
+
+fn cue_table(asset: &Asset) -> CueTable {
+    let last = asset.members.last().expect("members");
+    assert_eq!(last.role, "cues");
+    match &last.content {
+        Content::File { extension, bytes } => {
+            assert_eq!(extension, "json");
+            CueTable::from_bytes(bytes).unwrap()
+        }
+        other => panic!("not a file: {other:?}"),
+    }
 }
 
 fn index(class_id: i32) -> ObjectIndex {
@@ -278,6 +292,52 @@ fn each_cue_is_a_member_and_each_variation_has_a_number() {
             ("cue/variations/1", &stereo),
             ("cue/variations/2", &mono),
             ("cue/stereo", &stereo),
+        ]
+    );
+}
+
+#[test]
+fn the_cue_table_describes_each_member() {
+    let data = sheet(&[(1, 0, "mono"), (2, 0, "variations")], 0);
+    let asset = convert(Audio::new(None), data).unwrap().unwrap();
+    let table = cue_table(&asset);
+    let mono = plain("sine_mono.hca", None);
+    let stereo = plain("sine_stereo.hca", None);
+    let described: Vec<_> = table
+        .cues
+        .iter()
+        .flat_map(|cue| cue.waveforms.iter().map(move |w| (cue.name.as_str(), w)))
+        .map(|(name, w)| {
+            (
+                name,
+                w.role.as_str(),
+                w.frames,
+                w.channels,
+                w.loop_frames,
+                w.volume,
+            )
+        })
+        .collect();
+    assert_eq!(
+        described,
+        [
+            ("mono", "cue/mono", mono.frames() as u64, 1, None, 1.0),
+            (
+                "variations",
+                "cue/variations/1",
+                stereo.frames() as u64,
+                2,
+                None,
+                1.0
+            ),
+            (
+                "variations",
+                "cue/variations/2",
+                mono.frames() as u64,
+                1,
+                None,
+                1.0
+            ),
         ]
     );
 }

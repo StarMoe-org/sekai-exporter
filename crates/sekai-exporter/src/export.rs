@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
+use sekai_convert::tables::TableConverter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::ledger::BundleLedger;
@@ -103,6 +104,22 @@ fn scenario() -> Vec<Box<dyn Converter>> {
     vec![Absent::boxed("scenario", sekai_moesekai::roots::scenario)]
 }
 
+#[cfg(feature = "episode")]
+fn story_data() -> Vec<Box<dyn Converter>> {
+    use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
+    vec![Box::new(ActionSetForm), Box::new(ScenarioBackgroundForm)]
+}
+
+#[cfg(not(feature = "episode"))]
+fn story_data() -> Vec<Box<dyn Converter>> {
+    use sekai_convert::roots::Absent;
+    use sekai_moesekai::roots::{action_set, scenario_background};
+    vec![
+        Absent::boxed("action-set", action_set),
+        Absent::boxed("scenario-background", scenario_background),
+    ]
+}
+
 /// Every converter of this build. `hca_key` decrypts encrypted HCA audio.
 pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
     [
@@ -112,10 +129,21 @@ pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
         text(),
         live2d(),
         scenario(),
+        story_data(),
     ]
     .into_iter()
     .flatten()
     .collect()
+}
+
+#[cfg(feature = "episode")]
+pub(crate) fn table_converters() -> Vec<Box<dyn TableConverter>> {
+    vec![Box::new(sekai_moesekai::episode::Episode)]
+}
+
+#[cfg(not(feature = "episode"))]
+pub(crate) fn table_converters() -> Vec<Box<dyn TableConverter>> {
+    Vec::new()
 }
 
 #[cfg(feature = "catalog-db")]

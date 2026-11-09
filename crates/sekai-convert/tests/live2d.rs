@@ -541,12 +541,16 @@ fn motion_sets_reject_arms_poses_and_repeated_names() {
         )
     });
     assert_eq!(code(convert(&Motions, &bundle)), "malformed");
+}
 
+#[test]
+fn an_entry_with_a_null_clip_gives_no_member() {
     let mut bundle = motion_bundle();
     bundle.replace(1, |o| {
         set(&mut o.fields, "Facials", list(vec![entry(0, 0, "f")]))
     });
-    assert_eq!(code(convert(&Motions, &bundle)), "missing_object");
+    let members = convert(&Motions, &bundle).unwrap();
+    assert!(!members.iter().any(|m| m.role == "facial/f"));
 }
 
 #[test]

@@ -36,6 +36,10 @@ pub struct HcaInfo {
     pub sample_rate: u32,
     /// The samples per channel that the frames hold, including the encoder delay and padding.
     pub frames: u64,
+    /// The samples per channel of the stream without its encoder delay and padding.
+    pub length: u64,
+    /// The loop of a looping stream, as `[start, end)` in the same samples as `length`.
+    pub loop_frames: Option<[u64; 2]>,
 }
 
 /// Reads the header of one HCA stream without decoding its frames.

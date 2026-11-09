@@ -129,6 +129,7 @@ enum Cell {
     U8(u8),
     U16(u16),
     U32(u32),
+    F32(f32),
     Text(&'static str),
     Data(Vec<u8>),
 }
@@ -149,6 +150,7 @@ fn utf(name: &str, columns: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
             Cell::U8(_) => 0u8,
             Cell::U16(_) => 2,
             Cell::U32(_) => 4,
+            Cell::F32(_) => 8,
             Cell::Text(_) => 10,
             Cell::Data(_) => 11,
         };
@@ -164,6 +166,7 @@ fn utf(name: &str, columns: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
                 Cell::U8(value) => body.push(*value),
                 Cell::U16(value) => body.extend(value.to_be_bytes()),
                 Cell::U32(value) => body.extend(value.to_be_bytes()),
+                Cell::F32(value) => body.extend(value.to_bits().to_be_bytes()),
                 Cell::Text(value) => {
                     let offset = text(value, &mut strings);
                     body.extend(offset.to_be_bytes());
@@ -330,6 +333,17 @@ fn cue_sheet_gives_cues_waveforms_and_its_bank() {
     assert_eq!(acb.cues[2].waveforms, [2, 0]);
     assert_eq!(acb.cues[3].cue_names, ["block sequence"]);
     assert_eq!(acb.cues[3].waveforms, [1, 2, 0]);
+    assert!(
+        acb.cues
+            .iter()
+            .all(|cue| cue.volumes.len() == cue.waveforms.len())
+    );
+    assert!(
+        acb.cues
+            .iter()
+            .flat_map(|cue| &cue.volumes)
+            .all(|&v| v == 1.0)
+    );
 
     let wave = &acb.waveforms[1];
     assert_eq!(wave.memory_awb_id, Some(4));
@@ -504,6 +518,123 @@ fn adx_of_another_encoding_type_is_unsupported() {
     ));
 }
 
+/// A command list with a command that sets no volume and then the volumes `percents`.
+fn volumes(percents: &[u16]) -> Vec<u8> {
+    let mut list = vec![0x00, 0x41, 2, 0, 5];
+    for percent in percents {
+        list.extend([0x00, 0x57, 2]);
+        list.extend(percent.to_be_bytes());
+    }
+    list
+}
+
+#[test]
+fn a_cue_plays_at_the_product_of_the_volumes_on_its_way() {
+    use Cell::{Data, F32, Text, U8, U16, U32};
+    let commands =
+        |name, percents: &[u16]| Data(utf(name, &["Command"], &[vec![Data(volumes(percents))]]));
+    let data = utf(
+        "Header",
+        &[
+            "AcbVolume",
+            "CueTable",
+            "CueNameTable",
+            "WaveformTable",
+            "SynthTable",
+            "SequenceTable",
+            "TrackTable",
+            "TrackEventTable",
+            "SeqCommandTable",
+            "TrackCommandTable",
+            "SynthCommandTable",
+        ],
+        &[vec![
+            F32(0.5),
+            Data(utf(
+                "Cue",
+                &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
+                &[
+                    vec![U8(3), U16(0), U32(1), U32(0)],
+                    vec![U8(1), U16(0), U32(2), U32(0)],
+                ],
+            )),
+            Data(utf(
+                "CueName",
+                &["CueName", "CueIndex"],
+                &[vec![Text("sequence"), U16(0)], vec![Text("direct"), U16(1)]],
+            )),
+            Data(utf("Waveform", &["EncodeType"], &[vec![U8(2)]])),
+            Data(utf(
+                "Synth",
+                &["ReferenceItems", "CommandIndex"],
+                &[vec![Data(vec![0, 1, 0, 0]), U16(0)]],
+            )),
+            Data(utf(
+                "Sequence",
+                &["NumTracks", "TrackIndex", "CommandIndex"],
+                &[vec![U16(1), Data(vec![0, 0]), U16(0)]],
+            )),
+            Data(utf(
+                "Track",
+                &["EventIndex", "CommandIndex"],
+                &[vec![U16(0), U16(0)]],
+            )),
+            Data(utf(
+                "TrackEvent",
+                &["Command"],
+                &[vec![Data(vec![0x07, 0xD0, 4, 0, 2, 0, 0])]],
+            )),
+            commands("SeqCommand", &[70]),
+            commands("TrackCommand", &[90]),
+            commands("SynthCommand", &[80, 50]),
+        ]],
+    );
+    let acb = read_acb(&data).expect("sheet");
+    assert_eq!(acb.cues[0].waveforms, [0]);
+    assert_eq!(acb.cues[0].volumes, [0.126]);
+    assert_eq!(acb.cues[1].volumes, [0.5]);
+}
+
+/// The header of `data` with a `loop` chunk after its `comp` chunk, with a valid checksum.
+fn with_loop(data: &[u8], chunk: [u32; 2], delays: [u16; 2]) -> Vec<u8> {
+    const AFTER_COMP: usize = 40;
+    let size = usize::from(u16::from_be_bytes([data[6], data[7]]));
+    let mut out = data[..AFTER_COMP].to_vec();
+    out.extend(b"loop");
+    out.extend(chunk[0].to_be_bytes());
+    out.extend(chunk[1].to_be_bytes());
+    out.extend(delays[0].to_be_bytes());
+    out.extend(delays[1].to_be_bytes());
+    out.extend(&data[AFTER_COMP..size - 2]);
+    let new_size = (size + 16) as u16;
+    out[6..8].copy_from_slice(&new_size.to_be_bytes());
+    let mut sum = 0u16;
+    for &byte in &out {
+        sum ^= u16::from(byte) << 8;
+        for _ in 0..8 {
+            sum = if sum & 0x8000 != 0 {
+                (sum << 1) ^ 0x8005
+            } else {
+                sum << 1
+            };
+        }
+    }
+    out.extend(sum.to_be_bytes());
+    out
+}
+
+#[test]
+fn the_header_gives_the_loop_without_the_encoder_delay() {
+    let data = fixture("sine_mono.hca");
+    assert_eq!(hca_info(&data).unwrap().loop_frames, None);
+    let delay = u16::from_be_bytes([data[20], data[21]]);
+    let looping = with_loop(&data, [0, 1], [delay + 5, 7]);
+    let end = 2 * 1024 - 7 - u64::from(delay);
+    assert_eq!(hca_info(&looping).unwrap().loop_frames, Some([5, end]));
+    let past_the_end = with_loop(&data, [0, 0xFFFF], [delay, 0]);
+    assert_eq!(hca_info(&past_the_end).unwrap().loop_frames, None);
+}
+
 #[test]
 fn the_header_gives_the_stored_length() {
     for name in ["sine_mono.hca", "sine_stereo.hca", "random_v3.hca"] {
@@ -518,6 +649,7 @@ fn the_header_gives_the_stored_length() {
             info.frames >= decoded && info.frames.is_multiple_of(1024),
             "{name}"
         );
+        assert_eq!(info.length, decoded, "{name}");
     }
     assert!(hca_info(b"not a stream").is_err());
 }

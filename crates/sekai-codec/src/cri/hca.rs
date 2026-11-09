@@ -82,6 +82,7 @@ struct Header {
     frame_count: usize,
     delay: usize,
     padding: usize,
+    looping: Option<Looping>,
     frame_size: usize,
     min_resolution: u8,
     max_resolution: u8,
@@ -92,6 +93,14 @@ struct Header {
     bands_per_group: usize,
     group_count: usize,
     cipher: u32,
+}
+
+/// The `loop` chunk of a header.
+struct Looping {
+    start_frame: usize,
+    end_frame: usize,
+    start_delay: usize,
+    end_padding: usize,
 }
 
 fn parse_header(data: &[u8]) -> Result<Header, DecodeError> {
@@ -164,9 +173,12 @@ fn parse_header(data: &[u8]) -> Result<Header, DecodeError> {
             return Err(unsupported("HCA header chunk", u32::from_be_bytes(*name)));
         }
     }
-    if bits.chunk(b"loop") {
-        bits.position += 96;
-    }
+    let looping = bits.chunk(b"loop").then(|| Looping {
+        start_frame: bits.read(32) as usize,
+        end_frame: bits.read(32) as usize,
+        start_delay: bits.read(16) as usize,
+        end_padding: bits.read(16) as usize,
+    });
     let cipher = if bits.chunk(b"ciph") {
         bits.read(16)
     } else {
@@ -207,6 +219,7 @@ fn parse_header(data: &[u8]) -> Result<Header, DecodeError> {
         frame_count,
         delay,
         padding,
+        looping,
         frame_size,
         min_resolution,
         max_resolution,
@@ -699,13 +712,28 @@ fn decode_frame(
     Ok(())
 }
 
-/// The channel count, sample rate and stored length of a stream, read from its header.
+/// The loop of a stream as `[start, end)` samples without the encoder delay, when its header
+/// has one that lies within the stream.
+fn loop_frames(header: &Header, length: usize) -> Option<[u64; 2]> {
+    let looping = header.looping.as_ref()?;
+    let start =
+        (looping.start_frame * FRAME_SAMPLES + looping.start_delay).checked_sub(header.delay)?;
+    let end = ((looping.end_frame + 1) * FRAME_SAMPLES)
+        .checked_sub(looping.end_padding + header.delay)?;
+    (start < end && end <= length).then_some([start as u64, end as u64])
+}
+
+/// What the header of a stream says about its audio.
 pub(super) fn info(data: &[u8]) -> Result<super::HcaInfo, DecodeError> {
     let header = parse_header(data)?;
+    let total = header.frame_count * FRAME_SAMPLES;
+    let length = total.saturating_sub(header.delay + header.padding);
     Ok(super::HcaInfo {
         channels: header.channels as u16,
         sample_rate: header.sample_rate,
-        frames: (header.frame_count * FRAME_SAMPLES) as u64,
+        frames: total as u64,
+        length: length as u64,
+        loop_frames: loop_frames(&header, length),
     })
 }
 

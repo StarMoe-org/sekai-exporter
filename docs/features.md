@@ -42,7 +42,7 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 | `costume` | Costume combinations for 3D viewing |
 | `storage-view` | The [storage view](publishing.md#the-storage-view) |
 
-The features `episode`, `virtual-live` and `costume` are defined and do not produce anything yet.
+The features `virtual-live` and `costume` are defined and do not produce anything yet.
 
 In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs. It is defined and does not produce anything yet.
 

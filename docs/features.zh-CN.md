@@ -42,7 +42,7 @@
 | `costume` | 供 3D 浏览的服装组合 |
 | `storage-view` | [storage 视图](publishing.zh-CN.md#storage-视图) |
 
-`episode`、`virtual-live` 与 `costume` 这几个 feature 已定义，目前尚不产出任何内容。
+`virtual-live` 与 `costume` 这两个 feature 已定义，目前尚不产出任何内容。
 
 `sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的站点、家具与现象。它已定义，目前尚不产出任何内容。
 

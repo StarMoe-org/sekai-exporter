@@ -233,6 +233,9 @@ impl<'a> Lazy<'a> {
         Ok(match derived {
             Derived::Document(document) => Some(Output {
                 name: root.planned.name.clone(),
+                bundle: opened.version.index().bundles()[root.planned.closure[0].bundle]
+                    .name
+                    .clone(),
                 form: root.planned.converter.name(),
                 document,
                 error,

@@ -9,5 +9,7 @@ pub mod roots;
 pub mod scenario;
 #[cfg(feature = "storage-view")]
 pub mod storage_view;
+#[cfg(feature = "episode")]
+pub mod story_data;
 #[cfg(feature = "virtual-live")]
 pub mod virtual_live;

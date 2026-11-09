@@ -21,7 +21,9 @@ use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
 use crate::budget;
-use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
+use crate::export::{
+    BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, table_converters, write_ledger,
+};
 use crate::monitor::Monitor;
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -438,7 +440,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
     let converters = converters(hca_key);
-    let streamed = stream::evaluate(
+    let mut streamed = stream::evaluate(
         &manifest,
         &stored,
         &Stream {
@@ -462,6 +464,20 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     .map_err(|e| e.to_string())?;
     if report(&streamed) > 0 {
         return Ok(false);
+    }
+    if let Some(tables) = &tables {
+        let read = |name: &str| tables.read(name).map_err(io::Error::other);
+        sekai_pipeline::tables::evaluate(
+            &sekai_pipeline::tables::TableStage {
+                converters: &table_converters(),
+                read: &read,
+                store: &store,
+                recorder: monitor,
+                threads: options.threads,
+            },
+            &mut streamed.evaluation,
+        )
+        .map_err(|e| e.to_string())?;
     }
     let evaluation = &streamed.evaluation;
     let target = format!("{region_name}/canonical");

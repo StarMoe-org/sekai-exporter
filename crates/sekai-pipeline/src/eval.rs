@@ -23,6 +23,8 @@ use crate::version::Version;
 pub struct Output {
     /// The name of the asset.
     pub name: String,
+    /// The bundle of the root object, or empty for an asset built from tables.
+    pub bundle: String,
     /// The asset form.
     pub form: &'static str,
     /// The asset document.
@@ -85,7 +87,7 @@ impl Options {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -166,13 +168,13 @@ pub(crate) fn fingerprint(
 }
 
 /// The canonical file of a member.
-struct Encoded<'a> {
-    bytes: Cow<'a, [u8]>,
-    extension: &'a str,
-    media_type: &'static str,
+pub(crate) struct Encoded<'a> {
+    pub(crate) bytes: Cow<'a, [u8]>,
+    pub(crate) extension: &'a str,
+    pub(crate) media_type: &'static str,
 }
 
-fn encode(content: &Content) -> Result<Encoded<'_>, EncodeError> {
+pub(crate) fn encode(content: &Content) -> Result<Encoded<'_>, EncodeError> {
     let encoded = |bytes: Vec<u8>, extension, media_type| Encoded {
         bytes: bytes.into(),
         extension,
@@ -203,7 +205,7 @@ fn media_type(extension: &str) -> &'static str {
     }
 }
 
-fn asset_error(e: &ConvertError) -> AssetError {
+pub(crate) fn asset_error(e: &ConvertError) -> AssetError {
     AssetError {
         code: e.code.to_owned(),
         message: e.message.clone(),
@@ -517,6 +519,9 @@ pub(crate) fn run_each(
         ran.outputs.push(match derived {
             Derived::Document(document) => Some(Output {
                 name: plan.name.clone(),
+                bundle: version.index().bundles()[plan.closure[0].bundle]
+                    .name
+                    .clone(),
                 form: plan.converter.name(),
                 document,
                 error,

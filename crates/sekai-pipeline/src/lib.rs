@@ -13,6 +13,7 @@ pub mod naming;
 mod reads;
 pub mod sched;
 pub mod stream;
+pub mod tables;
 pub mod version;
 
 pub use eval::{Evaluation, Fusion, Options, Output, parallel};

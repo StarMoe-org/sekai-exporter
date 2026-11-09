@@ -77,7 +77,7 @@ Each entry of `AdditionalMotionData` gives a `motion/<name>` member, as for a mo
 
 **Fields read:** of the root, `Motions`, `Facials`, `Arms` and `Poses`; of each metadata object, `FadeInTime` and `FadeOutTime`; of each clip, the fields its clip document reads.
 
-Each entry of `Motions` gives a `motion/<name>` member and each entry of `Facials` a `facial/<name>` member. An entry has three fields: `ClipAssetName` is `<name>`, `Clip` refers to the `AnimationClip`, and `Meta` refers to the `MonoBehaviour` whose script is `Assembly-CSharp/Sekai.Live2D.Live2DBuildMotionMetaData` and which gives the fade times.
+Each entry of `Motions` gives a `motion/<name>` member and each entry of `Facials` a `facial/<name>` member. An entry has three fields: `ClipAssetName` is `<name>`, `Clip` refers to the `AnimationClip`, and `Meta` refers to the `MonoBehaviour` whose script is `Assembly-CSharp/Sekai.Live2D.Live2DBuildMotionMetaData` and which gives the fade times. An entry whose `Clip` is null has no motion and gives no member.
 
 Neither form reads game data tables.
 

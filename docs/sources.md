@@ -16,7 +16,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 
 A region can list several sources in order, for example `store` first and `cp` when the store does not have the bundle.
 
-The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the hash of each row a converter reads enters that converter's fingerprints.
+The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the assets built from the tables are evaluated in the [table stage](pipeline.md#table-stage).
 
 ## Region configuration
 

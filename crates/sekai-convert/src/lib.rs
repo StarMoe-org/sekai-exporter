@@ -27,6 +27,7 @@ pub mod model;
 #[cfg(feature = "particles")]
 pub mod particles;
 pub mod roots;
+pub mod tables;
 #[cfg(feature = "text")]
 pub mod text;
 #[cfg(feature = "timeline")]

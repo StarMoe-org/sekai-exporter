@@ -14,12 +14,14 @@ sekai-game.workspace = true
 sekai-codec = { workspace = true, optional = true }
 sekai-encode = { workspace = true, optional = true }
 sekai-format = { workspace = true, optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 claxon = { version = "0.4.3", optional = true }
 image-webp = { version = "0.2.4", optional = true }
 
 [features]
 scenario = []
-episode = ["scenario", "sekai-convert/audio", "sekai-convert/image", "sekai-convert/live2d"]
+episode = ["scenario", "dep:sekai-format", "dep:serde", "dep:serde_json"]
 virtual-live = ["scenario", "sekai-convert/timeline", "sekai-convert/audio"]
 costume = ["sekai-convert/model"]
 storage-view = [

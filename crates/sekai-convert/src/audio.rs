@@ -4,6 +4,7 @@
 
 use sekai_codec::DecodeError;
 use sekai_codec::cri::{Acb, HcaKey, decode_hca, hca_info, read_acb};
+use sekai_format::audio::{CueEntry, CueTable, CueWaveform, FORMAT, VERSION};
 use sekai_unity::Value;
 
 use crate::roots;
@@ -35,7 +36,7 @@ impl Converter for Audio {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(
@@ -56,6 +57,7 @@ impl Converter for Audio {
             .ok_or_else(|| malformed("m_Script is missing or is not a string"))?;
         let acb = read_acb(data)?;
         let mut members = Vec::new();
+        let mut cues = Vec::new();
         for cue in &acb.cues {
             let [name] = cue.cue_names.as_slice() else {
                 return Err(ConvertError::new(
@@ -63,28 +65,58 @@ impl Converter for Audio {
                     format!("cue {} has {} names", cue.cue_id, cue.cue_names.len()),
                 ));
             };
-            let mut waveforms = Vec::new();
-            for &w in &cue.waveforms {
-                if !waveforms.contains(&w) {
-                    waveforms.push(w);
+            let mut waveforms: Vec<(usize, f32)> = Vec::new();
+            for (&w, &volume) in cue.waveforms.iter().zip(&cue.volumes) {
+                if !waveforms.iter().any(|&(seen, _)| seen == w) {
+                    waveforms.push((w, volume));
                 }
             }
             let single = waveforms.len() == 1;
-            for (n, w) in waveforms.into_iter().enumerate() {
+            let mut played = Vec::new();
+            for (n, (w, volume)) in waveforms.into_iter().enumerate() {
                 let role = if single {
                     format!("cue/{name}")
                 } else {
                     format!("cue/{name}/{}", n + 1)
                 };
+                let (pcm, loop_frames) = self.waveform(&acb, w, name)?;
+                played.push(CueWaveform {
+                    role: role.clone(),
+                    frames: pcm.frames() as u64,
+                    sample_rate: pcm.sample_rate(),
+                    channels: pcm.channels(),
+                    loop_frames,
+                    volume,
+                });
                 members.push(Member {
                     role,
-                    content: Content::Audio(self.waveform(&acb, w, name)?),
+                    content: Content::Audio(pcm),
+                });
+            }
+            if !played.is_empty() {
+                cues.push(CueEntry {
+                    name: name.clone(),
+                    waveforms: played,
                 });
             }
         }
         if members.is_empty() {
             return Ok(None);
         }
+        let table = CueTable {
+            format: FORMAT.to_owned(),
+            version: VERSION,
+            cues,
+        };
+        members.push(Member {
+            role: "cues".into(),
+            content: Content::File {
+                extension: "json".into(),
+                bytes: table
+                    .to_bytes()
+                    .map_err(|e| ConvertError::new("malformed", e.to_string()))?,
+            },
+        });
         Ok(Some(Asset { members }))
     }
 
@@ -137,13 +169,13 @@ fn samples(root: ObjectId, cx: &dyn Context) -> Option<u64> {
 }
 
 impl Audio {
-    /// Decodes waveform `index` of `acb`, which cue `cue` plays.
+    /// Decodes waveform `index` of `acb`, which cue `cue` plays, and gives its loop.
     fn waveform(
         &self,
         acb: &Acb<'_>,
         index: usize,
         cue: &str,
-    ) -> Result<sekai_codec::Pcm, ConvertError> {
+    ) -> Result<(sekai_codec::Pcm, Option<[u64; 2]>), ConvertError> {
         let waveform = acb.waveforms.get(index).ok_or_else(|| {
             malformed(format!(
                 "cue {cue} plays waveform {index}, which the sheet lacks"
@@ -178,7 +210,7 @@ impl Audio {
             key,
             subkey: bank.subkey,
         });
-        decode_hca(stream.data, key).map_err(|e| match e {
+        let pcm = decode_hca(stream.data, key).map_err(|e| match e {
             DecodeError::Unsupported { what, .. }
                 if key.is_none() && what.starts_with("HCA stream encrypted") =>
             {
@@ -187,8 +219,9 @@ impl Audio {
                     format!("cue {cue} is encrypted and no HCA key was given"),
                 )
             }
-            e => e.into(),
-        })
+            e => ConvertError::from(e),
+        })?;
+        Ok((pcm, hca_info(stream.data)?.loop_frames))
     }
 }
 

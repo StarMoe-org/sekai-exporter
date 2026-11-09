@@ -11,6 +11,8 @@ const MAX_DEPTH: usize = 8;
 const NO_INDEX: i64 = 0xFFFF;
 const NOTE_ON: u16 = 2000;
 const NOTE_ON_WITH_NO: u16 = 2003;
+/// A volume command: a 16-bit value in hundredths.
+const VOLUME: u16 = 0x0057;
 
 fn malformed(message: impl Into<String>) -> DecodeError {
     DecodeError::Malformed {
@@ -49,7 +51,7 @@ pub struct Waveform {
 }
 
 /// One cue of a cue sheet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Cue {
     /// The names given to the cue.
     pub cue_names: Vec<String>,
@@ -59,10 +61,13 @@ pub struct Cue {
     pub length: u32,
     /// Indices into [`Acb::waveforms`] of everything the cue can play.
     pub waveforms: Vec<usize>,
+    /// The volume each entry of `waveforms` plays at: the volume of the cue sheet times every
+    /// volume command on the way from the cue to the waveform.
+    pub volumes: Vec<f32>,
 }
 
 /// A cue sheet.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Acb<'a> {
     /// The cues in the order of the `CueTable`.
     pub cues: Vec<Cue>,
@@ -79,6 +84,46 @@ struct Tables<'a> {
     block: Option<Table<'a>>,
     track: Option<Table<'a>>,
     event: Option<Table<'a>>,
+    synth_commands: Option<Table<'a>>,
+    sequence_commands: Option<Table<'a>>,
+    track_commands: Option<Table<'a>>,
+}
+
+/// A volume as a product of percentages, exact until it is read.
+#[derive(Debug, Clone, Copy)]
+struct Percent {
+    product: u64,
+    factors: i32,
+}
+
+impl Percent {
+    const ONE: Self = Self {
+        product: 1,
+        factors: 0,
+    };
+
+    fn value(self) -> f64 {
+        self.product as f64 / 100_f64.powi(self.factors)
+    }
+}
+
+/// Calls `visit` with the code and the value of each command of a command list.
+fn each_command(
+    list: &[u8],
+    mut visit: impl FnMut(u16, &[u8]) -> Result<(), DecodeError>,
+) -> Result<(), DecodeError> {
+    let mut position = 0;
+    while position + 3 <= list.len() {
+        let code = be16(&list[position..]) as u16;
+        let size = usize::from(list[position + 2]);
+        position += 3;
+        let value = list
+            .get(position..position + size)
+            .ok_or_else(|| malformed("a command lies past its data"))?;
+        visit(code, value)?;
+        position += size;
+    }
+    Ok(())
 }
 
 fn require<'t, 'a>(table: &'t Option<Table<'a>>, name: &str) -> Result<&'t Table<'a>, DecodeError> {
@@ -106,12 +151,45 @@ fn indices(
         .collect())
 }
 
+type Played = Vec<(usize, Percent)>;
+
 impl Tables<'_> {
-    fn synth(&self, index: usize, depth: usize, out: &mut Vec<usize>) -> Result<(), DecodeError> {
+    /// `volume` times the volume commands of row `row` of `table`, whose `CommandIndex` is a row
+    /// of `commands`.
+    fn times(
+        volume: Percent,
+        commands: Option<&Table<'_>>,
+        table: &Table<'_>,
+        row: usize,
+    ) -> Result<Percent, DecodeError> {
+        let index = table.int(row, "CommandIndex")?.unwrap_or(NO_INDEX);
+        let (Some(commands), true) = (commands, index != NO_INDEX) else {
+            return Ok(volume);
+        };
+        let list = commands.data(index as usize, "Command")?.unwrap_or(&[]);
+        let mut volume = volume;
+        each_command(list, |code, value| {
+            if code == VOLUME && value.len() == 2 {
+                volume.product = volume.product.saturating_mul(be16(value) as u64);
+                volume.factors += 1;
+            }
+            Ok(())
+        })?;
+        Ok(volume)
+    }
+
+    fn synth(
+        &self,
+        index: usize,
+        depth: usize,
+        volume: Percent,
+        out: &mut Played,
+    ) -> Result<(), DecodeError> {
         let table = require(&self.synth, "SynthTable")?;
+        let volume = Self::times(volume, self.synth_commands.as_ref(), table, index)?;
         let items = table.data(index, "ReferenceItems")?.unwrap_or(&[]);
         for item in items.as_chunks::<4>().0 {
-            self.reference(be16(item) as u8, be16(&item[2..]), depth + 1, out)?;
+            self.reference(be16(item) as u8, be16(&item[2..]), depth + 1, volume, out)?;
         }
         Ok(())
     }
@@ -120,10 +198,12 @@ impl Tables<'_> {
         &self,
         index: usize,
         depth: usize,
-        out: &mut Vec<usize>,
+        volume: Percent,
+        out: &mut Played,
     ) -> Result<(), DecodeError> {
         let table = require(&self.sequence, "SequenceTable")?;
-        self.tracks(table, index, depth, out)
+        let volume = Self::times(volume, self.sequence_commands.as_ref(), table, index)?;
+        self.tracks(table, index, depth, volume, out)
     }
 
     /// A block sequence plays its own tracks, then the tracks of each of its blocks.
@@ -131,13 +211,15 @@ impl Tables<'_> {
         &self,
         index: usize,
         depth: usize,
-        out: &mut Vec<usize>,
+        volume: Percent,
+        out: &mut Played,
     ) -> Result<(), DecodeError> {
         let table = require(&self.block_sequence, "BlockSequenceTable")?;
-        self.tracks(table, index, depth, out)?;
+        let volume = Self::times(volume, self.sequence_commands.as_ref(), table, index)?;
+        self.tracks(table, index, depth, volume, out)?;
         for block in indices(table, index, "NumBlocks", "BlockIndex")? {
             let blocks = require(&self.block, "BlockTable")?;
-            self.tracks(blocks, block, depth + 1, out)?;
+            self.tracks(blocks, block, depth + 1, volume, out)?;
         }
         Ok(())
     }
@@ -148,36 +230,37 @@ impl Tables<'_> {
         table: &Table<'_>,
         index: usize,
         depth: usize,
-        out: &mut Vec<usize>,
+        volume: Percent,
+        out: &mut Played,
     ) -> Result<(), DecodeError> {
         for track in indices(table, index, "NumTracks", "TrackIndex")? {
-            self.track(track, depth + 1, out)?;
+            self.track(track, depth + 1, volume, out)?;
         }
         Ok(())
     }
 
-    fn track(&self, index: usize, depth: usize, out: &mut Vec<usize>) -> Result<(), DecodeError> {
+    fn track(
+        &self,
+        index: usize,
+        depth: usize,
+        volume: Percent,
+        out: &mut Played,
+    ) -> Result<(), DecodeError> {
         let table = require(&self.track, "TrackTable")?;
+        let volume = Self::times(volume, self.track_commands.as_ref(), table, index)?;
         let event = table.int(index, "EventIndex")?.unwrap_or(NO_INDEX);
         if event == NO_INDEX {
             return Ok(());
         }
         let events = require(&self.event, "TrackEventTable")?;
         let command = events.data(event as usize, "Command")?.unwrap_or(&[]);
-        let mut position = 0;
-        while position + 3 <= command.len() {
-            let code = be16(&command[position..]) as u16;
-            let size = usize::from(command[position + 2]);
-            position += 3;
-            let value = command
-                .get(position..position + size)
-                .ok_or_else(|| malformed("a track command lies past its data"))?;
-            if matches!(code, NOTE_ON | NOTE_ON_WITH_NO) && size >= 4 {
-                self.reference(be16(value) as u8, be16(&value[2..]), depth + 1, out)?;
+        each_command(command, |code, value| {
+            if matches!(code, NOTE_ON | NOTE_ON_WITH_NO) && value.len() >= 4 {
+                let (kind, target) = (be16(value) as u8, be16(&value[2..]));
+                self.reference(kind, target, depth + 1, volume, out)?;
             }
-            position += size;
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// Adds what a reference leads to. Kinds that hold no waveform are skipped.
@@ -186,16 +269,17 @@ impl Tables<'_> {
         kind: u8,
         index: usize,
         depth: usize,
-        out: &mut Vec<usize>,
+        volume: Percent,
+        out: &mut Played,
     ) -> Result<(), DecodeError> {
         if depth > MAX_DEPTH {
             return Err(malformed("references are nested too deeply"));
         }
         match kind {
-            1 => out.push(index),
-            2 => self.synth(index, depth, out)?,
-            3 => self.sequence(index, depth, out)?,
-            8 => self.block_sequence(index, depth, out)?,
+            1 => out.push((index, volume)),
+            2 => self.synth(index, depth, volume, out)?,
+            3 => self.sequence(index, depth, volume, out)?,
+            8 => self.block_sequence(index, depth, volume, out)?,
             _ => {}
         }
         Ok(())
@@ -262,7 +346,15 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
         Some(table) => Some(table),
         None => header.table(0, "CommandTable")?,
     };
+    let commands = |name: &str| match header.table(0, name)? {
+        Some(table) => Ok(Some(table)),
+        None => header.table(0, "CommandTable"),
+    };
+    let sheet_volume = f64::from(header.float(0, "AcbVolume")?.unwrap_or(1.0));
     let tables = Tables {
+        synth_commands: commands("SynthCommandTable")?,
+        sequence_commands: commands("SeqCommandTable")?,
+        track_commands: commands("TrackCommandTable")?,
         synth: header.table(0, "SynthTable")?,
         sequence: header.table(0, "SequenceTable")?,
         block_sequence: header.table(0, "BlockSequenceTable")?,
@@ -285,15 +377,19 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
         let mut played = Vec::new();
         let kind = cue_table.int(row, "ReferenceType")?.unwrap_or(0) as u8;
         let index = cue_table.int(row, "ReferenceIndex")?.unwrap_or(0) as usize;
-        tables.reference(kind, index, 0, &mut played)?;
-        if let Some(&bad) = played.iter().find(|&&w| w >= waveforms.len()) {
+        tables.reference(kind, index, 0, Percent::ONE, &mut played)?;
+        if let Some(&(bad, _)) = played.iter().find(|&&(w, _)| w >= waveforms.len()) {
             return Err(malformed(format!("a cue refers to waveform {bad}")));
         }
         cues.push(Cue {
             cue_names: names.remove(&row).unwrap_or_default(),
             cue_id: cue_table.int(row, "CueId")?.unwrap_or(0) as u32,
             length: cue_table.int(row, "Length")?.unwrap_or(0) as u32,
-            waveforms: played,
+            waveforms: played.iter().map(|&(waveform, _)| waveform).collect(),
+            volumes: played
+                .iter()
+                .map(|&(_, volume)| (sheet_volume * volume.value()) as f32)
+                .collect(),
         });
     }
 

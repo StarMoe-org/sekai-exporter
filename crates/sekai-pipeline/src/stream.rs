@@ -595,6 +595,7 @@ fn evaluate_segment(
                 gathered.outputs.push((
                     Output {
                         name: root.planned.name.clone(),
+                        bundle: index.bundles()[root.planned.closure[0].bundle].name.clone(),
                         form: root.planned.converter.name(),
                         document,
                         error: Some(code),

@@ -4,9 +4,12 @@
 //! Consumers depend on this crate to read the published output.
 
 pub mod asset;
+pub mod audio;
 pub mod clip;
+pub mod episode;
 pub mod identity;
 pub mod live2d;
 pub mod publication;
+pub mod story;
 
 pub use asset::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};

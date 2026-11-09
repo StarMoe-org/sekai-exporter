@@ -227,9 +227,9 @@ fn motions(
                 .ok_or_else(|| malformed(format!("{field_name} is not a reference")))?;
             cx.resolve(root, reference)
         };
-        let clip = referenced("Clip")?.ok_or_else(|| {
-            ConvertError::new("missing_object", format!("the {kind} {name} has no clip"))
-        })?;
+        let Some(clip) = referenced("Clip")? else {
+            continue;
+        };
         let (fade_in, fade_out) = match referenced("Meta")? {
             None => (None, None),
             Some(meta) => {

@@ -22,7 +22,7 @@ impl Converter for Sprite {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(
@@ -54,10 +54,10 @@ impl Converter for Sprite {
             Some(Asset { members }) => members.into_iter().next().map(|m| m.content),
             None => None,
         };
-        let texture_rect = Rect::read(field(rd, "textureRect")?, "m_RD.textureRect")?;
+        let rect = Rect::read(field(fields, "m_Rect")?, "m_Rect")?;
         let layout = Layout {
-            rect: Rect::read(field(fields, "m_Rect")?, "m_Rect")?,
-            texture_rect,
+            rect,
+            texture_rect: Rect::read(field(rd, "textureRect")?, "m_RD.textureRect")?,
             texture_rect_offset: vector(field(rd, "textureRectOffset")?, "m_RD.textureRectOffset")?,
             pivot: vector(field(fields, "m_Pivot")?, "m_Pivot")?,
             pixels_per_unit: float(field(fields, "m_PixelsToUnits")?, "m_PixelsToUnits")?,
@@ -70,12 +70,12 @@ impl Converter for Sprite {
                     content: match image {
                         Some(Content::Image(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &texture_rect)?;
+                                crop(image.width(), image.height(), image.pixels(), &rect)?;
                             Content::Image(Surface::new(w, h, pixels)?)
                         }
                         Some(Content::HdrImage(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &texture_rect)?;
+                                crop(image.width(), image.height(), image.pixels(), &rect)?;
                             Content::HdrImage(HdrSurface::new(w, h, pixels)?)
                         }
                         _ => return Err(malformed("the sprite's texture holds no image")),
@@ -140,7 +140,7 @@ fn crop<T: Copy>(
     let (w, h) = (f64::from(width), f64::from(height));
     if !(0.0 <= x0 && x0 < x1 && x1 <= w && 0.0 <= y0 && y0 < y1 && y1 <= h) {
         return Err(malformed(format!(
-            "the texture rectangle ({x0}, {y0}) to ({x1}, {y1}) is not inside the {w} x {h} texture"
+            "the rectangle ({x0}, {y0}) to ({x1}, {y1}) is not inside the {w} x {h} texture"
         )));
     }
     let (x0, x1, y0, y1) = (x0 as usize, x1 as usize, y0 as usize, y1 as usize);

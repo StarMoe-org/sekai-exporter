@@ -121,13 +121,13 @@ fn key(n: u64) -> Value {
     ])
 }
 
-fn sprite(atlas: i64, settings: i64, alpha: i64, texture_rect: Value) -> Object {
+fn sprite(atlas: i64, settings: i64, alpha: i64, sprite_rect: Value) -> Object {
     object(
         1,
         213,
         s(vec![
             ("m_Name", Value::String("icon".into())),
-            ("m_Rect", rect(0.0, 0.0, 4.0, 3.0)),
+            ("m_Rect", sprite_rect),
             ("m_Pivot", vector(0.5, 0.0)),
             (
                 "m_Border",
@@ -146,7 +146,7 @@ fn sprite(atlas: i64, settings: i64, alpha: i64, texture_rect: Value) -> Object 
                 s(vec![
                     ("texture", pptr(2)),
                     ("alphaTexture", pptr(alpha)),
-                    ("textureRect", texture_rect),
+                    ("textureRect", rect(2.0, 1.0, 1.0, 1.0)),
                     ("textureRectOffset", vector(1.0, 0.0)),
                     ("settingsRaw", i(settings)),
                 ]),
@@ -173,7 +173,7 @@ fn members(asset: Asset) -> Vec<(String, Content)> {
 }
 
 #[test]
-fn a_sprite_is_its_rounded_texture_rectangle_and_its_layout() {
+fn a_sprite_is_its_rounded_rectangle_and_its_layout() {
     // x 1..3.4 rounds to columns 1 and 2; y 0.5..2.5 rounds to 0..2, the bottom two rows.
     let file = File(vec![
         sprite(3, 64, 0, rect(1.0, 0.5, 2.4, 2.0)),
@@ -198,8 +198,8 @@ fn a_sprite_is_its_rounded_texture_rectangle_and_its_layout() {
     assert_eq!(extension, "json");
     assert_eq!(
         std::str::from_utf8(bytes).unwrap(),
-        "{\"rect\":{\"x\":0,\"y\":0,\"width\":4,\"height\":3},\
-         \"texture_rect\":{\"x\":1,\"y\":0.5,\"width\":2.4,\"height\":2},\
+        "{\"rect\":{\"x\":1,\"y\":0.5,\"width\":2.4,\"height\":2},\
+         \"texture_rect\":{\"x\":2,\"y\":1,\"width\":1,\"height\":1},\
          \"texture_rect_offset\":{\"x\":1,\"y\":0},\"pivot\":{\"x\":0.5,\"y\":0},\
          \"pixels_per_unit\":100,\"border\":{\"left\":1,\"bottom\":0,\"right\":1,\"top\":0.25}}"
     );

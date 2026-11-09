@@ -48,8 +48,8 @@ pub struct Candidate<'a> {
 impl Candidate<'_> {
     fn rank(&self) -> (u8, &str) {
         match self.class_id {
-            SPRITE => (0, ""),
-            TEXTURE_2D => (1, ""),
+            TEXTURE_2D => (0, ""),
+            SPRITE => (1, ""),
             _ => (2, self.class),
         }
     }
@@ -151,7 +151,7 @@ mod tests {
             candidate("a", "Texture2D", 2),
             candidate("a", "Sprite", 3),
         ];
-        assert_eq!(names(&c), [Some("a@Mesh"), Some("a@Texture2D"), Some("a")]);
+        assert_eq!(names(&c), [Some("a@Mesh"), Some("a"), Some("a@Sprite")]);
     }
 
     #[test]

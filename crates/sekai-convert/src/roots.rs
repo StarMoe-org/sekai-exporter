@@ -26,6 +26,10 @@ const FACIAL_TABLES: &[&str] = &[
     "Assembly-CSharp/Sekai.Mysekai.NPCAvatarDefaultFacialDataList",
 ];
 
+/// The package directory of the overhead items of the MySekai characters.
+const EMOTICONS: &str = "/mysekai/effect/emoticon/";
+const GAME_OBJECT: i32 = 1;
+
 /// The container path ending of a cue sheet.
 const CUE_SHEET: &str = ".acb.bytes";
 /// The container path ending of a USM file.
@@ -90,6 +94,11 @@ pub fn font(object: &ObjectIndex, _script: Option<&str>, _paths: &[String]) -> b
 /// The roots of the `facial-table` form.
 pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == MONO_BEHAVIOUR && script.is_some_and(|name| FACIAL_TABLES.contains(&name))
+}
+
+/// The roots of the `emoticon` form.
+pub fn emoticon(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == GAME_OBJECT && paths.iter().any(|path| path.contains(EMOTICONS))
 }
 
 /// The roots of the `live2d-model` form.

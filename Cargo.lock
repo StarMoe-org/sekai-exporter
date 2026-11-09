@@ -940,6 +940,7 @@ dependencies = [
 name = "sekai-mysekai"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "sekai-convert",
  "sekai-format",
  "sekai-game",

@@ -64,9 +64,8 @@ def random_block(rng):
             low |= 0x1FFFFFFFFFFFFF << 12
         else:
             low |= rng.getrandbits(52) << 12
-        color = value >> 64 & 0x7BFF_7BFF_7BFF_7BFF
-        return (color << 64 | low).to_bytes(16, "little")
-    if kind < 0.9:
+        value = value >> 64 << 64 | low
+    elif kind < 0.9:
         hdr = [2, 3, 7, 11, 14, 15]
         partitions = value >> 11 & 3
         if partitions == 0:
@@ -74,6 +73,8 @@ def random_block(rng):
         else:
             # All partitions share one format.
             value = value & ~(0x3F << 23) | rng.choice(hdr) << 25
+    if value & 0x1FF == 0x1FC:
+        value &= (1 << 64) - 1 | 0x7BFF_7BFF_7BFF_7BFF << 64
     return value.to_bytes(16, "little")
 
 

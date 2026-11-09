@@ -244,8 +244,11 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         .map_err(|e| format!("{}: {e}", options.config.display()))?;
     let region = Region::load(region_name, &config).map_err(|e| e.to_string())?;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
-    let source =
-        cdn::open(region, &Secrets::new(options.secrets.clone())).map_err(|e| e.to_string())?;
+    let secrets = Secrets::new(options.secrets.clone());
+    let hca_key = secrets
+        .hca_key(&region.secrets)
+        .map_err(|e| e.to_string())?;
+    let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
 
     let directory = |name: &str| {
         LocalStore::open(options.output.join(name))
@@ -317,7 +320,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 
     let evaluation = evaluate(
         &version,
-        &converters(),
+        &converters(hca_key),
         &store,
         &derivations,
         monitor,

@@ -35,7 +35,7 @@
         "bundle": "https://{host}/{application_version}/{download_path}/{bundle}"
       },
       "client": { "application_version": "1.0.0" },
-      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV" },
+      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV", "hca": "SEKAI_HCA_KEY" },
       "feed": "https://feed.example.invalid/versions.json",
       "network": { "concurrency": 8, "rate_limit": 20, "retries": 4, "back_off_ms": 500 }
     }
@@ -93,6 +93,7 @@ data version 与数据表修订号是两个字段，因为来源不同：前者�
 - 密钥的值永不写入日志、报告、目录或资产文档。报告只记录所用密钥的名称，不记录其值。
 - 访客账号由部署方通过一条单独的命令创建一次，此后作为密钥保存并复用。运行过程中不创建账号。
 - 配置中只记录每个密钥的名称，其值须由使用者从自己的客户端取得，并写成十六进制。
+- `secrets.hca` 可选，指定加密 HCA 音频的密钥名。密钥是一个 64 位数，写成 1 到 16 位十六进制数字。音频转换器用它和每个 cue sheet 中存的子密钥解密。没有它时，加密音频报告错误 `missing_key`。
 
 ## 网络
 

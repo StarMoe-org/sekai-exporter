@@ -567,13 +567,35 @@ fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Err
 /// The value of the secret `name`: the environment variable of that name, or else the file of that
 /// name in `secrets`, without surrounding whitespace.
 /// The converters that build assets from game data tables.
-#[cfg(feature = "episode")]
 fn table_converters() -> Vec<Box<dyn TableConverter>> {
+    let mut converters = episode_converters();
+    converters.extend(mysekai_converters());
+    converters
+}
+
+#[cfg(feature = "episode")]
+fn episode_converters() -> Vec<Box<dyn TableConverter>> {
     vec![Box::new(sekai_moesekai::episode::Episode)]
 }
 
 #[cfg(not(feature = "episode"))]
-fn table_converters() -> Vec<Box<dyn TableConverter>> {
+fn episode_converters() -> Vec<Box<dyn TableConverter>> {
+    Vec::new()
+}
+
+#[cfg(feature = "mysekai")]
+fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
+    vec![
+        Box::new(sekai_mysekai::alone::AloneActions),
+        Box::new(sekai_mysekai::communication::CommunicationActions),
+        Box::new(sekai_mysekai::fixtures::Fixtures),
+        Box::new(sekai_mysekai::talks::FixtureTalks),
+        Box::new(sekai_mysekai::talks::Talks),
+    ]
+}
+
+#[cfg(not(feature = "mysekai"))]
+fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
     Vec::new()
 }
 

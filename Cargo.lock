@@ -941,7 +941,10 @@ name = "sekai-mysekai"
 version = "0.0.0"
 dependencies = [
  "sekai-convert",
+ "sekai-format",
  "sekai-game",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

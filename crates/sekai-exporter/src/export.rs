@@ -75,6 +75,23 @@ fn text() -> Vec<Box<dyn Converter>> {
     vec![Absent::boxed("text", text), Absent::boxed("font", font)]
 }
 
+#[cfg(feature = "live2d")]
+fn live2d() -> Vec<Box<dyn Converter>> {
+    vec![
+        Box::new(sekai_convert::live2d::Model),
+        Box::new(sekai_convert::live2d::Motions),
+    ]
+}
+
+#[cfg(not(feature = "live2d"))]
+fn live2d() -> Vec<Box<dyn Converter>> {
+    use sekai_convert::roots::{Absent, live2d_model, live2d_motions};
+    vec![
+        Absent::boxed("live2d-model", live2d_model),
+        Absent::boxed("live2d-motions", live2d_motions),
+    ]
+}
+
 #[cfg(feature = "scenario")]
 fn scenario() -> Vec<Box<dyn Converter>> {
     vec![Box::new(sekai_moesekai::scenario::Scenario)]
@@ -88,10 +105,17 @@ fn scenario() -> Vec<Box<dyn Converter>> {
 
 /// Every converter of this build. `hca_key` decrypts encrypted HCA audio.
 pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
-    [image(), audio(hca_key), video(), text(), scenario()]
-        .into_iter()
-        .flatten()
-        .collect()
+    [
+        image(),
+        audio(hca_key),
+        video(),
+        text(),
+        live2d(),
+        scenario(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(feature = "catalog-db")]

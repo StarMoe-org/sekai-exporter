@@ -1,0 +1,103 @@
+# Clip 文档
+
+[English](clip-documents.md)
+
+Clip 文档按引擎的存储方式保存一个 Unity `AnimationClip` 的曲线，并附有说明每条曲线驱动什么的绑定，以及 clip 调用的事件。按本文的规则求值文档，得到的值与引擎从 clip 得到的值相同。携带动画的资产形式（例如 [Live2D 形式](live2d.zh-CN.md)）把它作为成员使用，它本身不是一种资产形式。
+
+## 1. 运行时
+
+按游戏语义播放游戏动画 clip 的程序。首个运行时是 Moesekai 的 Live2D 查看器中的 Live2D 运行时：它以 Unity 绑定所用的哈希把每条曲线绑定到模型参数，并按 Unity 的方式求值（参见[Live2D 动作](../live2d-motion.zh-CN.md)）。
+
+## 2. 内容
+
+```json
+{
+  "format": "clip",
+  "version": 1,
+  "name": "w-normal01-nod",
+  "sample_rate": 60.0,
+  "start_time": 0.0,
+  "stop_time": 2.6,
+  "loop": false,
+  "curves": [
+    {
+      "path": 397467875,
+      "attribute": 3702945584,
+      "class_id": 114,
+      "script": "Live2D.Cubism/Live2D.Cubism.Core.CubismParameter",
+      "custom_type": 0,
+      "kind": "streamed",
+      "segments": [[-3.4028235e+38, 0.0, 0.0, 0.0, 0.0], [0.0, 1.5, -2.25, 0.0, 0.0]]
+    },
+    { "path": 1622659189, "attribute": 3702945584, "class_id": 114, "script": "…", "custom_type": 0, "kind": "constant", "value": 1.0 }
+  ],
+  "events": [
+    { "time": 0.0, "function": "OnLive2DInvokeUserData", "data": "eyeblink,0.2,0.79,0.24", "float": 0.0, "int": 0 }
+  ]
+}
+```
+
+| 键 | 值 |
+|---|---|
+| `format`、`version` | `"clip"` 与本文档格式的版本 |
+| `name` | `m_Name` |
+| `sample_rate` | `m_SampleRate`，单位为帧每秒 |
+| `start_time`、`stop_time` | `m_MuscleClip.m_StartTime` 与 `m_StopTime`，单位为秒 |
+| `loop` | `m_MuscleClip.m_LoopTime`：clip 播到末尾后是否重新开始 |
+| `curves` | `m_ClipBindingConstant.genericBindings` 的每个绑定一项，按存储顺序 |
+| `events` | `m_Events`，按存储顺序 |
+
+`curves` 的每一项写明其绑定并保存其曲线：
+
+| 键 | 值 |
+|---|---|
+| `path` | 绑定的 `path`：目标路径的 CRC-32，例如 `crc32("Parameters/ParamAngleX")` |
+| `attribute` | 绑定的 `attribute`：属性名的 CRC-32，例如 `crc32("Value")` |
+| `class_id` | 绑定的 `typeID`：曲线所驱动组件的类 |
+| `script` | 绑定到脚本组件时为其脚本，写作 `"<程序集>/<命名空间>.<类>"`；否则为 `null` |
+| `custom_type` | 绑定的 `customType` |
+| `kind` | `"streamed"`、`"dense"` 或 `"constant"`，并带有下表中的键 |
+
+| 种类 | 键 | 时刻 `t` 的值 |
+|---|---|---|
+| `streamed` | `segments`：每段为 `[t₀, a, b, c, d]`，按 `t₀` 递增 | 取 `t₀ ≤ t` 的最后一段：`((a·δ + b)·δ + c)·δ + d`，其中 `δ = t − t₀` |
+| `dense` | `begin_time`、`sample_rate`、`samples` | 令 `p = max(0, (t − begin_time) · sample_rate)`、`i = min(⌊p⌋, n − 1)`、`j = min(i + 1, n − 1)`：`samples[i] + (samples[j] − samples[i]) · clamp(p − i, 0, 1)` |
+| `constant` | `value` | `value` |
+
+全部运算均为 32 位浮点运算，按所写顺序进行。streamed 曲线的第一段起点为 −3.4028235 × 10³⁸，即最小的 32 位数，与 Unity 的存储相同，因此每个时刻都有对应的段。时刻指 clip 时间，即播放位置加上 `start_time`。
+
+`events` 的每一项有以下键：`time`（秒）、`function`（`functionName`）、`data`（字符串参数）、`float`（`floatParameter`）与 `int`（`intParameter`）。
+
+## 3. 来源
+
+clip 数据为 `m_MuscleClip.m_Clip.data`。其曲线依次编号：先是 streamed 曲线，然后是 dense 曲线，最后是 constant 曲线；第 *k* 条曲线属于第 *k* 个绑定。
+
+- **streamed 曲线**（`m_StreamedClip`）：`data` 是一串 32 位字，按帧读取。一帧依次为时间（32 位浮点数）、键数 *n*（32 位整数）与 *n* 个键。一个键依次为曲线序号（32 位整数）与系数 `a`、`b`、`c`、`d`（32 位浮点数）。一个键在该帧的时间开始其曲线的一段。Unity 以一个时间为 +∞、不含键的帧结束这一串，该帧不写入文档。
+- **dense 曲线**（`m_DenseClip`）：`m_SampleArray` 逐帧保存 `m_FrameCount` 帧，每帧 `m_CurveCount` 个值。第 *i* 条 dense 曲线的采样是每帧的第 *i* 个值。`begin_time` 为 dense clip 的 `m_BeginTime`，`sample_rate` 为其 `m_SampleRate`。
+- **constant 曲线**（`m_ConstantClip`）：`data` 的第 *i* 个值即第 *i* 条 constant 曲线。
+
+绑定的 `script` 取自它所引用的 `MonoScript`：去掉 `.dll` 的 `m_AssemblyName`、`m_Namespace` 与 `m_ClassName`。
+
+**文档以外的结果：**
+
+| 情况 | 结果 |
+|---|---|
+| `m_Legacy` 或 `m_Compressed` 为真，或旧式表示的某个曲线列表（`m_FloatCurves`、`m_PPtrCurves`、`m_PositionCurves` 等）不为空 | 错误 `unsupported` |
+| 某个绑定指向 `Transform`（类 4），或是引用、整数或序列化引用曲线；`pptrCurveMapping` 不为空；或 streamed clip 含离散曲线 | 错误 `unsupported` |
+| `m_HasGenericRootTransform` 或 `m_HasMotionFloatCurves` 为真，或 `m_CycleOffset` 不为 0 | 错误 `unsupported` |
+| 某个事件带有对象参数 | 错误 `unsupported` |
+| 曲线数与绑定数不同、某个键指向不存在的曲线、帧时间不递增、dense 采样数组长度不对，或除最后一帧时间以外的某个值不是有限数 | 错误 `malformed` |
+
+指向 `Transform` 的绑定每个驱动多条曲线，留待后续版本。
+
+## 4. 容器
+
+UTF-8 JSON，无多余空白，键的顺序与上表相同。每个数写成能读回同一个 32 位浮点数的最短十进制形式，可能带指数；`path` 与 `attribute` 是无符号 32 位整数。
+
+## 5. 正确性
+
+文档原样保留求值所读的每个 clip 数据值，求值规则即 Unity 的 streamed、dense 与 constant clip 的规则。持续集成用合成数值构造 clip，检查解码出的段与采样等于构造时的数值，检查上述各种情况，并固定一份文档的字节。在真实资源包上，文档的每条曲线在查看器帧时钟的每一帧及相邻两帧的中点求值，所得值与对同一 clip 的独立解码逐位相等；[`tools/compare-live2d-motion`](../../tools/compare-live2d-motion/README.zh-CN.md) 以同样的方式求值所存的 clip。
+
+## 6. 版本
+
+格式版本：1。上述任何内容的改动都会改变版本。

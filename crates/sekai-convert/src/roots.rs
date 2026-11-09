@@ -12,6 +12,12 @@ pub(crate) const TEXTURE_3D: i32 = 117;
 pub(crate) const TEXTURE_2D_ARRAY: i32 = 187;
 const SPRITE: i32 = 213;
 const FONT: i32 = 128;
+const MONO_BEHAVIOUR: i32 = 114;
+
+/// The script of the build data of a Live2D model.
+const LIVE2D_MODEL_DATA: &str = "Assembly-CSharp/Sekai.Live2D.Live2DBuildModelData";
+/// The script of the build data of a set of Live2D motions.
+const LIVE2D_MOTION_DATA: &str = "Assembly-CSharp/Sekai.Live2D.Live2DBuildMotionData";
 
 /// The container path ending of a cue sheet.
 const CUE_SHEET: &str = ".acb.bytes";
@@ -72,6 +78,16 @@ pub fn text(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bo
 /// The roots of the `font` form.
 pub fn font(object: &ObjectIndex, _script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == FONT
+}
+
+/// The roots of the `live2d-model` form.
+pub fn live2d_model(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR && script == Some(LIVE2D_MODEL_DATA)
+}
+
+/// The roots of the `live2d-motions` form.
+pub fn live2d_motions(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR && script == Some(LIVE2D_MOTION_DATA)
 }
 
 /// Stands for a converter that is not compiled into this build. Each asset the converter would

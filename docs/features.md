@@ -24,13 +24,13 @@ In `sekai-convert`, general to Unity content:
 | `video` | CRI USM files into MP4 with H.264 and AAC, through the `ffmpeg` program with `libx264`, which is not distributed with the exporter |
 | `model` | Prefab hierarchies, meshes, skins and materials into glTF |
 | `animation` | `AnimationClip` into curve documents, and into glTF animation where the bindings allow it |
-| `live2d` | Live2D Cubism models and their motions |
+| `live2d` | Live2D Cubism models and their motion sets, in the [Live2D forms](spec/live2d.md) |
 | `ugui` | UI prefabs into layout documents |
 | `text` | `TextAsset` and fonts |
 | `timeline` | Timeline assets into timeline documents |
 | `particles` | Particle systems into particle documents |
 
-The features `model`, `animation`, `live2d`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. `audio` does not convert `AudioClip` yet.
+The features `model`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. `animation` decodes `AnimationClip` into the [clip documents](spec/clip-documents.md) that the Live2D forms contain, and produces no assets of its own yet. `audio` does not convert `AudioClip` yet.
 
 In `sekai-moesekai`, specific to this game, for the default consumer:
 

@@ -16,7 +16,7 @@ sekai-unity.workspace = true
 sekai-format.workspace = true
 sekai-catalog.workspace = true
 sekai-game.workspace = true
-sekai-convert = { workspace = true, features = ["image", "audio", "video", "text"] }
+sekai-convert = { workspace = true, features = ["image", "audio", "video", "text", "live2d"] }
 sekai-pipeline.workspace = true
 sekai-moesekai = { workspace = true, features = ["scenario"] }
 sha2 = "0.11.1"

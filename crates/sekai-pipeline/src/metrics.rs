@@ -9,8 +9,9 @@ pub trait Span {
     /// Adds to the bytes the work has read and written.
     fn bytes(&mut self, read: u64, written: u64);
 
-    /// Reports the estimated and the measured peak memory of the work, in bytes.
-    fn memory(&mut self, _estimated: u64, _actual: u64) {}
+    /// Reports the estimated peak memory of the work and the decoded size of its members, in
+    /// bytes.
+    fn memory(&mut self, _estimated: u64, _decoded: u64) {}
 }
 
 /// Receives the work of an evaluation.

@@ -29,7 +29,7 @@ pub(crate) struct Cost {
     pub(crate) read: u64,
     pub(crate) written: u64,
     pub(crate) estimated_memory: u64,
-    pub(crate) actual_memory: u64,
+    pub(crate) decoded_memory: u64,
 }
 
 /// Whether a stage is work on a derivation, and the kind of the derivation it names.
@@ -250,8 +250,8 @@ impl Span for MonitorSpan<'_> {
         self.written += written;
     }
 
-    fn memory(&mut self, estimated: u64, actual: u64) {
-        self.memory = (estimated, actual);
+    fn memory(&mut self, estimated: u64, decoded: u64) {
+        self.memory = (estimated, decoded);
     }
 }
 
@@ -281,7 +281,7 @@ impl Drop for MonitorSpan<'_> {
             cost.read += self.read;
             cost.written += self.written;
             cost.estimated_memory = cost.estimated_memory.max(self.memory.0);
-            cost.actual_memory = cost.actual_memory.max(self.memory.1);
+            cost.decoded_memory = cost.decoded_memory.max(self.memory.1);
         }
         let mut totals = self.monitor.totals.lock().unwrap();
         let total = totals

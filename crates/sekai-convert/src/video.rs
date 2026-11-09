@@ -20,8 +20,9 @@ const ADX: u32 = 2;
 const HCA: u32 = 4;
 /// The start code an MPEG-1 video stream begins with.
 const SEQUENCE_HEADER: [u8; 4] = [0, 0, 1, 0xB3];
-/// The memory of the encoder process, which runs beside the evaluator.
-const ENCODER_MEMORY: u64 = 256 << 20;
+/// The memory of the encoder process, which runs beside the evaluator: its peak grows with the
+/// frame size, and this covers frames of 2.8 megapixels.
+const ENCODER_MEMORY: u64 = 400 << 20;
 
 /// USM files, as a video with its audio.
 #[derive(Debug, Clone, Copy, Default)]

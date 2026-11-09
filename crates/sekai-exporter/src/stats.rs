@@ -19,11 +19,11 @@ struct Kind {
     written: u64,
 }
 
-/// How far an estimate is from what was measured: at least 1, and 1 when they agree.
+/// How far an estimate is from the decoded size: at least 1, and 1 when they agree.
 fn deviation(row: &CostRow) -> Option<f64> {
-    let (estimated, actual) = (row.estimated_memory, row.actual_memory);
-    (estimated > 0 && actual > 0)
-        .then(|| estimated.max(actual) as f64 / estimated.min(actual) as f64)
+    let (estimated, decoded) = (row.estimated_memory, row.decoded_memory);
+    (estimated > 0 && decoded > 0)
+        .then(|| estimated.max(decoded) as f64 / estimated.min(decoded) as f64)
 }
 
 /// The report of `rows`, which are in key order.
@@ -104,7 +104,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
 mod tests {
     use super::*;
 
-    fn row(kind: &str, subject: &str, cpu_us: u64, estimated: u64, actual: u64) -> CostRow {
+    fn row(kind: &str, subject: &str, cpu_us: u64, estimated: u64, decoded: u64) -> CostRow {
         CostRow {
             kind: kind.to_owned(),
             subject: subject.to_owned(),
@@ -113,7 +113,7 @@ mod tests {
             read: 1 << 20,
             written: 2 << 20,
             estimated_memory: estimated,
-            actual_memory: actual,
+            decoded_memory: decoded,
         }
     }
 

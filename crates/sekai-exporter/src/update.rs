@@ -537,7 +537,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
                 read: cost.read,
                 written: cost.written,
                 estimated_memory: cost.estimated_memory,
-                actual_memory: cost.actual_memory,
+                decoded_memory: cost.decoded_memory,
             })?;
         }
         batch.commit()

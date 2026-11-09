@@ -239,7 +239,7 @@ fn the_cost_of_a_movie_counts_its_segments() {
         class: CostClass::Wide,
         memory,
     };
-    let encoder = 256 << 20;
+    let encoder = 400 << 20;
     assert_eq!(
         Video.cost(id(1), &object, &bundle),
         wide(4 * 3 * 1000 + encoder)

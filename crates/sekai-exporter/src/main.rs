@@ -88,7 +88,7 @@ commands:
       are written to <output>/_payloads/<aa>/<sha256>.bin.
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the
-      converters whose memory estimates are furthest from what was measured.
+      converters whose memory estimates are furthest from their decoded size.
 
   --threads sets how many conversions and encodings run at once; a video
   encoding counts as two. --memory sets the memory the process may use, such

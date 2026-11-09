@@ -103,8 +103,8 @@ pub struct CostRow {
     pub written: u64,
     /// The estimated peak memory in bytes.
     pub estimated_memory: u64,
-    /// The measured peak memory in bytes.
-    pub actual_memory: u64,
+    /// The decoded size of the members in bytes.
+    pub decoded_memory: u64,
 }
 
 /// The last fetch of a bundle.
@@ -223,7 +223,7 @@ impl Catalog {
         for entry in table.range::<(&str, &str)>(..).map_err(other)? {
             let (key, value) = entry.map_err(other)?;
             let (kind, subject) = key.value();
-            let (wall_us, cpu_us, read, written, estimated_memory, actual_memory) = value.value();
+            let (wall_us, cpu_us, read, written, estimated_memory, decoded_memory) = value.value();
             rows.push(CostRow {
                 kind: kind.to_owned(),
                 subject: subject.to_owned(),
@@ -232,7 +232,7 @@ impl Catalog {
                 read,
                 written,
                 estimated_memory,
-                actual_memory,
+                decoded_memory,
             });
         }
         Ok(rows)
@@ -353,7 +353,7 @@ impl Batch {
                     row.read,
                     row.written,
                     row.estimated_memory,
-                    row.actual_memory,
+                    row.decoded_memory,
                 ),
             )
             .map_err(other)?;

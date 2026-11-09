@@ -35,6 +35,8 @@ pub fn converters() -> Vec<Box<dyn Converter>> {
         Box::new(sekai_convert::live2d::Model),
         Box::new(sekai_convert::live2d::Motions),
         Box::new(sekai_moesekai::scenario::Scenario),
+        Box::new(sekai_moesekai::costume::CostumeModel),
+        Box::new(sekai_moesekai::costume::CostumeMotion),
     ]
 }
 

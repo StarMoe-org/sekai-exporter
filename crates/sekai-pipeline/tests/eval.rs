@@ -1,14 +1,20 @@
 //! Evaluating the Unity-built fixtures: outputs, determinism and reuse.
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use sekai_catalog::LocalStore;
 use sekai_convert::image::Texture;
-use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex};
+use sekai_convert::{
+    Asset, Context, ConvertError, Converter, Cost, CostClass, ObjectId, ObjectIndex,
+};
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
-use sekai_pipeline::{BundleInput, Evaluation, MemoryDerivations, Version, evaluate};
+use sekai_pipeline::{
+    BundleInput, Evaluation, MemoryDerivations, Options, Version, evaluate, evaluate_with,
+};
 use sekai_unity::NoBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -132,5 +138,186 @@ fn a_failed_asset_is_recorded_and_evaluated_again() {
     let second = run_with(Box::new(Broken), &root, 2, &derivations);
     assert_eq!(second.reused, 0);
     assert_eq!(second.converted, first.converted);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn run_options(
+    converter: Box<dyn Converter>,
+    root: &Path,
+    options: &Options,
+    derivations: &MemoryDerivations,
+) -> Evaluation {
+    let (version, errors) = Version::open(
+        vec![input("fixture_scene"), input("fixture_data")],
+        &NoBlockCache,
+    );
+    assert!(errors.is_empty(), "{errors:?}");
+    let store = LocalStore::open(root).unwrap();
+    evaluate_with(
+        &version,
+        &[converter],
+        &store,
+        derivations,
+        &NoRecorder,
+        options,
+    )
+    .unwrap()
+}
+
+#[test]
+fn outputs_do_not_depend_on_how_the_run_is_scheduled() {
+    let plain = Options {
+        plain: true,
+        ..Options::threads(8)
+    };
+    let small = Options {
+        memory: 1,
+        ..Options::threads(4)
+    };
+    let modes = [plain, Options::threads(1), Options::threads(8), small];
+    let mut results = Vec::new();
+    for (i, options) in modes.iter().enumerate() {
+        let root = scratch(&format!("mode-{i}"));
+        let evaluation = run_options(
+            Box::new(Texture),
+            &root,
+            options,
+            &MemoryDerivations::default(),
+        );
+        let files: Vec<Vec<u8>> = {
+            let store = LocalStore::open(&root).unwrap();
+            evaluation
+                .outputs
+                .iter()
+                .map(|output| store.read(&output.document).unwrap())
+                .collect()
+        };
+        results.push((evaluation, files));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    assert!(!results[0].0.outputs.is_empty());
+    for result in &results[1..] {
+        assert_eq!(*result, results[0]);
+    }
+}
+
+/// Counts the conversions that run at once and the threads they run on.
+#[derive(Default)]
+struct Probe {
+    running: AtomicUsize,
+    most: AtomicUsize,
+    threads: Mutex<BTreeSet<String>>,
+}
+
+struct Watched(Arc<Probe>, u64);
+
+impl Converter for Watched {
+    fn name(&self) -> &'static str {
+        Texture.name()
+    }
+
+    fn version(&self) -> u32 {
+        Texture.version()
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        Texture.is_root(object, script, paths)
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        let probe = &self.0;
+        let now = probe.running.fetch_add(1, Ordering::SeqCst) + 1;
+        probe.most.fetch_max(now, Ordering::SeqCst);
+        probe
+            .threads
+            .lock()
+            .unwrap()
+            .insert(format!("{:?}", std::thread::current().id()));
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let asset = Texture.convert(root, cx);
+        probe.running.fetch_sub(1, Ordering::SeqCst);
+        asset
+    }
+
+    fn cost(&self, _: ObjectId, _: &ObjectIndex, _: &dyn Context) -> Cost {
+        Cost {
+            class: CostClass::Heavy,
+            memory: self.1,
+        }
+    }
+}
+
+fn watched(options: &Options, memory: u64) -> (Evaluation, Arc<Probe>) {
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let root = scratch(&format!("watched-{}", RUNS.fetch_add(1, Ordering::SeqCst)));
+    let probe = Arc::new(Probe::default());
+    let evaluation = run_options(
+        Box::new(Watched(probe.clone(), memory)),
+        &root,
+        options,
+        &MemoryDerivations::default(),
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    (evaluation, probe)
+}
+
+#[test]
+fn conversions_stay_within_the_memory_budget() {
+    let with = |memory| Options {
+        memory,
+        ..Options::threads(8)
+    };
+    let (evaluation, probe) = watched(&with(u64::MAX), 100);
+    assert_eq!(evaluation.converted, 2);
+    assert_eq!(
+        probe.most.load(Ordering::SeqCst),
+        2,
+        "without a limit both run"
+    );
+
+    let (_, probe) = watched(&with(150), 100);
+    assert_eq!(probe.most.load(Ordering::SeqCst), 1, "one fits the budget");
+
+    let (evaluation, probe) = watched(&with(150), 1000);
+    assert_eq!(
+        probe.most.load(Ordering::SeqCst),
+        1,
+        "each above the budget runs alone"
+    );
+    assert_eq!(evaluation.converted, 2);
+}
+
+#[test]
+fn one_slot_and_plain_mode_convert_on_the_calling_thread() {
+    let caller = format!("{:?}", std::thread::current().id());
+    let plain = Options {
+        plain: true,
+        ..Options::threads(8)
+    };
+    for options in [Options::threads(1), plain] {
+        let (_, probe) = watched(&options, 100);
+        assert_eq!(probe.most.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            *probe.threads.lock().unwrap(),
+            BTreeSet::from([caller.clone()])
+        );
+    }
+}
+
+#[test]
+fn plain_mode_neither_reads_nor_writes_records() {
+    let root = scratch("plain-records");
+    let plain = Options {
+        plain: true,
+        ..Options::threads(2)
+    };
+    let derivations = MemoryDerivations::default();
+    let first = run_options(Box::new(Texture), &root, &plain, &derivations);
+    let normal = run(&root, 2, &derivations);
+    assert_eq!(normal.reused, 0, "plain mode wrote no records");
+    let again = run_options(Box::new(Texture), &root, &plain, &derivations);
+    assert_eq!(again.reused, 0, "plain mode read no records");
+    assert_eq!(again.converted, normal.converted);
+    assert_eq!(first.outputs, again.outputs);
     std::fs::remove_dir_all(root).unwrap();
 }

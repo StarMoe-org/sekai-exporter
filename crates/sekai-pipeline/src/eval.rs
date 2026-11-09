@@ -1,13 +1,11 @@
 //! The eager evaluator: names, fingerprints, conversion, canonical encoding and the store.
 
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sekai_catalog::{Derivations, Derived, Key, Store};
-use sekai_convert::{Asset, Content, ConvertError, Converter, ObjectId};
+use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject};
@@ -16,6 +14,7 @@ use sha2::{Digest, Sha256};
 
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path};
+use crate::sched::{Limits, Need, Resident, Scheduler, Slots};
 use crate::version::Version;
 
 /// One asset of an evaluated version.
@@ -45,32 +44,44 @@ pub struct Evaluation {
 }
 
 /// Runs `job` for indices `0..n` on `threads` threads and returns the results in index order.
+/// With one thread every job runs on the calling thread and no thread is created.
 pub fn parallel<T: Send>(n: usize, threads: usize, job: impl Fn(usize) -> T + Sync) -> Vec<T> {
-    if threads <= 1 {
-        return (0..n).map(job).collect();
-    }
-    let next = AtomicUsize::new(0);
-    let results: Mutex<Vec<Option<T>>> = Mutex::new((0..n).map(|_| None).collect());
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n.max(1)) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    let r = job(i);
-                    results.lock().unwrap()[i] = Some(r);
-                }
-            });
-        }
+    let scheduler = Scheduler::new(Limits {
+        cpu: threads,
+        memory: u64::MAX,
+        connections: Vec::new(),
+        resident: None,
     });
-    results
-        .into_inner()
-        .unwrap()
-        .into_iter()
-        .map(|r| r.expect("every index ran"))
-        .collect()
+    scheduler.run(&vec![Need::default(); n], |i, _| job(i))
+}
+
+/// How [`evaluate_with`] runs.
+#[derive(Debug, Clone, Copy)]
+pub struct Options {
+    /// The CPU slots: how many conversions and encodings run at once.
+    pub threads: usize,
+    /// The memory budget of the derivations that run at once, in bytes. A derivation whose
+    /// estimate exceeds the budget runs alone.
+    pub memory: u64,
+    /// A limit on the memory of the whole process, which holds back derivations while the
+    /// process holds more than their estimates account for.
+    pub resident: Option<Resident>,
+    /// Plain mode: one derivation after another on the calling thread, each evaluated on its
+    /// own, without reading or writing derivation records. It is the reference the other modes
+    /// are compared with, and leaves the records of later runs unchanged.
+    pub plain: bool,
+}
+
+impl Options {
+    /// `threads` CPU slots with no memory limit.
+    pub fn threads(threads: usize) -> Self {
+        Self {
+            threads,
+            memory: u64::MAX,
+            resident: None,
+            plain: false,
+        }
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -109,6 +120,27 @@ pub(crate) struct Planned<'a> {
     pub(crate) closure: Vec<ObjectId>,
     /// The fingerprint of the derivation.
     pub(crate) fingerprint: [u8; 32],
+}
+
+impl Planned<'_> {
+    /// The estimated cost of evaluating this derivation, from the object headers of its root.
+    pub(crate) fn cost(&self, version: &Version<'_>) -> Cost {
+        let index = version.index();
+        let root = self.closure[0];
+        match index.position(root) {
+            Some(position) => {
+                let object = &index.bundles()[root.bundle].files[root.file].objects[position];
+                self.converter.cost(root, object, version)
+            }
+            None => Cost::light(0),
+        }
+    }
+
+    /// The bundles the closure reads from, in order.
+    fn bundles(&self) -> Vec<usize> {
+        let bundles: BTreeSet<usize> = self.closure.iter().map(|id| id.bundle).collect();
+        bundles.into_iter().collect()
+    }
 }
 
 /// The derivations of a version, before any of them runs.
@@ -221,45 +253,69 @@ fn decoded_size(asset: &Asset) -> u64 {
 
 /// The estimated peak memory of a derivation.
 pub(crate) fn estimated_memory(plan: &Planned<'_>, version: &Version<'_>) -> u64 {
-    let root = plan.closure[0];
-    let index = version.index();
-    index.position(root).map_or(0, |position| {
-        let object = &index.bundles()[root.bundle].files[root.file].objects[position];
-        plan.converter.cost(root, object, version).memory
-    })
+    plan.cost(version).memory
 }
 
-/// Evaluates one derivation and returns its output and the error code of a failed asset.
+/// Evaluates one derivation on the calling thread and returns its output and the error code of a
+/// failed asset.
 pub(crate) fn derive(
     plan: &Planned<'_>,
     version: &Version<'_>,
     store: &dyn Store,
     recorder: &dyn Recorder,
 ) -> io::Result<(Derived, Option<String>)> {
+    let cost = plan.cost(version);
+    let alone = Scheduler::new(Limits {
+        cpu: 1,
+        memory: u64::MAX,
+        connections: Vec::new(),
+        resident: None,
+    });
+    alone
+        .run(&[Need::default()], |_, slots| {
+            derive_within(plan, cost, slots, version, store, recorder)
+        })
+        .pop()
+        .expect("the derivation ran")
+}
+
+/// Evaluates one derivation as [`derive`] does, within the CPU slots of a running job.
+///
+/// `cost` is the estimate the derivation was scheduled with, which the convert span reports
+/// beside the decoded size. The conversion takes one CPU slot of `slots` and the encoding of each
+/// member takes one more, two for [`CostClass::Wide`] work.
+pub(crate) fn derive_within(
+    plan: &Planned<'_>,
+    cost: Cost,
+    slots: &Slots<'_>,
+    version: &Version<'_>,
+    store: &dyn Store,
+    recorder: &dyn Recorder,
+) -> io::Result<(Derived, Option<String>)> {
     let form = plan.converter.name();
-    let result = {
-        let estimated = estimated_memory(plan, version);
+    let result = slots.cpu(1, || {
         let mut span = recorder.span("convert", form, &plan.name);
         let result = plan.converter.convert(plan.closure[0], version);
         if let Ok(Some(asset)) = &result {
-            span.memory(estimated, decoded_size(asset));
+            span.memory(cost.memory, decoded_size(asset));
         }
         result
-    };
+    });
+    let encoders = if cost.class == CostClass::Wide { 2 } else { 1 };
     let mut members = Vec::new();
     let error = match result {
         Ok(None) => return Ok((Derived::Nothing, None)),
         Ok(Some(asset)) => {
             let mut failed = None;
             for member in &asset.members {
-                let encoded = {
+                let encoded = slots.cpu(encoders, || {
                     let mut span = recorder.span("encode", form, &plan.name);
                     let encoded = encode(&member.content);
                     if let Ok(file) = &encoded {
                         span.bytes(0, file.bytes.len() as u64);
                     }
                     encoded
-                };
+                });
                 match encoded {
                     Ok(file) => {
                         let mut span = recorder.span("store", file.extension, &plan.name);
@@ -355,8 +411,29 @@ pub fn evaluate(
     recorder: &dyn Recorder,
     threads: usize,
 ) -> io::Result<Evaluation> {
+    evaluate_with(
+        version,
+        converters,
+        store,
+        derivations,
+        recorder,
+        &Options::threads(threads),
+    )
+}
+
+/// Evaluates every asset of `version` as [`evaluate`] does, within `options`. The result does
+/// not depend on `options`.
+pub fn evaluate_with(
+    version: &Version<'_>,
+    converters: &[Box<dyn Converter>],
+    store: &dyn Store,
+    derivations: &dyn Derivations,
+    recorder: &dyn Recorder,
+    options: &Options,
+) -> io::Result<Evaluation> {
+    let threads = if options.plain { 1 } else { options.threads };
     let plan = plan(version, converters, recorder, threads);
-    run(&plan, version, store, derivations, recorder, threads)
+    run(&plan, version, store, derivations, recorder, options)
 }
 
 /// Chooses the roots of `version`, names them and computes the closure and fingerprint of each
@@ -424,6 +501,34 @@ pub(crate) fn plan<'a>(
     }
 }
 
+/// An estimate of the time a derivation takes, in arbitrary units.
+fn effort(cost: &Cost) -> u64 {
+    let weight = match cost.class {
+        CostClass::Light => 1,
+        CostClass::Heavy => 4,
+        CostClass::Wide => 8,
+    };
+    cost.memory.saturating_mul(weight)
+}
+
+/// The order to run `pending` in, as indices into it. Derivations do not depend on each other,
+/// so they form one layer. Derivations that read the same set of bundles run together, so the
+/// bundles are read while they are cached; the groups and the derivations within each group
+/// run longest first, so the last to finish are short.
+fn order(plans: &[Planned<'_>], pending: &[(usize, Cost)]) -> Vec<usize> {
+    let mut groups: BTreeMap<Vec<usize>, Vec<usize>> = BTreeMap::new();
+    for (k, (i, _)) in pending.iter().enumerate() {
+        groups.entry(plans[*i].bundles()).or_default().push(k);
+    }
+    let longest = |k: &usize| std::cmp::Reverse(effort(&pending[*k].1));
+    let mut groups: Vec<Vec<usize>> = groups.into_values().collect();
+    for group in &mut groups {
+        group.sort_by_key(longest);
+    }
+    groups.sort_by_key(|group| longest(&group[0]));
+    groups.concat()
+}
+
 /// Runs the derivations of `plan` whose output is not recorded in `derivations` yet and records
 /// the new outputs.
 pub(crate) fn run(
@@ -432,28 +537,64 @@ pub(crate) fn run(
     store: &dyn Store,
     derivations: &dyn Derivations,
     recorder: &dyn Recorder,
-    threads: usize,
+    options: &Options,
 ) -> io::Result<Evaluation> {
     let plans = &plan.derivations;
-    let results = parallel(plans.len(), threads, |i| -> io::Result<_> {
+    let threads = if options.plain { 1 } else { options.threads };
+    let recorded = parallel(plans.len(), threads, |i| -> io::Result<_> {
         let plan = &plans[i];
-        if let Some(derived) = derivations.get(&plan.fingerprint)? {
-            return Ok((derived, None, true));
+        if !options.plain
+            && let Some(derived) = derivations.get(&plan.fingerprint)?
+        {
+            return Ok(Ok(derived));
         }
-        let (derived, error) = derive(plan, version, store, recorder)?;
+        Ok(Err(plan.cost(version)))
+    });
+    let mut results: Vec<Option<(Derived, Option<String>, bool)>> = vec![None; plans.len()];
+    let mut pending = Vec::new();
+    for (i, result) in recorded.into_iter().enumerate() {
+        match result? {
+            Ok(derived) => results[i] = Some((derived, None, true)),
+            Err(cost) => pending.push((i, cost)),
+        }
+    }
+    let order = order(plans, &pending);
+    let needs: Vec<Need> = order
+        .iter()
+        .map(|k| Need {
+            memory: pending[*k].1.memory,
+            remote: None,
+        })
+        .collect();
+    let scheduler = Scheduler::new(Limits {
+        cpu: threads,
+        memory: options.memory,
+        connections: Vec::new(),
+        resident: options.resident,
+    });
+    let derived = scheduler.run(&needs, |j, slots| -> io::Result<_> {
+        let (i, cost) = pending[order[j]];
+        let plan = &plans[i];
+        let (derived, error) = derive_within(plan, cost, slots, version, store, recorder)?;
         // A failed asset has no output, so the next run evaluates it again.
-        if error.is_none() {
+        if !options.plain && error.is_none() {
             derivations.put(plan.fingerprint, derived.clone())?;
         }
-        Ok((derived, error, false))
+        Ok((i, derived, error))
     });
-    derivations.flush()?;
+    for result in derived {
+        let (i, derived, error) = result?;
+        results[i] = Some((derived, error, false));
+    }
+    if !options.plain {
+        derivations.flush()?;
+    }
     let mut evaluation = Evaluation {
         unnamed: plan.unnamed.clone(),
         ..Evaluation::default()
     };
     for (plan, result) in plans.iter().zip(results) {
-        let (derived, error, reused) = result?;
+        let (derived, error, reused) = result.expect("every derivation ran or was recorded");
         if reused {
             evaluation.reused += 1;
         } else {

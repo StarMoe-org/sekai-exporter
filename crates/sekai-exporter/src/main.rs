@@ -1,5 +1,6 @@
 //! The command-line program of the exporter.
 
+mod budget;
 mod export;
 mod monitor;
 mod objects;
@@ -40,14 +41,15 @@ const USAGE: &str = "\
 usage: sekai-exporter <command> [options]
 
 commands:
-  export <input> <output> [--tree <dir>] [--threads <n>]
+  export <input> <output> [--tree <dir>] [--threads <n>] [--memory <bytes>] [--plain]
       Convert every bundle file directly inside <input> to canonical assets in
       <output>/store, and list them in <output>/assets.tsv. CPU and memory use
       and the time of each stage are written to <output>/metrics.jsonl. The
       index is published under <output>/published, and --tree also writes a
       path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
-         [--tree <dir>] [--storage <dir>] [--threads <n>] [--force]
+         [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
+         [--plain] [--force]
       Bring <output> up to the current version of a region of the configuration.
       Bundles go to <output>/inputs, which holds game data and must stay private.
       A version that matches the last complete run is left alone unless --force
@@ -62,6 +64,14 @@ commands:
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the
       converters whose memory estimates are furthest from what was measured.
+
+  --threads sets how many conversions and encodings run at once; a video
+  encoding counts as two. --memory sets the memory the process may use, such
+  as 8G, half the physical memory by default; conversions wait until their
+  estimated memory fits, and one estimated above the budget runs alone.
+  --plain evaluates one asset after another on one thread without reading or
+  writing the record of earlier conversions, as a reference for the others.
+  None of these change the assets.
 ";
 
 #[cfg(feature = "cdn")]

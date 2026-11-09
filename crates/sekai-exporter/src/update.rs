@@ -15,10 +15,11 @@ use sekai_game::cdn::{self, BundleEntry, Region, Secrets, Source};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
+use sekai_pipeline::{BundleInput, Version, evaluate_with, parallel};
 use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
+use crate::budget;
 use crate::export::{BLOCK_CACHE_BYTES, converters, publish};
 use crate::monitor::Monitor;
 
@@ -35,6 +36,8 @@ struct Options {
     storage: Option<PathBuf>,
     only: Vec<String>,
     threads: usize,
+    memory: Option<u64>,
+    plain: bool,
     force: bool,
 }
 
@@ -48,6 +51,8 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut storage = None;
     let mut only = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut memory = None;
+    let mut plain = false;
     let mut force = false;
     while let Some(arg) = parser.next()? {
         match arg {
@@ -57,6 +62,8 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("storage") => storage = Some(PathBuf::from(parser.value()?)),
             Long("only") => only.push(parser.value()?.string()?),
             Long("threads") => threads = parser.value()?.parse()?,
+            Long("memory") => memory = Some(budget::parse_bytes(&parser.value()?.string()?)?),
+            Long("plain") => plain = true,
             Long("force") => force = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
@@ -74,6 +81,8 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         storage,
         only,
         threads: threads.max(1),
+        memory,
+        plain,
         force,
     })
 }
@@ -373,13 +382,13 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         return Ok(false);
     }
 
-    let evaluation = evaluate(
+    let evaluation = evaluate_with(
         &version,
         &converters(hca_key),
         &store,
         &derivations,
         monitor,
-        options.threads,
+        &budget::options(options.threads, options.memory, options.plain),
     )
     .map_err(|e| e.to_string())?;
     let target = format!("{region_name}/canonical");

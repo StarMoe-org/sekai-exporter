@@ -9,11 +9,12 @@ use sekai_convert::Converter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes, Version, evaluate, parallel};
+use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes, Version, evaluate_with, parallel};
 use sekai_publish::{Binding, Plan, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
+use crate::budget;
 use crate::monitor::Monitor;
 
 pub(crate) const BLOCK_CACHE_BYTES: usize = 256 << 20;
@@ -98,6 +99,8 @@ struct Options {
     output: PathBuf,
     tree: Option<PathBuf>,
     threads: usize,
+    memory: Option<u64>,
+    plain: bool,
 }
 
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error> {
@@ -106,9 +109,13 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut tree = None;
+    let mut memory = None;
+    let mut plain = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("threads") => threads = parser.value()?.parse()?,
+            Long("memory") => memory = Some(budget::parse_bytes(&parser.value()?.string()?)?),
+            Long("plain") => plain = true,
             Long("tree") => tree = Some(PathBuf::from(parser.value()?)),
             Value(v) => positional.push(PathBuf::from(v)),
             _ => return Err(arg.unexpected()),
@@ -122,6 +129,8 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         output,
         tree,
         threads: threads.max(1),
+        memory,
+        plain,
     })
 }
 
@@ -181,13 +190,13 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let store = LocalStore::open(options.output.join("store"))
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
     let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
-    let evaluation = evaluate(
+    let evaluation = evaluate_with(
         &version,
         &converters(None),
         &store,
         derivations.as_ref(),
         monitor,
-        options.threads,
+        &budget::options(options.threads, options.memory, options.plain),
     )
     .map_err(|e| e.to_string())?;
 

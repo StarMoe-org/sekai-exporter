@@ -385,6 +385,26 @@ class DeterminismTests(TreeTestCase):
         self.assertEqual(code, 0)
         self.assertIn("recomputed derivations: 0", output)
 
+    def test_skip_publication_leaves_out_publication_documents(self):
+        documents = {
+            f"{n}.json": b'{"format": "%s"}' % name.encode()
+            for n, name in enumerate(["index-root", "index-shard", "listing"])
+        }
+        same = {"a.json": b'{"format": "asset"}'}
+        run1, run2 = self.runs({**same, **documents}, same)
+        self.assertEqual(self.run_main([run1, run2])[0], 1)
+        code, output = self.run_main([run1, run2, "--skip-publication"])
+        self.assertEqual(code, 0)
+        self.assertIn("RUN1 1 files, RUN2 1 files", output)
+
+    def test_skip_publication_still_compares_other_documents(self):
+        run1, run2 = self.runs(
+            {"a.json": b'{"format": "asset"}', "b.bin": b"1"}, {"b.bin": b"1"}
+        )
+        code, output = self.run_main([run1, run2, "--skip-publication"])
+        self.assertEqual(code, 1)
+        self.assertIn("missing in RUN2: a.json", output)
+
     def test_invalid_metrics_line_is_usage_error(self):
         run1, run2 = self.runs({"a.bin": b"1"}, {"a.bin": b"1"})
         metrics = self.write_metrics("{not json\n")

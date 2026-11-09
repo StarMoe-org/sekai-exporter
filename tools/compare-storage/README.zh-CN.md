@@ -45,10 +45,10 @@ pattern 是 `fnmatch` 通配符，按区分大小写的方式匹配相对路径�
 ## determinism.py
 
 ```bash
-python determinism.py RUN1 RUN2 [--metrics FILE]
+python determinism.py RUN1 RUN2 [--metrics FILE] [--skip-publication]
 ```
 
-`RUN1` 中的每个文件都必须在 `RUN2` 中存在且字节相同，反之亦然。脚本列出缺失和不同的路径。使用 `--metrics` 时，`FILE` 是 JSON Lines 文件，每行一个对象，通常是第二次运行的 `metrics.jsonl`。`convert` 阶段的每个 span（`{"kind": "span", "stage": "convert"}`）计为一次重新计算的派生，其数目必须为 0。退出状态：全部一致为 0，否则为 1；用法错误为 2。
+`RUN1` 中的每个文件都必须在 `RUN2` 中存在且字节相同，反之亦然。脚本列出缺失和不同的路径。使用 `--metrics` 时，`FILE` 是 JSON Lines 文件，每行一个对象，通常是第二次运行的 `metrics.jsonl`。`convert` 阶段的每个 span（`{"kind": "span", "stage": "convert"}`）计为一次重新计算的派生，其数目必须为 0。使用 `--skip-publication` 时，两个目录都不比较发布文档（索引根、索引分片和列表），这样发布过的运行与未发布的运行也能比较 store。退出状态：全部一致为 0，否则为 1；用法错误为 2。
 
 ## 测试
 

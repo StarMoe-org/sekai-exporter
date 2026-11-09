@@ -6,7 +6,7 @@
 
 ## 状态
 
-开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。`sekai-codec` 以纯 Rust 解码 Alpha8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGBA8、crunch DXT5、ASTC LDR 与 ASTC HDR 贴图，HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器。`sekai-encode` 写出 PNG、无损与有损 WebP、OpenEXR、FLAC、MP3 和 AAC。第一个转换器 [`texture`](docs/spec/texture.md) 把 `Texture2D` 与 `Cubemap` 对象转换为图像，经 `sekai-pipeline` 中由已打开资源包组成的版本读取对象；`sekai-catalog` 提供本地的内容寻址 store。运行转换器并发布其产物的求值器正在编写。[`docs/`](docs/) 中的文档描述了代码所实现的设计。
+开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。`sekai-codec` 以纯 Rust 解码 Alpha8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGBA8、crunch DXT5、ASTC LDR 与 ASTC HDR 贴图，HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器。`sekai-encode` 写出 PNG、无损与有损 WebP、OpenEXR、FLAC、MP3 和 AAC。贴图、精灵、字体、文本资产、剧情场景、CRI 视频和 CRI cue 表的转换器已经可用，[功能开关](docs/features.zh-CN.md)列出了每个 feature 转换什么、哪些还不转换任何内容。`sekai-exporter export` 和 `update` 逐个资源包求值，写入本地内容寻址 store，并把结果发布为索引、路径树或 `storage` 视图。核心也可构建为 WebAssembly，持续集成会比对它与原生构建的产物。[`docs/`](docs/) 中的文档描述了代码所实现的设计。
 
 ## 功能
 

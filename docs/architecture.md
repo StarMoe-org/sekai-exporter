@@ -79,7 +79,7 @@ A converter declares:
 - the root objects it accepts, by class and logical path;
 - the game data tables it reads;
 - the asset form it produces, and the specification in [`docs/spec/`](spec/) that defines that form;
-- its version and cost class.
+- its version and a cost class (light, heavy or wide, which decides how many CPU slots its encoding takes) with an estimate of the memory it needs.
 
 It receives a root object and a context through which it reads referenced objects, payload bytes and table rows. It returns the asset's members, each with its role: decoded content (image surfaces, PCM samples), which the evaluator encodes, or finished bytes. The evaluator writes the asset document. It does not read files, choose output paths or write to the catalog; the evaluator does all of that.
 
@@ -100,7 +100,7 @@ The workspace has fourteen crates in a flat `crates/` directory. A crate boundar
 | 2 | `sekai-convert` | The converter interface, writers and the general-purpose converters |
 | 2 | `sekai-encode` | Encoders for decoded content. The canonical encoders are pure Rust and always present; every C dependency of an encoder is confined here, one feature each |
 | 2 | `sekai-publish` | Layouts, stores, the publication protocol and asset listings |
-| 3 | `sekai-pipeline` | The streaming and lazy evaluators, the scheduler and the derivation cache |
+| 3 | `sekai-pipeline` | The streaming and lazy evaluators and the scheduler. Derivations whose output exists are reused from the catalog, by the database or in memory |
 | 3 | `sekai-moesekai` | Scenarios, episodes, virtual lives, costumes and the storage view |
 | 3 | `sekai-mysekai` | MySekai assets in the full form a game-reproducing runtime needs |
 | 4 | `sekai-exporter` | The command-line program |

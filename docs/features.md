@@ -9,7 +9,7 @@ The exporter is assembled from Cargo features. Each converter family, view, enco
 1. **One feature is one converter family, one view, one backend or one source.** A feature enables a whole module (`#[cfg(feature = "x")] mod x;`) or an optional dependency. Function bodies contain no `#[cfg]`.
 2. **Features are additive.** No two features exclude each other. When several backends for the same format are compiled in, the configuration selects one, and the selected backend is part of every fingerprint it affects.
 3. **Dependencies between features are declared in `Cargo.toml`.** Enabling a feature enables the features it needs.
-4. **A converter that is not compiled in is reported, not skipped.** Each asset it would have produced is recorded with the error `not_compiled` and the converter's name. Turning a feature off never removes output silently.
+4. **A converter that is not compiled in is reported, not skipped.** When a feature whose converters have their root rules is turned off, each asset they would have produced is recorded with the error `not_compiled` and the converter's name. Features whose asset forms have no root rules are listed in [Converter families](#converter-families); they produce nothing, so turning them off removes nothing.
 5. **There is no runtime plug-in interface.** Extending the exporter means adding a module and a feature.
 6. **Continuous integration builds every feature on its own** (`cargo hack check --each-feature`), as well as the presets with no default features, with default features and with all features. A feature that depends on another without declaring it fails this check.
 
@@ -30,7 +30,7 @@ In `sekai-convert`, general to Unity content:
 | `timeline` | Timeline assets into timeline documents |
 | `particles` | Particle systems into particle documents |
 
-The features `model`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. `animation` decodes `AnimationClip` into the [clip documents](spec/clip-documents.md) that the Live2D forms contain, and produces no assets of its own yet. `audio` does not convert `AudioClip` yet.
+The features `model`, `ugui`, `timeline` and `particles` are defined and do not convert anything yet. These four asset forms have no root rules, so a build without them reports nothing with `not_compiled`, as rule 4 describes. `animation` decodes `AnimationClip` into the [clip documents](spec/clip-documents.md) that the Live2D forms contain, and produces no assets of its own yet. `audio` does not convert `AudioClip` yet.
 
 In `sekai-moesekai`, specific to this game, for the default consumer:
 
@@ -40,11 +40,12 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 | `episode` | Story episodes: one table row with every asset it refers to resolved |
 | `virtual-live` | Virtual lives: timeline, scenario and voice |
 | `costume` | Costume combinations for 3D viewing |
-| `storage-view` | The [storage view](publishing.md#the-storage-view) |
 
-The features `virtual-live` and `costume` are defined and do not produce anything yet.
+The features `virtual-live` and `costume` are defined and do not produce anything yet. Their asset forms have no root rules either, so a build without them reports nothing with `not_compiled`.
 
-In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs. It is defined and does not produce anything yet.
+The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
+
+In `sekai-mysekai`: `mysekai`, which produces MySekai sites, furniture and phenomena in the full form a game-reproducing runtime needs. It is defined and does not produce anything yet; its asset forms have no root rules, so a build without it reports nothing with `not_compiled`.
 
 ## Backends
 
@@ -60,7 +61,7 @@ In `sekai-encode`:
 | `mp3` | MP3 | LAME, loaded at run time |
 | `aac` | AAC audio tracks in MP4 | libavcodec 59 to 63 with the libavutil of the same FFmpeg release (FFmpeg 5.1 to 9.0), loaded at run time on 64-bit platforms |
 
-The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The default build includes `mp3` and `aac`, so it needs LAME and libavcodec installed at run time; the exporter checks for them when it starts and names the library that is missing. The licences of these libraries are listed in [Third-party sources](third-party.md).
+The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The default build includes `mp3` and `aac`, so it needs LAME and libavcodec installed at run time. Each library is loaded when an asset of that format is encoded: an asset whose library is missing fails with the error `encoder_unavailable`, and the message names the library. The licences of these libraries are listed in [Third-party sources](third-party.md).
 
 ## Sources and publishing
 
@@ -76,7 +77,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 
 | Preset | Contents |
 |---|---|
-| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
+| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, `image`, `audio`, `video`, `model`, `animation`, `live2d`, `text`, `scenario`, `episode`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
 | `preset-mysekai` | `default` and `mysekai` |
 | `preset-client` | `default` and `client` |
 | `full` | Every feature |

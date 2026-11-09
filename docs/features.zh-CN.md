@@ -9,7 +9,7 @@
 1. **一个 feature 对应一个转换器族、一个视图、一个后端或一个来源。** feature 启用一个完整的模块（`#[cfg(feature = "x")] mod x;`）或一项可选依赖。函数体内不出现 `#[cfg]`。
 2. **feature 只做加法。** 任何两个 feature 都不互斥。同一格式的多个后端都编译进来时，由配置选择其一，所选后端计入其影响的每一个指纹。
 3. **feature 之间的依赖在 `Cargo.toml` 中声明。** 启用一个 feature 即启用它所需的 feature。
-4. **未编译进构建的转换器予以报告，而非跳过。** 其本应产出的每个资产记录为错误 `not_compiled`，并写明该转换器的名称。关闭某个 feature 不会导致输出被静默移除。
+4. **未编译进构建的转换器予以报告，而非跳过。** 关闭一个其转换器已有根规则的 feature 时，这些转换器本应产出的每个资产记录为错误 `not_compiled`，并写明该转换器的名称。资产形式尚无根规则的 feature 列于[转换器族](#转换器族)；它们不产出任何内容，因此关闭时不会移除任何内容。
 5. **不提供运行期插件接口。** 扩展导出器的方式是新增一个模块与一个 feature。
 6. **持续集成将每个 feature 单独构建一次**（`cargo hack check --each-feature`），并分别构建不启用默认 feature、启用默认 feature 与启用全部 feature 三种组合。依赖其他 feature 而未声明的 feature 无法通过这项检查。
 
@@ -30,7 +30,7 @@
 | `timeline` | Timeline 资产，转换为时间轴文档 |
 | `particles` | 粒子系统，转换为粒子文档 |
 
-`model`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。`animation` 把 `AnimationClip` 解码为 Live2D 形式所包含的[剪辑文档](spec/clip-documents.zh-CN.md)，目前尚不单独产出资产。`audio` 目前尚不转换 `AudioClip`。
+`model`、`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。这四种资产形式没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容，如规则 4 所述。`animation` 把 `AnimationClip` 解码为 Live2D 形式所包含的[剪辑文档](spec/clip-documents.zh-CN.md)，目前尚不单独产出资产。`audio` 目前尚不转换 `AudioClip`。
 
 `sekai-moesekai` 中本游戏专有、服务于默认使用者的转换器族：
 
@@ -40,11 +40,12 @@
 | `episode` | 剧情的一话：一条数据表记录，以及其所引用的全部已解析资产 |
 | `virtual-live` | 虚拟演唱会：时间轴、剧本与语音 |
 | `costume` | 供 3D 浏览的服装组合 |
-| `storage-view` | [storage 视图](publishing.zh-CN.md#storage-视图) |
 
-`virtual-live` 与 `costume` 这两个 feature 已定义，目前尚不产出任何内容。
+`virtual-live` 与 `costume` 这两个 feature 已定义，目前尚不产出任何内容。它们的资产形式同样没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容。
 
-`sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的站点、家具与现象。它已定义，目前尚不产出任何内容。
+[storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建会拒绝 `update --storage`，并且不会以 `not_compiled` 报告任何资产。
+
+`sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的站点、家具与现象。它已定义，目前尚不产出任何内容；其资产形式没有根规则，因此不含它的构建不会以 `not_compiled` 报告任何内容。
 
 ## 后端
 
@@ -60,7 +61,7 @@
 | `mp3` | MP3 | LAME，运行时加载 |
 | `aac` | MP4 中的 AAC 音轨 | libavcodec 59 至 63 及同一 FFmpeg 版本的 libavutil（FFmpeg 5.1 至 9.0），在 64 位平台上运行时加载 |
 
-规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。默认构建包含 `mp3` 与 `aac`，因此运行时需要系统中安装 LAME 与 libavcodec；导出器在启动时检查二者，并指明缺失的库。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
+规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。默认构建包含 `mp3` 与 `aac`，因此运行时需要系统中安装 LAME 与 libavcodec。每个库在编码该格式的资产时才加载：缺少库的资产以错误 `encoder_unavailable` 失败，错误信息写明缺失的库。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
 
 ## 来源与发布
 
@@ -76,7 +77,7 @@
 
 | 预设 | 内容 |
 |---|---|
-| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、全部通用转换器族、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
+| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、`image`、`audio`、`video`、`model`、`animation`、`live2d`、`text`、`scenario`、`episode`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
 | `preset-mysekai` | `default` 加 `mysekai` |
 | `preset-client` | `default` 加 `client` |
 | `full` | 全部 feature |

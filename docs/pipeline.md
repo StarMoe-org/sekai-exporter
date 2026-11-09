@@ -2,13 +2,13 @@
 
 [中文](pipeline.zh-CN.md)
 
-The pipeline evaluates the [derivation graph](architecture.md) bundle by bundle, with the streaming evaluator described below. One run processes the current version of every configured region in a single process, with one catalog and one derivation cache shared by all regions.
+The pipeline evaluates the [derivation graph](architecture.md) bundle by bundle, with the streaming evaluator described below. One run processes the current version of the region it names on the command line, in a single process, with one catalog and one record of derivations.
 
 ## Stages
 
 | Stage | Work | Output |
 |---|---|---|
-| P0 Plan | Read the [asset identity and table identity](sources.md#version-identity) of each region | Nothing to do if both match the last complete run. If only the table identity changed, P1 to P3 are skipped and the index of the asset identity is reused |
+| P0 Plan | Read the [asset identity and table identity](sources.md#version-identity) of each region | Nothing to do if both match the last complete run. When either changed, the manifest is read again; bundles whose declared hash is unchanged keep their stored bytes and their index |
 | P1 Manifest | Download and parse the manifest; select bundles by name, with their dependencies | The bundle list with declared hashes, sizes and dependencies |
 | P2 Fetch | Download each selected bundle, deobfuscate it and hash it while it streams, and write it to the store | Bundle inputs, identified by content hash |
 | P3 Index | For each bundle, when the first unit that needs it opens it, read every object's fields, skipping large arrays by length; record class, name, container path, content hash and references. The index is stored by the content hash of the bundle and reused | Object rows and reference edges |
@@ -16,8 +16,8 @@ The pipeline evaluates the [derivation graph](architecture.md) bundle by bundle,
 | P5 Convert | Evaluate the convert and transform derivations of a segment under the scheduler | Asset documents and file bytes |
 | P6 Write | Write bytes to the store, skipping content that already exists; record derivations in the catalog | Store objects and catalog rows |
 | P7 Tables | Build the assets of the [table stage](#table-stage) | Asset documents and file bytes |
-| P8 Views | Each enabled view produces bindings; views that need other bytes produce transform derivations | Bindings |
-| P9 Commit | Verify that every bound object exists in the store with its recorded hash, then advance the version pointer | A committed version, with its asset errors listed |
+| P8 Views | Each enabled view produces bindings; views that need other bytes produce transform derivations; the `index` layout is published | Bindings |
+| P9 Commit | Verify that every bound object exists in the store, then advance the version pointer | A committed version, with its asset errors listed |
 
 ## Invariants
 
@@ -51,9 +51,9 @@ Some assets, such as [episodes](features.md), have no root object: each is built
 
 ## Regions
 
-All regions run in one process. P0 to P3 run for every region in parallel. In P4 and P5 a fingerprint computed for any region is found by every other region, so content shared between regions is converted once. The download stage reuses a bundle already fetched for another region when both regions declare the same hash.
+Each region runs in a process of its own, named on the command line. The record of derivations keeps the fingerprint of each converted asset, and the fingerprint does not contain the region. A region converts an asset again in a later run only when its own record does not hold the output of its fingerprint, which is what reading the same objects gives. A bundle is reused from an earlier run when that run's output directories are listed in `stores` and the bundle has the same declared hash there.
 
-Game data tables are separate for each region. A converter's fingerprint covers only the rows it reads, so an asset whose rows are identical in two regions is still shared even when the tables differ elsewhere.
+Game data tables are read from the region's `tables` source. Table rows are not part of the record of derivations, so the assets of the table stage are built again in every run.
 
 ## The client source
 

@@ -11,18 +11,17 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 | `cp` | Versions, manifests and bundles from the distribution service used by the Japanese and English versions | `jp`, `en` |
 | `nuverse` | Versions, manifests and bundles from the distribution service used by the Chinese, Taiwanese and Korean versions | `cn`, `tw`, `kr` |
 | `dir` | Bundles already present in a local directory | Offline runs and tests |
-| `apk` | Player data from a client package, and the client identity it contains | The `client` source |
-| `store` | Inputs kept by the deployment in its own private store | Lazy evaluation, serverless deployments and history |
+| `apk` | Player data from a client package, and the client identity it contains | The `client` feature |
 
-A region can list several sources in order, for example `store` first and `cp` when the store does not have the bundle.
+A `dir` region takes its bundles from its directory. A `cp` or `nuverse` region downloads the manifest and the bundles and records them in `<output>/inputs`, which holds game data (see [The input store](#the-input-store)).
 
-The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the assets built from the tables are evaluated in the [table stage](pipeline.md#table-stage).
+The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, through a `revision` address and a `table` address template, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the assets built from the tables are evaluated in the [table stage](pipeline.md#table-stage).
 
 ## Region configuration
 
 A region of `"kind": "dir"` needs only `"directory"`: the files under it are its bundles, named by their relative paths, and their dependencies are read from the external files the bundles name (see [Streaming evaluation](pipeline.md#streaming-evaluation)). Any region can list `"stores"`, the output directories of earlier runs. A bundle with the same declared hash is copied from the first of them that holds it instead of being downloaded.
 
-Regions are defined by the deployer in a JSON configuration file, which is passed to the exporter with `--config`. The exporter contains no addresses, application identifiers or client identities. An entry gives the protocol of the region (`kind`: `cp` or `nuverse`), its platform, its hosts, its address templates, the client identity (application version, application hash, asset version and hash, Unity version, user agent, device model and operating system), the names of its secrets, an optional feed and the network settings. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The configuration never contains secret values.**
+Regions are defined by the deployer in a JSON configuration file, which is passed to the exporter with `--config`. The exporter contains no addresses, application identifiers or client identities. An entry gives the protocol of the region (`kind`: `cp` or `nuverse`), its platform, its hosts, its address templates, the client identity (application version, application hash, asset version and asset hash, Unity version, user agent, device model and operating system), the names of its secrets, an optional feed and the network settings. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The configuration never contains secret values.**
 
 ```json
 {
@@ -61,13 +60,9 @@ An address template replaces each `{name}` with its value:
 
 ## Version discovery
 
-The client identity is taken from the first of these that is available:
+The candidates for the client identity are the configuration (which gives application version, application hash, asset version and asset hash), the external feed of current versions, and the client identity of the last complete run; for one application version, the configuration alone. They are tried with the newest application version first, and the first that the region's version endpoint confirms is adopted. With `force`, the configuration is the only candidate.
 
-1. the client package given as an `apk` input;
-2. the configuration;
-3. an external feed of current versions.
-
-A feed is a JSON document with the fields `appVersion`, `appHash`, `assetVersion`, `assetHash` and `multiPlayVersion`, optionally under `production_<platform>`. A candidate is adopted only if the region's version endpoint confirms it and it is newer than the current value. For regions whose distribution paths are keyed by the bundle version, an application version `x.y.z` that the endpoint does not recognize is retried as `x.y.0`. A value set with `force` is a pin: it is not replaced by discovery until it is removed, which allows a rollback. Each region is checked independently, so a failure in one region does not delay the others.
+A feed is a JSON document with the fields `appVersion`, `appHash`, `assetVersion`, `assetHash` and `multiPlayVersion`, optionally under `production_<platform>`. For regions whose distribution paths are keyed by the bundle version, an application version `x.y.z` that the endpoint does not recognize is retried as `x.y.0`. A value set with `force` is a pin: it is not replaced by discovery until it is removed, which allows a rollback. Each region is checked independently, so a failure in one region does not delay the others.
 
 ## Version identity
 
@@ -106,4 +101,4 @@ Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit,
 
 ## The input store
 
-A deployment that keeps raw inputs uses them as a `store` source. Lazy evaluation and serverless deployments then read inputs from that store, so credentials are needed only on the machine that fetches bundles, and earlier versions can be evaluated again. **The input store contains game data and must be private.** It must not be published with the outputs.
+`update` records the bundles it fetches in `<output>/inputs`, a content-addressed store named by the SHA-256 of each bundle, and reads them from there when a bundle is needed again. The record of the bundles of a version is kept in the catalog, `<output>/catalog.redb`, so a bundle whose declared hash is unchanged is neither downloaded nor read again. **The input store contains game data and must be private.** It must not be published with the outputs.

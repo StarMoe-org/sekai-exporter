@@ -9,6 +9,7 @@ use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
+use sekai_publish::{Binding, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -40,6 +41,7 @@ fn derivations(_output: &Path, _store: &LocalStore) -> std::io::Result<Box<dyn D
 struct Options {
     input: PathBuf,
     output: PathBuf,
+    tree: Option<PathBuf>,
     threads: usize,
 }
 
@@ -48,9 +50,11 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut parser = lexopt::Parser::from_args(args);
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let mut tree = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("threads") => threads = parser.value()?.parse()?,
+            Long("tree") => tree = Some(PathBuf::from(parser.value()?)),
             Value(v) => positional.push(PathBuf::from(v)),
             _ => return Err(arg.unexpected()),
         }
@@ -61,6 +65,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     Ok(Options {
         input,
         output,
+        tree,
         threads: threads.max(1),
     })
 }
@@ -141,6 +146,33 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         ));
     }
     std::fs::write(options.output.join("assets.tsv"), listing).map_err(|e| e.to_string())?;
+    let bindings: Vec<Binding> = evaluation
+        .outputs
+        .iter()
+        .map(|o| Binding {
+            name: o.name.clone(),
+            document: o.document.clone(),
+        })
+        .collect();
+    let publishing = monitor.span("publish", "index", "");
+    let plan = plan("local", &bindings, &store).map_err(|e| e.to_string())?;
+    let pointer = index::publish(
+        &store,
+        &options.output.join("published"),
+        "local/canonical",
+        &plan,
+    )
+    .map_err(|e| e.to_string())?;
+    drop(publishing);
+    println!("published revision {}", pointer.revision);
+    if let Some(root) = &options.tree {
+        let _span = monitor.span("publish", "tree", "");
+        let report = tree::publish(&store, root, &plan).map_err(|e| e.to_string())?;
+        println!(
+            "tree written {} unchanged {} deleted {}",
+            report.written, report.unchanged, report.deleted
+        );
+    }
     let errored = evaluation.outputs.iter().filter(|o| o.error.is_some());
     println!(
         "bundles {} failed {failed} assets {} errors {} unnamed {} converted {} reused {}",

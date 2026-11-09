@@ -10,10 +10,12 @@ const USAGE: &str = "\
 usage: sekai-exporter <command> [options]
 
 commands:
-  export <input> <output> [--threads <n>]
+  export <input> <output> [--tree <dir>] [--threads <n>]
       Convert every bundle file directly inside <input> to canonical assets in
       <output>/store, and list them in <output>/assets.tsv. CPU and memory use
-      and the time of each stage are written to <output>/metrics.jsonl.
+      and the time of each stage are written to <output>/metrics.jsonl. The
+      index is published under <output>/published, and --tree also writes a
+      path tree.
   objects <input> <output> [--threads <n>]
       Write the object document of every bundle file directly inside <input>
       to <output>/<bundle>/_objects.json. Payloads larger than the inline limit

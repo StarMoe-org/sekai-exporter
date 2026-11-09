@@ -19,6 +19,8 @@ There is one **store**: a content-addressed place for bytes, either a local dire
 
 Anyone who has the store, the indexes and the asset documents can therefore tell what each file is, where it came from and how it relates to other files. The catalog is an index of this information and can be rebuilt from it.
 
+The documents of a publication are specified in [Publication documents](spec/publication.md).
+
 ## Layouts
 
 | Layout | Shape | Duplication | How a consumer reads it |

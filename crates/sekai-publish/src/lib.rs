@@ -2,3 +2,9 @@
 
 #[cfg(feature = "s3")]
 pub mod s3;
+
+pub mod index;
+pub mod plan;
+pub mod tree;
+
+pub use plan::{Binding, File, Plan, PublishError, plan};

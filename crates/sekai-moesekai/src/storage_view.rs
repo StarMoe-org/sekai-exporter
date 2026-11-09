@@ -11,7 +11,7 @@ use sekai_encode::{mp3, png};
 use sekai_format::AssetDocument;
 
 /// The version of the view. It changes whenever a path or a transform changes.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The bit rate of the MP3 files.
 const MP3_KBPS: u32 = 320;
@@ -120,6 +120,12 @@ fn is_alternative_mix(bundle: &str, cue: &str) -> bool {
     bundle.starts_with("music/long") && (cue.ends_with("_vr") || cue.ends_with("_screen"))
 }
 
+/// Whether the asset gives up a path that it shares with another one. A texture keeps the path
+/// over a sprite of the same name.
+pub fn yields_path(document: &AssetDocument) -> bool {
+    document.form != "texture"
+}
+
 /// The files of an asset in the view. An asset with an error has none.
 pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
     let Some(source) = document.sources.first() else {
@@ -133,6 +139,10 @@ pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
         .name
         .rsplit_once('/')
         .map_or(document.name.as_str(), |(_, file)| file);
+    let file = match document.form.as_str() {
+        "texture" => file.strip_suffix("@Texture2D").unwrap_or(file),
+        _ => file,
+    };
     let at = |name: String| format!("{bundle}/{name}");
     let mut out = Vec::new();
     for (member, m) in document.members.iter().enumerate() {
@@ -313,6 +323,16 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_texture_takes_the_path_of_the_name_it_shares_with_a_sprite() {
+        let texture = document("b/a@Texture2D", "texture", "b", &[("image", "webp")]);
+        let sprite = document("b/a", "sprite", "b", &[("image", "webp")]);
+        assert_eq!(files(&texture)[0].path, "b/a.webp");
+        assert_eq!(files(&sprite)[0].path, "b/a.webp");
+        assert!(!yields_path(&texture));
+        assert!(yields_path(&sprite));
     }
 
     #[test]

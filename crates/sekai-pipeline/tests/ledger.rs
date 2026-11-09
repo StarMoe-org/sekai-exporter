@@ -14,7 +14,7 @@ use sekai_pipeline::ledger::BundleLedger;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, MemoryDerivations, NoBundleIndexes, Options};
-use sekai_unity::NoBlockCache;
+use sekai_unity::{NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 struct Fixtures;
@@ -59,6 +59,7 @@ fn streamed(root: &Path, manifest: &[Entry], ignored: &[&str], segment: Segment)
         derivations: &MemoryDerivations::default(),
         indexes: &NoBundleIndexes,
         cache: &NoBlockCache,
+        classes: &NoClasses,
         recorder: &NoRecorder,
         fusion: None,
         options: Options::threads(2),

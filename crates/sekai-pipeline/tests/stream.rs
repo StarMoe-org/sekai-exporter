@@ -19,7 +19,7 @@ use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
-use sekai_unity::NoBlockCache;
+use sekai_unity::{NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 fn input(name: &str) -> BundleInput {
@@ -172,6 +172,7 @@ fn streamed_in_segments(
         derivations: &MemoryDerivations::default(),
         indexes: &NoBundleIndexes,
         cache: &NoBlockCache,
+        classes: &NoClasses,
         recorder: &NoRecorder,
         fusion: run.fusion,
         options: run.options,

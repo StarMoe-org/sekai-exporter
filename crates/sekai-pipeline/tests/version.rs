@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use sekai_convert::image::Texture;
 use sekai_convert::{Content, Context, Converter, PPtr};
 use sekai_pipeline::{BundleIndexes, BundleInput, NoBundleIndexes, Version};
-use sekai_unity::{ByteSource, Chunk, NoBlockCache};
+use sekai_unity::{ByteSource, Chunk, NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 fn input(file: &str, name: &str) -> BundleInput {
@@ -72,7 +72,8 @@ fn listing(version: &Version<'_>) -> String {
 #[test]
 fn a_stored_index_replaces_reading_the_bundle() {
     let indexes = MemoryIndexes::default();
-    let (first, errors) = Version::open_indexed(fixtures(), &NoBlockCache, &indexes, 4).unwrap();
+    let (first, errors) =
+        Version::open_indexed(fixtures(), &NoBlockCache, &NoClasses, &indexes, 4).unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(indexes.0.lock().unwrap().len(), 2);
     let unread = fixtures()
@@ -82,7 +83,8 @@ fn a_stored_index_replaces_reading_the_bundle() {
             ..input
         })
         .collect();
-    let (second, errors) = Version::open_indexed(unread, &NoBlockCache, &indexes, 1).unwrap();
+    let (second, errors) =
+        Version::open_indexed(unread, &NoBlockCache, &NoClasses, &indexes, 1).unwrap();
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(listing(&first), listing(&second));
     let id = find(&second, "small");
@@ -93,8 +95,14 @@ fn a_stored_index_replaces_reading_the_bundle() {
 #[test]
 fn opening_does_not_depend_on_threads() {
     let open = |threads| {
-        let (version, errors) =
-            Version::open_indexed(fixtures(), &NoBlockCache, &NoBundleIndexes, threads).unwrap();
+        let (version, errors) = Version::open_indexed(
+            fixtures(),
+            &NoBlockCache,
+            &NoClasses,
+            &NoBundleIndexes,
+            threads,
+        )
+        .unwrap();
         assert!(errors.is_empty(), "{errors:?}");
         listing(&version)
     };

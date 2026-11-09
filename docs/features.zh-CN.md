@@ -68,7 +68,7 @@
 | Feature | Crate | 启用的内容 |
 |---|---|---|
 | `cdn` | `sekai-game` | `cp` 与 `nuverse` 来源，含 HTTP 与 TLS |
-| `client` | `sekai-game`、`sekai-pipeline` | `apk` 来源，以及读取客户端安装包内资产所用的字段布局表（`sekai-layouts`） |
+| `client` | `sekai-game`、`sekai-exporter` | `apk` 来源，以及读取客户端安装包内资产所用的字段布局表（`sekai-layouts`） |
 | `catalog-db` | `sekai-catalog` | 保存于 redb 数据库的目录 |
 | `s3` | `sekai-publish` | S3 兼容的 store |
 | `serve` | `sekai-exporter` | 以 HTTP 服务形式运行的惰性求值器；已定义，尚未实现 |

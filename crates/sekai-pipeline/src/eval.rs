@@ -10,6 +10,7 @@ use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, Ob
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
+use sekai_unity::ClassLayouts;
 use sekai_unity::index::VersionIndex;
 use sha2::{Digest, Sha256};
 
@@ -137,6 +138,7 @@ pub(crate) fn fingerprint(
     index: &VersionIndex,
     closure: &[ObjectId],
     resources: &[Vec<[u8; 32]>],
+    classes: &dyn ClassLayouts,
 ) -> [u8; 32] {
     let mut text = format!(
         "fingerprint 1\nform {} {}\nname {name}\nencoder {} {}\nencoder {} {}\nencoder {} {}\nencoder {} {}\n",
@@ -151,6 +153,9 @@ pub(crate) fn fingerprint(
         mp4::NAME,
         mp4::VERSION,
     );
+    if let Some(identity) = classes.identity() {
+        text.push_str(&format!("classes {}\n", hex(&identity)));
+    }
     let mut bundles = BTreeSet::new();
     for id in closure {
         bundles.insert(id.bundle);
@@ -530,4 +535,56 @@ pub(crate) fn run_each(
         });
     }
     Ok(ran)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use sekai_convert::{Asset, Context, ConvertError, ObjectIndex};
+    use sekai_unity::{NoClasses, TypeTree};
+
+    use super::*;
+
+    struct Form;
+
+    impl Converter for Form {
+        fn name(&self) -> &'static str {
+            "form"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn is_root(&self, _: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
+            false
+        }
+
+        fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+            Ok(None)
+        }
+    }
+
+    /// A table of class layouts with the identity `.0`.
+    struct Table([u8; 32]);
+
+    impl ClassLayouts for Table {
+        fn tree(&self, _class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
+            None
+        }
+
+        fn identity(&self) -> Option<[u8; 32]> {
+            Some(self.0)
+        }
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_table_of_class_layouts() {
+        let index = VersionIndex::new(Vec::new());
+        let of = |classes: &dyn ClassLayouts| fingerprint(&Form, "name", &index, &[], &[], classes);
+        assert_eq!(of(&Table([1; 32])), of(&Table([1; 32])));
+        assert_ne!(of(&Table([1; 32])), of(&Table([2; 32])));
+        assert_ne!(of(&Table([1; 32])), of(&NoClasses));
+    }
 }

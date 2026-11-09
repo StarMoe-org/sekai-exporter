@@ -16,7 +16,7 @@ use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, Options, Output};
-use sekai_unity::BoundedBlockCache;
+use sekai_unity::{BoundedBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 /// The most memory one asset may be estimated to need: half of the 32-bit address space.
@@ -123,6 +123,7 @@ pub fn run(
             derivations: &derivations,
             indexes: &NoBundleIndexes,
             cache: &cache,
+            classes: &NoClasses,
             recorder: &NoRecorder,
             fusion: None,
             options: Options::threads(1),

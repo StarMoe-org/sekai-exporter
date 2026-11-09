@@ -19,7 +19,7 @@ use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, parallel};
 use sekai_publish::Plan;
-use sekai_unity::{BoundedBlockCache, FileSource};
+use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
 use crate::budget;
 use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
@@ -449,6 +449,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             derivations: &derivations,
             indexes: &indexes,
             cache: &cache,
+            classes: &NoClasses,
             recorder: monitor,
             fusion: options
                 .storage

@@ -12,7 +12,8 @@ use std::sync::Arc;
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
 use sekai_unity::index::{BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file};
 use sekai_unity::{
-    BlockCache, BoundedBlockCache, Bundle, ByteSource, NoBlockCache, SerializedFile,
+    BlockCache, BoundedBlockCache, Bundle, ByteSource, NoBlockCache, SerializedFile, StoredFile,
+    store_files,
 };
 use sha2::{Digest, Sha256};
 
@@ -214,4 +215,39 @@ fn value_trees_read_every_object() {
     }
     // Two AssetBundle objects, the MonoBehaviour and the TextAsset.
     assert_eq!(checked, 4);
+}
+
+#[test]
+fn stored_files_read_back_from_their_container() {
+    let files = [
+        StoredFile {
+            path: "level0".into(),
+            bytes: b"serialized".to_vec(),
+            serialized: true,
+        },
+        StoredFile {
+            path: "level0.resS".into(),
+            bytes: b"large data".to_vec(),
+            serialized: false,
+        },
+    ];
+    let container = store_files(&files).unwrap();
+    let size = container.len() as u64;
+    let bundle = Bundle::open(Arc::new(container), [0; 32]).unwrap();
+    assert_eq!(bundle.header().size, size);
+    let read: Vec<StoredFile> = (0..bundle.entries().len())
+        .map(|i| {
+            let entry = &bundle.entries()[i];
+            StoredFile {
+                path: entry.path.clone(),
+                bytes: bundle
+                    .entry(i, &NoBlockCache)
+                    .read(0, entry.size as usize)
+                    .unwrap()
+                    .to_vec(),
+                serialized: entry.is_serialized(),
+            }
+        })
+        .collect();
+    assert_eq!(read, files);
 }

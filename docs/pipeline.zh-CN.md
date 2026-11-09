@@ -57,4 +57,8 @@
 
 ## client 来源
 
-客户端安装包内的资产经过同一条管线。P1 中的清单替换为安装包内的 player data 文件列表；P3 中，不带 type tree 的对象使用 `sekai-layouts` 中的字段布局表读取。每个对象都必须恰好读到其末尾；未能恰好读完的对象以原始字节写出，并附具名错误。
+客户端安装包内的资产经过同一条管线。`--class-table` 指定一个含引擎类布局的 TPK 文件时，`sekai-exporter export` 读取 APK，或包含多个 APK 的 XAPK。`assets/bin/Data/` 下的文件，或其中 UnityFS 容器的条目，组成一个名为 `player` 的资源包。player data 分段存放的文件会先拼接。
+
+不带 type tree 的对象，按其所在文件声明的 Unity 版本取所属类的布局读取。`MonoBehaviour` 还需要脚本的布局，因此记录为错误 `no_layout`。每个对象都必须恰好读到其末尾；未能恰好读完的对象记录具名错误。
+
+`ResourceManager` 对象的容器与 `AssetBundle` 对象的容器一样为资产命名，用的是游戏使用的加载路径。TPK 文件的哈希计入本次运行所有资产的指纹。

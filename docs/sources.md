@@ -11,7 +11,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 | `cp` | Versions, manifests and bundles from the distribution service used by the Japanese and English versions | `jp`, `en` |
 | `nuverse` | Versions, manifests and bundles from the distribution service used by the Chinese, Taiwanese and Korean versions | `cn`, `tw`, `kr` |
 | `dir` | Bundles already present in a local directory | Offline runs and tests |
-| `apk` | Player data from a client package, and the client identity it contains | The `client` feature |
+| `apk` | Player data from a client package, read by `export` with a TPK file of engine class layouts | The `client` feature |
 
 A `dir` region takes its bundles from its directory. A `cp` or `nuverse` region downloads the manifest and the bundles and records them in `<output>/inputs`, which holds game data (see [The input store](#the-input-store)).
 

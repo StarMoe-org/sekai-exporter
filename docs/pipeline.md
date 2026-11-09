@@ -57,4 +57,8 @@ Game data tables are read from the region's `tables` source. Table rows are not 
 
 ## The client source
 
-Assets inside the client package go through the same pipeline. In P1 the manifest is replaced by the list of player data files in the package. In P3, objects without type trees are read with the field layout tables in `sekai-layouts`. Every object must be read exactly to its end; an object that is not read exactly is written as raw bytes with a named error.
+Assets inside the client package go through the same pipeline. `sekai-exporter export` reads an APK, or an XAPK that holds several APKs, when `--class-table` names a TPK file with the layouts of the engine classes. The files under `assets/bin/Data/`, or the entries of a UnityFS container among them, become one bundle named `player`. Files that the player data stores in parts are joined first.
+
+Objects without type trees are read with the layout of their class at the Unity version their file states. A `MonoBehaviour` also needs the layout of its script, so it is recorded with the error `no_layout`. Every object must be read exactly to its end; an object that is not read exactly is recorded with a named error.
+
+The container of the `ResourceManager` object names assets as the container of an `AssetBundle` object does, with the load paths the game uses. The hash of the TPK file is part of the fingerprint of every asset of the run.

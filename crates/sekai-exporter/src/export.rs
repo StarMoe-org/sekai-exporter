@@ -1,4 +1,4 @@
-//! `sekai-exporter export`: canonical assets for a directory of bundles.
+//! `sekai-exporter export`: canonical assets for a directory of bundles or a client package.
 
 use std::ffi::OsString;
 use std::io;
@@ -14,11 +14,11 @@ use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes};
 use sekai_publish::{Binding, Plan, index, plan, tree};
-use sekai_unity::BoundedBlockCache;
+use sekai_unity::{BoundedBlockCache, ClassLayouts, NoClasses};
 use sha2::{Digest, Sha256};
 
-use crate::budget;
 use crate::monitor::Monitor;
+use crate::{budget, client};
 
 pub(crate) const BLOCK_CACHE_BYTES: usize = 256 << 20;
 
@@ -165,6 +165,7 @@ struct Options {
     input: PathBuf,
     output: PathBuf,
     tree: Option<PathBuf>,
+    class_table: Option<PathBuf>,
     threads: usize,
     memory: Option<u64>,
     plain: bool,
@@ -176,6 +177,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut positional = Vec::new();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut tree = None;
+    let mut class_table = None;
     let mut memory = None;
     let mut plain = false;
     while let Some(arg) = parser.next()? {
@@ -184,6 +186,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("memory") => memory = Some(budget::parse_bytes(&parser.value()?.string()?)?),
             Long("plain") => plain = true,
             Long("tree") => tree = Some(PathBuf::from(parser.value()?)),
+            Long("class-table") => class_table = Some(PathBuf::from(parser.value()?)),
             Value(v) => positional.push(PathBuf::from(v)),
             _ => return Err(arg.unexpected()),
         }
@@ -195,9 +198,39 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         input,
         output,
         tree,
+        class_table,
         threads: threads.max(1),
         memory,
         plain,
+    })
+}
+
+/// What an export reads.
+pub(crate) struct Source<'a> {
+    /// The bundles to evaluate.
+    pub(crate) manifest: Vec<Entry>,
+    /// The bytes of the bundles.
+    pub(crate) inputs: Box<dyn Inputs + 'a>,
+    /// The layouts of engine classes.
+    pub(crate) classes: Box<dyn ClassLayouts>,
+}
+
+/// The source of an export: a client package when a class table comes with it, and otherwise a
+/// directory of bundles.
+fn source(options: &Options) -> Result<Source<'_>, lexopt::Error> {
+    match &options.class_table {
+        Some(table) => client::source(&options.input, table),
+        None => directory(&options.input),
+    }
+}
+
+fn directory(root: &Path) -> Result<Source<'_>, lexopt::Error> {
+    let mut manifest = Vec::new();
+    walk(root, "", &mut manifest).map_err(|e| format!("{}: {e}", root.display()))?;
+    Ok(Source {
+        manifest,
+        inputs: Box::new(Directory { root }),
+        classes: Box::new(NoClasses),
     })
 }
 
@@ -251,18 +284,18 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
 }
 
 fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let input = |e: io::Error| format!("{}: {e}", options.input.display());
-    let mut manifest = Vec::new();
-    walk(&options.input, "", &mut manifest).map_err(input)?;
-    let inputs = Directory {
-        root: &options.input,
-    };
+    let Source {
+        mut manifest,
+        inputs,
+        classes,
+    } = source(options)?;
+    let inputs = inputs.as_ref();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     {
         let _span = monitor.span("manifest", "dependencies", "");
         stream::with_dependencies(
             &mut manifest,
-            &inputs,
+            inputs,
             &cache,
             &NoBundleIndexes,
             options.threads,
@@ -276,7 +309,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let converters = converters(None);
     let streamed = stream::evaluate(
         &manifest,
-        &inputs,
+        inputs,
         &Stream {
             converters: &converters,
             naming: &InBundle,
@@ -284,6 +317,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             derivations: derivations.as_ref(),
             indexes: &NoBundleIndexes,
             cache: &cache,
+            classes: classes.as_ref(),
             recorder: monitor,
             fusion: None,
             options: budget::options(options.threads, options.memory, options.plain),

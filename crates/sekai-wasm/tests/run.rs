@@ -9,7 +9,7 @@ use sekai_catalog::LocalStore;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, MemoryDerivations, NoBundleIndexes, Options};
-use sekai_unity::NoBlockCache;
+use sekai_unity::{NoBlockCache, NoClasses};
 use sekai_wasm::{converters, row, run};
 use sha2::{Digest, Sha256};
 
@@ -68,6 +68,7 @@ fn the_in_memory_run_writes_what_a_native_run_writes() {
             derivations: &MemoryDerivations::default(),
             indexes: &NoBundleIndexes,
             cache: &NoBlockCache,
+            classes: &NoClasses,
             recorder: &NoRecorder,
             fusion: None,
             options: Options::threads(2),

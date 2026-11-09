@@ -177,8 +177,13 @@ impl<'a> Lazy<'a> {
                 }),
             }
         }
-        let (version, more) =
-            Version::open_indexed(inputs, self.stream.cache, self.stream.indexes, 1)?;
+        let (version, more) = Version::open_indexed(
+            inputs,
+            self.stream.cache,
+            self.stream.classes,
+            self.stream.indexes,
+            1,
+        )?;
         errors.extend(more);
         errors.sort_by(|a, b| a.name.cmp(&b.name));
         let version = version.sharing(self.parsed.clone());

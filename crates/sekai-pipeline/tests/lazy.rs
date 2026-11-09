@@ -15,7 +15,7 @@ use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::{NoRecorder, Recorder, Span};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, Lazy, MemoryDerivations, NoBundleIndexes, Options, Version};
-use sekai_unity::{ByteSource, Chunk, NoBlockCache};
+use sekai_unity::{ByteSource, Chunk, NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 const FIXTURES: [&str; 2] = ["fixture_scene", "fixture_data"];
@@ -78,6 +78,7 @@ fn context<'a>(
         derivations,
         indexes,
         cache: &NoBlockCache,
+        classes: &NoClasses,
         recorder,
         fusion: None,
         options: Options::threads(1),
@@ -316,7 +317,7 @@ impl Inputs for CountedFixtures {
 fn a_request_reads_only_the_bundles_of_its_closure() {
     let indexes = MemoryIndexes::default();
     let all = FIXTURES.iter().map(|file| input(file)).collect();
-    drop(Version::open_indexed(all, &NoBlockCache, &indexes, 1).unwrap());
+    drop(Version::open_indexed(all, &NoBlockCache, &NoClasses, &indexes, 1).unwrap());
 
     let read = Arc::new(Mutex::new(BTreeSet::new()));
     let inputs = CountedFixtures(read.clone());

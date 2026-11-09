@@ -19,7 +19,7 @@ use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{
     BundleInput, Evaluation, Fusion, MemoryDerivations, NoBundleIndexes, Options,
 };
-use sekai_unity::NoBlockCache;
+use sekai_unity::{NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 fn input(file: &str) -> BundleInput {
@@ -71,6 +71,7 @@ fn evaluate(
         derivations,
         indexes: &NoBundleIndexes,
         cache: &NoBlockCache,
+        classes: &NoClasses,
         recorder: &NoRecorder,
         fusion,
         options: *options,

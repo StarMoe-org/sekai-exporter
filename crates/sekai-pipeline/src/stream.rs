@@ -23,7 +23,7 @@ use sekai_catalog::{BundleIndexes, Derivations, Store};
 use sekai_convert::{Converter, ObjectId};
 use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
-use sekai_unity::{BlockCache, ByteSource};
+use sekai_unity::{BlockCache, ByteSource, ClassLayouts};
 
 use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned};
 use crate::ledger::{BundleLedger, Tally};
@@ -102,6 +102,8 @@ pub struct Stream<'a> {
     pub indexes: &'a dyn BundleIndexes,
     /// The cache of decompressed blocks.
     pub cache: &'a dyn BlockCache,
+    /// The layouts of engine classes, for objects stored without one.
+    pub classes: &'a dyn ClassLayouts,
     /// Where spans are recorded.
     pub recorder: &'a dyn Recorder,
     /// Further files of each converted asset, outside plain mode.
@@ -534,7 +536,8 @@ fn evaluate_segment(
             sha256: bundle.sha256,
         });
     }
-    let (version, errors) = Version::open_indexed(opened, stream.cache, kept, threads)?;
+    let (version, errors) =
+        Version::open_indexed(opened, stream.cache, stream.classes, kept, threads)?;
     let version = version.sharing(parsed.clone());
     for error in errors {
         report(gathered, error);
@@ -732,7 +735,14 @@ pub(crate) fn plan_unit<'a>(
         let mut leaving = BTreeSet::new();
         let declared = converter.inputs(*id, version);
         let closure = closure(index, unit, *id, &declared, window, &mut leaving);
-        let fingerprint = eval::fingerprint(*converter, &name, index, &closure, resources);
+        let fingerprint = eval::fingerprint(
+            *converter,
+            &name,
+            index,
+            &closure,
+            resources,
+            stream.classes,
+        );
         let first = leaving.first().cloned().map(|first| (first, leaving.len()));
         outside.extend(leaving);
         roots.push(Root {

@@ -11,7 +11,7 @@
 | `cp` | 日服与美服所用分发服务的版本、清单与资源包 | `jp`、`en` |
 | `nuverse` | 国服、台服与韩服所用分发服务的版本、清单与资源包 | `cn`、`tw`、`kr` |
 | `dir` | 本地目录中已有的资源包 | 离线运行与测试 |
-| `apk` | 客户端安装包中的 player data，以及其中包含的客户端身份 | `client` feature |
+| `apk` | 客户端安装包中的 player data，由 `export` 配合引擎类布局的 TPK 文件读取 | `client` feature |
 
 `dir` 区服从其目录取得资源包。`cp` 或 `nuverse` 区服下载清单与资源包，并记录在 `<输出目录>/inputs` 中，该目录存放游戏数据（参见[输入 store](#输入-store)）。
 

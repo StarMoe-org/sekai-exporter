@@ -9,7 +9,7 @@ use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
-use sekai_unity::{BlockCache, Bundle, ByteSource, SerializedFile};
+use sekai_unity::{BlockCache, Bundle, ByteSource, ClassLayouts, NoClasses, SerializedFile};
 use sha2::{Digest, Sha256};
 
 use crate::eval::parallel;
@@ -34,13 +34,14 @@ impl Opened {
         source: Arc<dyn ByteSource>,
         id: [u8; 32],
         cache: &dyn BlockCache,
+        classes: &dyn ClassLayouts,
     ) -> sekai_unity::Result<Self> {
         let bundle = Bundle::open(source, id)?;
         let mut files = Vec::new();
         for (i, entry) in bundle.entries().iter().enumerate() {
             if entry.is_serialized() {
                 let file = SerializedFile::parse(&bundle.entry(i, cache))?;
-                let layouts = FileLayouts::new(&file);
+                let layouts = FileLayouts::with_classes(&file, classes);
                 files.push((i, file, layouts));
             }
         }
@@ -97,6 +98,7 @@ impl Opened {
 fn record(
     input: &BundleInput,
     cache: &dyn BlockCache,
+    classes: &dyn ClassLayouts,
     indexes: &dyn BundleIndexes,
 ) -> io::Result<sekai_unity::Result<IndexRecord>> {
     if let Some(record) = indexes
@@ -106,7 +108,7 @@ fn record(
     {
         return Ok(Ok(record));
     }
-    let record = Opened::open(input.source.clone(), input.sha256, cache)
+    let record = Opened::open(input.source.clone(), input.sha256, cache, classes)
         .and_then(|opened| opened.record(cache));
     if let Some(bytes) = record.as_ref().ok().and_then(IndexRecord::encode) {
         indexes.put(input.sha256, bytes)?;
@@ -276,6 +278,7 @@ pub struct Version<'c> {
     parsed: Arc<Parsed>,
     index: VersionIndex,
     cache: &'c dyn BlockCache,
+    classes: &'c dyn ClassLayouts,
 }
 
 impl<'c> Version<'c> {
@@ -283,16 +286,18 @@ impl<'c> Version<'c> {
     /// version and returned with its error. A name names one bundle of a version, so bundles
     /// that share a name are all left out, with the error `duplicate_name`.
     pub fn open(inputs: Vec<BundleInput>, cache: &'c dyn BlockCache) -> (Self, Vec<BundleError>) {
-        Self::open_indexed(inputs, cache, &NoBundleIndexes, 1)
+        Self::open_indexed(inputs, cache, &NoClasses, &NoBundleIndexes, 1)
             .expect("keeping no indexes cannot fail")
     }
 
-    /// Opens `inputs` as [`Version::open`] does, on `threads` threads, reading the index of a
-    /// bundle from `indexes` when it is there and adding it when it is not. The result does not
-    /// depend on `threads` or on what `indexes` holds. Fails only if `indexes` does.
+    /// Opens `inputs` as [`Version::open`] does, on `threads` threads, with the layouts in
+    /// `classes` for objects stored without one, reading the index of a bundle from `indexes` when
+    /// it is there and adding it when it is not. The result does not depend on `threads` or on
+    /// what `indexes` holds. Fails only if `indexes` does.
     pub fn open_indexed(
         mut inputs: Vec<BundleInput>,
         cache: &'c dyn BlockCache,
+        classes: &'c dyn ClassLayouts,
         indexes: &dyn BundleIndexes,
         threads: usize,
     ) -> io::Result<(Self, Vec<BundleError>)> {
@@ -308,7 +313,7 @@ impl<'c> Version<'c> {
             .collect();
         let records = parallel(inputs.len(), threads, |i| {
             (!shared[i])
-                .then(|| record(&inputs[i], cache, indexes))
+                .then(|| record(&inputs[i], cache, classes, indexes))
                 .transpose()
         });
         indexes.flush()?;
@@ -347,6 +352,7 @@ impl<'c> Version<'c> {
             parsed: Arc::new(Parsed::new(PARSED_BYTES)),
             index: VersionIndex::new(bundle_indexes),
             cache,
+            classes,
         };
         Ok((version, errors))
     }
@@ -364,7 +370,12 @@ impl<'c> Version<'c> {
         if let Some(opened) = self.parsed.get(sha256) {
             return Ok(opened);
         }
-        let opened = Arc::new(Opened::open(source.clone(), *sha256, self.cache)?);
+        let opened = Arc::new(Opened::open(
+            source.clone(),
+            *sha256,
+            self.cache,
+            self.classes,
+        )?);
         self.parsed.insert(*sha256, opened.clone());
         Ok(opened)
     }
@@ -527,7 +538,7 @@ mod tests {
         let bytes = std::fs::read(path).unwrap();
         let sha256: [u8; 32] = Sha256::digest(&bytes).into();
         let source: Arc<dyn ByteSource> = Arc::new(Arc::<[u8]>::from(bytes));
-        let opened = Opened::open(source, sha256, &NoBlockCache).unwrap();
+        let opened = Opened::open(source, sha256, &NoBlockCache, &NoClasses).unwrap();
         (sha256, Arc::new(opened))
     }
 

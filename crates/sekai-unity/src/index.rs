@@ -20,11 +20,31 @@ use crate::value::{Value, read_value};
 
 const MONO_SCRIPT: i32 = 115;
 const MONO_BEHAVIOUR: i32 = 114;
+/// The field that holds the target of a container entry: `asset` in an `AssetBundle`, `second` in
+/// a `ResourceManager`.
+const CONTAINER_TARGETS: [&str; 2] = ["asset", "second"];
 
 /// Type trees of engine classes, for files stored without them.
 pub trait ClassLayouts: Sync {
     /// The type tree of `class_id` in the Unity version `unity_version`.
     fn tree(&self, class_id: i32, unity_version: &str) -> Option<Arc<TypeTree>>;
+
+    /// The hash of the data the trees come from, when there are any trees.
+    fn identity(&self) -> Option<[u8; 32]>;
+}
+
+/// No type trees, for files that store their own.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoClasses;
+
+impl ClassLayouts for NoClasses {
+    fn tree(&self, _class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
+        None
+    }
+
+    fn identity(&self) -> Option<[u8; 32]> {
+        None
+    }
 }
 
 /// The compiled layouts of one serialized file.
@@ -37,17 +57,13 @@ pub struct FileLayouts {
 impl FileLayouts {
     /// Compiles the type trees of a file. Types without a tree get [`Error::NoLayout`].
     pub fn new(file: &SerializedFile) -> Self {
-        FileLayouts::compile(file, None)
+        FileLayouts::with_classes(file, &NoClasses)
     }
 
     /// Compiles the type trees of a file, taking the layout of types without a tree from
     /// `classes` at the file's Unity version. A `MonoBehaviour` stores its script's fields after
     /// its engine header, so it gets [`Error::NoLayout`] whatever `classes` holds.
     pub fn with_classes(file: &SerializedFile, classes: &dyn ClassLayouts) -> Self {
-        FileLayouts::compile(file, Some(classes))
-    }
-
-    fn compile(file: &SerializedFile, classes: Option<&dyn ClassLayouts>) -> Self {
         let types = file
             .types
             .iter()
@@ -75,15 +91,17 @@ impl FileLayouts {
 fn type_layout(
     serialized: &SerializedType,
     unity_version: &str,
-    classes: Option<&dyn ClassLayouts>,
+    classes: &dyn ClassLayouts,
 ) -> Result<Layout> {
     if let Some(tree) = &serialized.tree {
         return Layout::compile(tree);
     }
     let class_id = serialized.class_id;
+    if class_id == MONO_BEHAVIOUR {
+        return Err(Error::NoLayout { class_id });
+    }
     let tree = classes
-        .filter(|_| class_id != MONO_BEHAVIOUR)
-        .and_then(|classes| classes.tree(class_id, unity_version))
+        .tree(class_id, unity_version)
         .ok_or(Error::NoLayout { class_id })?;
     Layout::compile(&tree)
 }
@@ -189,7 +207,8 @@ pub struct FileIndex {
     pub externals: Vec<External>,
     /// One record per object, in object table order.
     pub objects: Vec<ObjectIndex>,
-    /// The container of the file's `AssetBundle` object: each path and the object it names.
+    /// The container of the file's `AssetBundle` or `ResourceManager` object: each path and the
+    /// object it names.
     pub container: Vec<(String, PPtr)>,
 }
 
@@ -322,7 +341,7 @@ impl Visitor for IndexVisitor {
             self.script = Some(p);
         }
         if self.in_container()
-            && field.name == "asset"
+            && CONTAINER_TARGETS.contains(&field.name)
             && let Some(path) = self.container_path.take()
         {
             self.container.push((path, p));
@@ -619,15 +638,38 @@ mod tests {
         fn tree(&self, _class_id: i32, unity_version: &str) -> Option<Arc<TypeTree>> {
             (unity_version == "2022.3.62f2").then(|| tree_of(FROM_TABLE))
         }
+
+        fn identity(&self) -> Option<[u8; 32]> {
+            Some([1; 32])
+        }
     }
 
-    /// A table that has no tree for any class.
-    struct NoTrees;
+    /// The container of an object whose one entry holds its target in the field `target`.
+    fn container_with_target(target: &str) -> Vec<(String, PPtr)> {
+        let field = |name| Field {
+            name,
+            type_name: "",
+            has_references: true,
+        };
+        let mut visitor = IndexVisitor::default();
+        visitor.begin_struct(&field("Base")).unwrap();
+        visitor.begin_array(&field("m_Container"), 1, true).unwrap();
+        visitor.string(&field("first"), b"fonts/body").unwrap();
+        visitor.pptr(&field(target), 1, 5).unwrap();
+        visitor.container
+    }
 
-    impl ClassLayouts for NoTrees {
-        fn tree(&self, _class_id: i32, _unity_version: &str) -> Option<Arc<TypeTree>> {
-            None
-        }
+    #[test]
+    fn a_container_entry_names_the_target_of_either_kind_of_container() {
+        let expected = vec![(
+            "fonts/body".to_owned(),
+            PPtr {
+                file_id: 1,
+                path_id: 5,
+            },
+        )];
+        assert_eq!(container_with_target("asset"), expected);
+        assert_eq!(container_with_target("second"), expected);
     }
 
     #[test]
@@ -647,7 +689,7 @@ mod tests {
     #[test]
     fn a_table_without_the_class_leaves_no_layout() {
         let file = file("2022.3.62f2", false);
-        let layouts = FileLayouts::with_classes(&file, &NoTrees);
+        let layouts = FileLayouts::with_classes(&file, &NoClasses);
         assert!(layouts.get(0).is_err_and(|e| e.code() == "no_layout"));
     }
 
@@ -677,6 +719,10 @@ mod tests {
             self.0
                 .fetch_or(class_id == MONO_BEHAVIOUR, Ordering::Relaxed);
             (class_id != MONO_BEHAVIOUR).then(|| tree_of(FROM_TABLE))
+        }
+
+        fn identity(&self) -> Option<[u8; 32]> {
+            None
         }
     }
 

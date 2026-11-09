@@ -17,11 +17,11 @@ pub mod source;
 pub mod typetree;
 pub mod value;
 
-pub use bundle::{Bundle, Entry};
+pub use bundle::{Bundle, Entry, StoredFile, store_files};
 pub use cache::{BlockCache, BoundedBlockCache, NoBlockCache};
 pub use endian::Endian;
 pub use error::{Error, Result};
-pub use index::ClassLayouts;
+pub use index::{ClassLayouts, NoClasses};
 pub use layout::Layout;
 pub use read::{Field, Scalar, Visitor, read_object};
 pub use serialized::SerializedFile;

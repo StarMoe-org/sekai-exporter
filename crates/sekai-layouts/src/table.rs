@@ -19,6 +19,8 @@ pub struct VersionTable {
     pub(crate) classes: BTreeMap<i32, Vec<ClassVersion>>,
     pub(crate) nodes: Vec<Node>,
     pub(crate) strings: Vec<String>,
+    /// The SHA-256 of the TPK file.
+    pub(crate) sha256: [u8; 32],
 }
 
 /// What a class is from one Unity version on.
@@ -94,6 +96,10 @@ impl ClassLayouts for VersionTable {
             pending.extend(node.subnodes.iter().rev().map(|&id| (id, below)));
         }
         TypeTree::from_nodes(nodes).ok().map(Arc::new)
+    }
+
+    fn identity(&self) -> Option<[u8; 32]> {
+        Some(self.sha256)
     }
 }
 

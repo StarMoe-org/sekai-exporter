@@ -22,6 +22,11 @@ const BLOCKS_INFO_PADDING: u32 = 0x200;
 /// The entry is a serialized file.
 const ENTRY_SERIALIZED: u32 = 0x4;
 
+/// The container format version of the containers [`store_files`] writes.
+const STORED_FORMAT_VERSION: u32 = 6;
+/// The size of the hash at the start of the directory.
+const DIRECTORY_HASH: usize = 16;
+
 /// Whether `bytes` start with the UnityFS signature.
 pub fn is_unityfs(bytes: &[u8]) -> bool {
     bytes.len() > SIGNATURE.len() && bytes.starts_with(SIGNATURE) && bytes[SIGNATURE.len()] == 0
@@ -420,6 +425,73 @@ fn sub(chunk: Chunk<'_>, start: usize, end: usize) -> Chunk<'_> {
         },
         Chunk::Owned(bytes) => Chunk::Owned(bytes[start..end].to_vec()),
     }
+}
+
+/// A file to store in a new UnityFS container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredFile {
+    /// The entry path.
+    pub path: String,
+    /// The bytes of the file.
+    pub bytes: Vec<u8>,
+    /// Whether the file is a serialized file.
+    pub serialized: bool,
+}
+
+/// A UnityFS container of `files`, in the given order, each one block without compression.
+pub fn store_files(files: &[StoredFile]) -> Result<Vec<u8>> {
+    let directory = stored_directory(files)?;
+    let directory_size = u32::try_from(directory.len())
+        .map_err(|_| Error::malformed("UnityFS directory", "too large to store"))?;
+    let mut out = Vec::new();
+    out.extend_from_slice(SIGNATURE);
+    out.push(0);
+    out.extend_from_slice(&STORED_FORMAT_VERSION.to_be_bytes());
+    // Neither the engine version nor its revision is known here: serialized files state their
+    // own.
+    out.extend_from_slice(&[0, 0]);
+    let size_at = out.len();
+    out.extend_from_slice(&0u64.to_be_bytes());
+    out.extend_from_slice(&directory_size.to_be_bytes());
+    out.extend_from_slice(&directory_size.to_be_bytes());
+    out.extend_from_slice(&0u32.to_be_bytes());
+    out.extend_from_slice(&directory);
+    for file in files {
+        out.extend_from_slice(&file.bytes);
+    }
+    let size = out.len() as u64;
+    out[size_at..size_at + size_of::<u64>()].copy_from_slice(&size.to_be_bytes());
+    Ok(out)
+}
+
+/// The directory of a container of `files`, without compression.
+fn stored_directory(files: &[StoredFile]) -> Result<Vec<u8>> {
+    let count = i32::try_from(files.len())
+        .map_err(|_| Error::malformed("UnityFS directory", "too many files to store"))?;
+    let mut blocks = Vec::new();
+    let mut entries = Vec::new();
+    let mut offset = 0u64;
+    for file in files {
+        let size = u32::try_from(file.bytes.len()).map_err(|_| {
+            Error::malformed("UnityFS directory", format!("{} is too large", file.path))
+        })?;
+        blocks.extend_from_slice(&size.to_be_bytes());
+        blocks.extend_from_slice(&size.to_be_bytes());
+        blocks.extend_from_slice(&0u16.to_be_bytes());
+        entries.extend_from_slice(&offset.to_be_bytes());
+        entries.extend_from_slice(&u64::from(size).to_be_bytes());
+        let flags = if file.serialized { ENTRY_SERIALIZED } else { 0 };
+        entries.extend_from_slice(&flags.to_be_bytes());
+        entries.extend_from_slice(file.path.as_bytes());
+        entries.push(0);
+        offset += u64::from(size);
+    }
+    let mut directory = vec![0; DIRECTORY_HASH];
+    directory.extend_from_slice(&count.to_be_bytes());
+    directory.append(&mut blocks);
+    directory.extend_from_slice(&count.to_be_bytes());
+    directory.append(&mut entries);
+    Ok(directory)
 }
 
 /// Decompresses `stored` into exactly `size` bytes.

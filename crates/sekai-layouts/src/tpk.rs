@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use lzma_rs::decompress::{Options, UnpackedSize};
+use sha2::{Digest, Sha256};
 
 use crate::buffer::Buffer;
 use crate::error::TpkError;
@@ -46,7 +47,11 @@ pub(crate) fn read(file: &[u8]) -> Result<VersionTable, TpkError> {
     let stored = header.u32()? as usize;
     let size = header.u32()? as usize;
     let blob = decompress(compression, header.bytes(stored)?, size)?;
-    read_blob(&mut Buffer::new(&blob), format_version)
+    read_blob(
+        &mut Buffer::new(&blob),
+        format_version,
+        Sha256::digest(file).into(),
+    )
 }
 
 fn decompress(compression: u8, stored: &[u8], size: usize) -> Result<Vec<u8>, TpkError> {
@@ -80,7 +85,11 @@ fn decompress_lzma(mut stored: &[u8], size: usize) -> Result<Vec<u8>, TpkError> 
     Ok(blob)
 }
 
-fn read_blob(blob: &mut Buffer<'_>, format_version: u8) -> Result<VersionTable, TpkError> {
+fn read_blob(
+    blob: &mut Buffer<'_>,
+    format_version: u8,
+    sha256: [u8; 32],
+) -> Result<VersionTable, TpkError> {
     blob.skip(8)?; // the creation time
     blob.skip_list(8)?; // the Unity versions
     let classes = read_classes(blob)?;
@@ -95,6 +104,7 @@ fn read_blob(blob: &mut Buffer<'_>, format_version: u8) -> Result<VersionTable, 
         classes,
         nodes,
         strings,
+        sha256,
     })
 }
 

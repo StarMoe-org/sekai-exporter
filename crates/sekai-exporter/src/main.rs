@@ -1,6 +1,19 @@
 //! The command-line program of the exporter.
 
 mod budget;
+#[cfg(feature = "client")]
+mod client;
+#[cfg(not(feature = "client"))]
+mod client {
+    use std::path::Path;
+
+    use crate::export::Source;
+
+    /// Refuses a client package that this build cannot read.
+    pub(crate) fn source(_package: &Path, _table: &Path) -> Result<Source<'static>, lexopt::Error> {
+        Err("this build has no client source: enable the client feature".into())
+    }
+}
 mod export;
 mod monitor;
 mod objects;
@@ -62,10 +75,14 @@ const USAGE: &str = "\
 usage: sekai-exporter <command> [options]
 
 commands:
-  export <input> <output> [--tree <dir>] [--threads <n>] [--memory <bytes>] [--plain]
+  export <input> <output> [--class-table <file>] [--tree <dir>] [--threads <n>]
+         [--memory <bytes>] [--plain]
       Convert every bundle file under <input>, named by its path under <input>
       with / separators, to canonical assets in <output>/store, and list them in
-      <output>/assets.tsv. Each bundle is evaluated with the bundles that hold
+      <output>/assets.tsv. With --class-table, a TPK file of engine class
+      layouts, <input> is instead a client package (APK or XAPK): its player
+      data is one bundle named player, and its assets are named by load path.
+      Each bundle is evaluated with the bundles that hold
       the external files it names. What became of every object of each bundle
       is in <output>/ledger.tsv. CPU and memory use and the time of each stage
       are written to <output>/metrics.jsonl. The index is published under

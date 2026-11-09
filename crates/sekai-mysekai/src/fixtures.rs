@@ -40,8 +40,8 @@ struct Row {
     #[serde(rename = "mysekaiFixturePutSoundId")]
     put_sound_id: i64,
     assetbundle_name: String,
-    first_put_cost: i64,
-    second_put_cost: i64,
+    first_put_cost: Option<i64>,
+    second_put_cost: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -121,7 +121,7 @@ struct Fixture {
     assetbundle_name: String,
     color_ids: Vec<i64>,
     description: String,
-    first_put_cost: i64,
+    first_put_cost: Option<i64>,
     fixture_type: FixtureType,
     fixture_type_value: i64,
     grid_depth: i64,
@@ -136,7 +136,7 @@ struct Fixture {
     player_action_type_value: i64,
     put_sound_id: i64,
     put_type: String,
-    second_put_cost: i64,
+    second_put_cost: Option<i64>,
     sub_genre_id: Option<i64>,
 }
 
@@ -181,8 +181,9 @@ impl TableConverter for Fixtures {
     }
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let fixtures = sorted(rows(cx, TABLE)?);
-        Ok(Box::new(OneAsset::new(NAME, move || build(&fixtures))))
+        Ok(Box::new(OneAsset::new(NAME, move || {
+            build(&sorted(rows(cx, TABLE)?))
+        })))
     }
 }
 
@@ -305,6 +306,16 @@ mod tests {
     }
 
     #[test]
+    fn a_version_without_placement_costs_writes_null() {
+        let mut row = row(1, "a name");
+        row.as_object_mut().unwrap().remove("firstPutCost");
+        row.as_object_mut().unwrap().remove("secondPutCost");
+        let document = document(table(json!([row])));
+        assert_eq!(document["fixtures"][0]["firstPutCost"], json!(null));
+        assert_eq!(document["fixtures"][0]["secondPutCost"], json!(null));
+    }
+
+    #[test]
     fn each_kind_and_action_takes_its_number() {
         let kinds = [
             ("system", 0),
@@ -366,7 +377,6 @@ mod tests {
             "mysekaiFixtureType",
             "mysekaiSettableLayoutType",
             "mysekaiFixtureAnotherColors",
-            "firstPutCost",
             "assetbundleName",
         ] {
             let mut incomplete = row(1, "a name");

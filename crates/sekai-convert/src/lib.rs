@@ -18,6 +18,7 @@ pub use sekai_unity::{Chunk, Value};
 pub mod animation;
 #[cfg(feature = "audio")]
 pub mod audio;
+pub mod fields;
 #[cfg(feature = "image")]
 pub mod image;
 #[cfg(feature = "live2d")]

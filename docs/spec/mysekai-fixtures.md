@@ -23,7 +23,7 @@ The document holds `version` (1) and `fixtures`.
 | `assetbundleName` | The name of the piece's asset bundle. The model package of the piece is this name behind the fixed prefix `mysekai__fixture__`. A model may be named by more than one entry |
 | `colorIds` | The colour cells of the piece: the ascending distinct texture ids of its other colours that are above 0, then 1, which is always a cell |
 | `description` | The flavour text |
-| `firstPutCost` | The layout cost of the first placement |
+| `firstPutCost` | The layout cost of the first placement, or `null` in a version whose table has no such column |
 | `fixtureType` | `system`, `custom`, `plant`, `house_plant`, `surface_appearance`, `gate`, `normal` or `canvas` |
 | `fixtureTypeValue` | The number of `fixtureType`: `system` 0, `custom` 1, `plant` 2, `house_plant` 3, `surface_appearance` 4, `gate` 5, `normal` 6, `canvas` 7 |
 | `gridDepth` | The depth of the piece on the furniture grid, in cells |
@@ -38,7 +38,7 @@ The document holds `version` (1) and `fixtures`.
 | `playerActionTypeValue` | The number of `playerActionType`: `no_action` 0, `loop` 1, `timeline` 2, `one_shot` 3 |
 | `putSoundId` | The id of the row of the put sound table that names the cue a placement plays |
 | `putType` | The put type of the piece as written, for example `none`, `put_base` or `put_target`. It decides which pieces are placed together |
-| `secondPutCost` | The layout cost of a placement after the first |
+| `secondPutCost` | The layout cost of a placement after the first, or `null` in a version whose table has no such column |
 | `subGenreId` | The sub genre of the piece, an id of the sub genre table, or `null` |
 
 A reader decides that a wall, a window pane or a clock is a wall fixture, and a road a road fixture, from `layoutType` first and `handleType` second. A wall and a floor appearance share a model, so a runtime that identifies a piece by its package reads the entry of each id, not one entry per package.

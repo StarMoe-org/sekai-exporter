@@ -6,7 +6,7 @@
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex};
 
 use crate::roots;
-use crate::scenario::fields_document;
+use sekai_convert::fields::fields_document;
 
 /// The script of the master of ceremonies of a virtual live, as a JSON document.
 #[derive(Debug, Clone, Copy, Default)]

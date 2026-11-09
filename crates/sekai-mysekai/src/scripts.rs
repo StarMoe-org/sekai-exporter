@@ -17,7 +17,7 @@ const DEFINES: &str = "defines";
 const LIBRARY: &str = "lib";
 
 /// The role of the one member of a runtime document.
-const DOCUMENT: &str = "document";
+pub(crate) const DOCUMENT: &str = "document";
 
 const RANDOM_VARIABLE: &str = "rand";
 

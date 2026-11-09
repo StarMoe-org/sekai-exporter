@@ -204,21 +204,32 @@ pub(crate) struct TalkReader<'a> {
     constants: Constants,
 }
 
-impl<'a> TalkReader<'a> {
-    /// The reader of the version, if the version holds both packages.
-    pub(crate) fn open(cx: &'a dyn TableContext) -> Result<Option<Self>, ConvertError> {
-        let (Some(scripts), Some(library)) = (
-            Scripts::open(cx, TALK_BUNDLE),
-            Scripts::open(cx, LIBRARY_BUNDLE),
-        ) else {
-            return Ok(None);
-        };
-        Ok(Some(Self {
-            scripts,
-            constants: library.defines()?,
-        }))
+/// The packages the talk scripts of a version are read from.
+#[derive(Clone, Copy)]
+pub(crate) struct TalkPackages<'a> {
+    scripts: Scripts<'a>,
+    library: Scripts<'a>,
+}
+
+impl<'a> TalkPackages<'a> {
+    /// The packages of the version, if it holds both.
+    pub(crate) fn open(cx: &'a dyn TableContext) -> Option<Self> {
+        Some(Self {
+            scripts: Scripts::open(cx, TALK_BUNDLE)?,
+            library: Scripts::open(cx, LIBRARY_BUNDLE)?,
+        })
     }
 
+    /// The reader of the scripts of the packages.
+    pub(crate) fn reader(self) -> Result<TalkReader<'a>, ConvertError> {
+        Ok(TalkReader {
+            scripts: self.scripts,
+            constants: self.library.defines()?,
+        })
+    }
+}
+
+impl TalkReader<'_> {
     /// The script `lua`, given without its extension.
     pub(crate) fn read(&self, lua: &str) -> Result<TalkScript, ConvertError> {
         let steps = self

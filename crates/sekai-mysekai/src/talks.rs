@@ -11,7 +11,7 @@ use sekai_convert::{Asset, ConvertError};
 use serde::{Deserialize, Serialize};
 
 use crate::scripts::{NoAssets, OneAsset, document, malformed, rows};
-use crate::talk_script::{TalkReader, TalkScript};
+use crate::talk_script::{TalkPackages, TalkReader, TalkScript};
 
 const NAME: &str = "mysekai-runtime/talks";
 const FIXTURE_TALKS_NAME: &str = "mysekai-runtime/fixture-talks";
@@ -249,12 +249,11 @@ impl TableConverter for Talks {
     }
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(reader) = TalkReader::open(cx)? else {
+        let Some(packages) = TalkPackages::open(cx) else {
             return Ok(Box::new(NoAssets));
         };
-        let tables = Tables::read(cx)?;
         Ok(Box::new(OneAsset::new(NAME, move || {
-            build(&reader, &tables)
+            build(&packages.reader()?, &Tables::read(cx)?)
         })))
     }
 }
@@ -273,19 +272,22 @@ impl TableConverter for FixtureTalks {
     }
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(reader) = TalkReader::open(cx)? else {
+        let Some(packages) = TalkPackages::open(cx) else {
             return Ok(Box::new(NoAssets));
         };
-        let tables = Tables::read(cx)?;
-        let no_talk: Vec<NoTalkRow> = rows(cx, NO_TALK_FIXTURE_ACTIONS)?;
-        let no_talk: BTreeSet<(i64, i64)> = no_talk
-            .iter()
-            .map(|row| (row.mysekai_fixture_id, row.game_character_unit_id))
-            .collect();
         Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, move || {
-            build_fixture_talks(&reader, &tables, &no_talk)
+            build_fixture_talks(&packages.reader()?, &Tables::read(cx)?, &no_talk_pairs(cx)?)
         })))
     }
+}
+
+/// The pairs of a fixture and a unit that have no talk at that fixture.
+fn no_talk_pairs(cx: &dyn TableContext) -> Result<BTreeSet<(i64, i64)>, ConvertError> {
+    let table: Vec<NoTalkRow> = rows(cx, NO_TALK_FIXTURE_ACTIONS)?;
+    Ok(table
+        .iter()
+        .map(|row| (row.mysekai_fixture_id, row.game_character_unit_id))
+        .collect())
 }
 
 /// The game data tables of the talks, joined by their keys.

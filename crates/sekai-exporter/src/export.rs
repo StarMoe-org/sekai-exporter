@@ -92,6 +92,17 @@ fn live2d() -> Vec<Box<dyn Converter>> {
     ]
 }
 
+#[cfg(feature = "mysekai")]
+fn facial_table() -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_mysekai::facial::FacialTable)]
+}
+
+#[cfg(not(feature = "mysekai"))]
+fn facial_table() -> Vec<Box<dyn Converter>> {
+    use sekai_convert::roots::{Absent, facial_table};
+    vec![Absent::boxed("facial-table", facial_table)]
+}
+
 #[cfg(feature = "scenario")]
 fn scenario() -> Vec<Box<dyn Converter>> {
     vec![Box::new(sekai_moesekai::scenario::Scenario)]
@@ -159,6 +170,7 @@ pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
         video(),
         text(),
         live2d(),
+        facial_table(),
         scenario(),
         virtual_live(),
         story_data(),

@@ -19,6 +19,13 @@ const LIVE2D_MODEL_DATA: &str = "Assembly-CSharp/Sekai.Live2D.Live2DBuildModelDa
 /// The script of the build data of a set of Live2D motions.
 const LIVE2D_MOTION_DATA: &str = "Assembly-CSharp/Sekai.Live2D.Live2DBuildMotionData";
 
+/// The scripts of the facial tables of the MySekai characters.
+const FACIAL_TABLES: &[&str] = &[
+    "Assembly-CSharp/Sekai.Mysekai.NPCAvatarEyeDataList",
+    "Assembly-CSharp/Sekai.Mysekai.NPCAvatarLipSyncDataList",
+    "Assembly-CSharp/Sekai.Mysekai.NPCAvatarDefaultFacialDataList",
+];
+
 /// The container path ending of a cue sheet.
 const CUE_SHEET: &str = ".acb.bytes";
 /// The container path ending of a USM file.
@@ -78,6 +85,11 @@ pub fn text(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bo
 /// The roots of the `font` form.
 pub fn font(object: &ObjectIndex, _script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == FONT
+}
+
+/// The roots of the `facial-table` form.
+pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR && script.is_some_and(|name| FACIAL_TABLES.contains(&name))
 }
 
 /// The roots of the `live2d-model` form.

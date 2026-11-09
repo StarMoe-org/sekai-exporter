@@ -181,9 +181,8 @@ impl TableConverter for AloneActions {
         let Some(scripts) = Scripts::open(cx, BUNDLE) else {
             return Ok(Box::new(NoAssets));
         };
-        let table: Vec<Row> = rows(cx, TABLE)?;
         Ok(Box::new(OneAsset::new(NAME, move || {
-            build(scripts, &table)
+            build(scripts, &rows::<Row>(cx, TABLE)?)
         })))
     }
 }

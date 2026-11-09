@@ -99,9 +99,22 @@ impl<'a> Scripts<'a> {
             .then_some(Self { cx, bundle })
     }
 
+    fn asset(&self, name: &str) -> String {
+        format!("{}/{name}.lua", self.bundle)
+    }
+
+    /// Whether the package holds the script `name`, given without its extension.
+    pub(crate) fn holds(&self, name: &str) -> bool {
+        let asset = self.asset(name);
+        self.cx
+            .assets(self.bundle)
+            .binary_search_by(|entry| entry.name.cmp(&asset))
+            .is_ok()
+    }
+
     /// The syntax tree of the script `name`, given without its extension.
     pub(crate) fn parse(&self, name: &str) -> Result<Block, ConvertError> {
-        let asset = format!("{}/{name}.lua", self.bundle);
+        let asset = self.asset(name);
         let bytes = self.cx.member(&asset, TEXT_MEMBER)?;
         let source = String::from_utf8(bytes).map_err(|e| malformed(format!("{asset}: {e}")))?;
         lua::parse(&source).map_err(|e| malformed(format!("{asset}: {e}")))

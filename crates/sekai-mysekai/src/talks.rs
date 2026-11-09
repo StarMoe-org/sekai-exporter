@@ -155,9 +155,11 @@ struct TutorialRow {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FixtureTalksDocument<'t> {
     version: u32,
     talks: Vec<FixtureTalk<'t>>,
+    missing_scripts: &'t BTreeSet<String>,
 }
 
 #[derive(Serialize)]
@@ -185,6 +187,7 @@ struct Document<'t> {
     birthday_party: BirthdayParty<'t>,
     common_some_character: CommonTalks<'t>,
     tutorial: Tutorial<'t>,
+    missing_scripts: &'t BTreeSet<String>,
 }
 
 #[derive(Default, Serialize)]
@@ -224,14 +227,14 @@ struct CommonTalks<'t> {
 #[derive(Serialize)]
 struct BirthdayParty<'t> {
     status: &'static str,
-    scenarios: &'t [BirthdayScenario],
+    scenarios: Vec<&'t BirthdayScenario>,
     talks: BTreeMap<&'t str, TalkScript>,
 }
 
 #[derive(Serialize)]
 struct Tutorial<'t> {
     status: &'static str,
-    rows: &'t [TutorialRow],
+    rows: Vec<&'t TutorialRow>,
     talks: BTreeMap<&'t str, TalkScript>,
 }
 
@@ -253,7 +256,7 @@ impl TableConverter for Talks {
             return Ok(Box::new(NoAssets));
         };
         Ok(Box::new(OneAsset::new(NAME, move || {
-            build(&packages.reader()?, &Tables::read(cx)?)
+            build(&mut packages.reader()?, &Tables::read(cx)?)
         })))
     }
 }
@@ -276,7 +279,11 @@ impl TableConverter for FixtureTalks {
             return Ok(Box::new(NoAssets));
         };
         Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, move || {
-            build_fixture_talks(&packages.reader()?, &Tables::read(cx)?, &no_talk_pairs(cx)?)
+            build_fixture_talks(
+                &mut packages.reader()?,
+                &Tables::read(cx)?,
+                &no_talk_pairs(cx)?,
+            )
         })))
     }
 }
@@ -391,7 +398,7 @@ fn names_any(conditions: &[&Condition], kinds: &[&str]) -> bool {
         .any(|condition| kinds.contains(&condition.kind.as_str()))
 }
 
-fn build(reader: &TalkReader<'_>, tables: &Tables) -> Result<Asset, ConvertError> {
+fn build(reader: &mut TalkReader<'_>, tables: &Tables) -> Result<Asset, ConvertError> {
     let mut units: BTreeMap<String, UnitTalks<'_>> = BTreeMap::new();
     let mut shared = Vec::new();
     for row in &tables.talks {
@@ -399,41 +406,45 @@ fn build(reader: &TalkReader<'_>, tables: &Tables) -> Result<Asset, ConvertError
         let conditions = tables.conditions_of(row.condition_group_id)?;
         match (members, tables.links.get(&row.id)) {
             ([unit], _) if !names_any(&conditions, &FURNITURE_CONDITIONS) => {
-                let units_talks = units.entry(unit.to_string()).or_default();
-                units_talks
-                    .talks
-                    .push(talk(reader, tables, row, conditions)?);
+                if let Some(talk) = talk(reader, tables, row, conditions)? {
+                    units.entry(unit.to_string()).or_default().talks.push(talk);
+                }
             }
             ([_, _, ..], Some(links)) if !names_any(&conditions, &FIXTURE_ANCHOR) => {
-                shared.push(SharedTalk {
-                    talk: talk(reader, tables, row, conditions)?,
-                    condition_group_id: row.condition_group_id,
-                    unit_ids: members,
-                    some_character_talks: links,
-                });
+                if let Some(talk) = talk(reader, tables, row, conditions)? {
+                    shared.push(SharedTalk {
+                        talk,
+                        condition_group_id: row.condition_group_id,
+                        unit_ids: members,
+                        some_character_talks: links,
+                    });
+                }
             }
             _ => {}
         }
     }
+    let (scenarios, party_talks) = shipped(reader, &tables.birthday, |row| &row.lua)?;
+    let (tutorial_rows, tutorial_talks) = shipped(reader, &tables.tutorial, |row| &row.lua)?;
     document(&Document {
         version: 1,
         units,
         birthday_party: BirthdayParty {
             status: "present",
-            scenarios: &tables.birthday,
-            talks: scripts_of(reader, tables.birthday.iter().map(|row| row.lua.as_str()))?,
+            scenarios,
+            talks: party_talks,
         },
         common_some_character: CommonTalks { talks: shared },
         tutorial: Tutorial {
             status: "complete",
-            rows: &tables.tutorial,
-            talks: scripts_of(reader, tables.tutorial.iter().map(|row| row.lua.as_str()))?,
+            rows: tutorial_rows,
+            talks: tutorial_talks,
         },
+        missing_scripts: reader.missing(),
     })
 }
 
 fn build_fixture_talks(
-    reader: &TalkReader<'_>,
+    reader: &mut TalkReader<'_>,
     tables: &Tables,
     no_talk: &BTreeSet<(i64, i64)>,
 ) -> Result<Asset, ConvertError> {
@@ -449,6 +460,9 @@ fn build_fixture_talks(
         if pairs.is_empty() {
             continue;
         }
+        let Some(script) = reader.read(&row.lua)? else {
+            continue;
+        };
         talks.push(FixtureTalk {
             talk_id: row.id,
             lua: &row.lua,
@@ -464,10 +478,14 @@ fn build_fixture_talks(
             unit_ids,
             pairs,
             tweet: tables.tweet_of(row.id)?,
-            script: reader.read(&row.lua)?,
+            script,
         });
     }
-    document(&FixtureTalksDocument { version: 1, talks })
+    document(&FixtureTalksDocument {
+        version: 1,
+        talks,
+        missing_scripts: reader.missing(),
+    })
 }
 
 /// The pieces of furniture that `conditions` anchor a talk to.
@@ -479,13 +497,17 @@ fn fixture_ids(conditions: &[&Condition]) -> Vec<i64> {
         .collect()
 }
 
+/// The talk of `row`, or `None` when the version does not ship its script.
 fn talk<'t>(
-    reader: &TalkReader<'_>,
+    reader: &mut TalkReader<'_>,
     tables: &'t Tables,
     row: &'t TalkRow,
     conditions: Vec<&'t Condition>,
-) -> Result<Talk<'t>, ConvertError> {
-    Ok(Talk {
+) -> Result<Option<Talk<'t>>, ConvertError> {
+    let Some(script) = reader.read(&row.lua)? else {
+        return Ok(None);
+    };
+    Ok(Some(Talk {
         talk_id: row.id,
         lua: &row.lua,
         site_group_id: row.site_group_id,
@@ -493,22 +515,29 @@ fn talk<'t>(
         conditions: conditions.iter().map(|c| c.kind.as_str()).collect(),
         condition_values: conditions,
         tweet: tables.tweet_of(row.id)?,
-        script: reader.read(&row.lua)?,
-    })
+        script,
+    }))
 }
 
-/// Each distinct script of `names`.
-fn scripts_of<'t>(
-    reader: &TalkReader<'_>,
-    names: impl Iterator<Item = &'t str>,
-) -> Result<BTreeMap<&'t str, TalkScript>, ConvertError> {
+/// The rows whose script the version ships, and each distinct script of those rows.
+fn shipped<'t, R>(
+    reader: &mut TalkReader<'_>,
+    rows: &'t [R],
+    lua: impl Fn(&'t R) -> &'t str,
+) -> Result<(Vec<&'t R>, BTreeMap<&'t str, TalkScript>), ConvertError> {
+    let mut kept = Vec::new();
     let mut scripts = BTreeMap::new();
-    for name in names {
+    for row in rows {
+        let name = lua(row);
         if !scripts.contains_key(name) {
-            scripts.insert(name, reader.read(name)?);
+            let Some(script) = reader.read(name)? else {
+                continue;
+            };
+            scripts.insert(name, script);
         }
+        kept.push(row);
     }
-    Ok(scripts)
+    Ok((kept, scripts))
 }
 
 #[cfg(test)]
@@ -817,6 +846,50 @@ mod tests {
     }
 
     #[test]
+    fn a_talk_without_its_script_is_left_out_and_named() {
+        let version = tables(Version::new(&[("a", SCRIPT), ("p", SCRIPT)]))
+            .with(
+                TALKS,
+                json!([
+                    talk_row(5, "a", 1, 1),
+                    talk_row(6, "later_b", 1, 1),
+                    talk_row(7, "later_a", 1, 2),
+                    talk_row(8, "a", 1, 2),
+                ]),
+            )
+            .with(
+                BIRTHDAY_SCENARIOS,
+                json!([
+                    {"id": 1, "birthdayPartyId": 1, "seq": 1, "lua": "p"},
+                    {"id": 2, "birthdayPartyId": 1, "seq": 2, "lua": "later_c"},
+                ]),
+            )
+            .with(
+                TUTORIAL_TALKS,
+                json!([{"id": 3, "assetbundleName": "bundle", "lua": "later_d"}]),
+            );
+        let talks = converted(&version).unwrap();
+        assert_eq!(talks["units"]["7"]["talks"].as_array().unwrap().len(), 1);
+        assert_eq!(talks["birthdayParty"]["scenarios"][0]["id"], 1);
+        assert_eq!(
+            talks["birthdayParty"]["scenarios"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(talks["tutorial"]["rows"], json!([]));
+        assert_eq!(
+            talks["missingScripts"],
+            json!(["later_b", "later_c", "later_d"])
+        );
+        let at_furniture = converted_by(&FixtureTalks, &version).unwrap();
+        assert_eq!(at_furniture["talks"].as_array().unwrap().len(), 1);
+        assert_eq!(at_furniture["talks"][0]["talkId"], 8);
+        assert_eq!(at_furniture["missingScripts"], json!(["later_a"]));
+    }
+
+    #[test]
     fn a_version_without_the_packages_has_no_asset() {
         struct Empty;
         impl TableContext for Empty {
@@ -852,7 +925,6 @@ mod tests {
                 PRE_ACTIONS,
                 json!([{"mysekaiCharacterTalkId": 5, "mysekaiCharacterTalkTweetId": 9}]),
             );
-        let unknown_script = tables(Version::new(&[("other", SCRIPT)])).with(TALKS, one());
         let unknown_operation =
             tables(Version::new(&[("a", "something_else(1)")])).with(TALKS, one());
         let control_flow =
@@ -861,7 +933,6 @@ mod tests {
             unknown_unit_group,
             unknown_condition_group,
             unknown_tweet,
-            unknown_script,
             unknown_operation,
             control_flow,
         ] {

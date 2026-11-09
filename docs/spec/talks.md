@@ -14,7 +14,7 @@ One member:
 |---|---|
 | `document` | A JSON document, extension `json` |
 
-The document holds `version` (1), `units`, `commonSomeCharacter`, `birthdayParty` and `tutorial`.
+The document holds `version` (1), `units`, `commonSomeCharacter`, `birthdayParty`, `tutorial` and `missingScripts`, the sorted names of the scripts that rows of the document name and the version does not ship.
 
 **`units`** is an object from the ID of a character unit, as a string, to `{ "talks": [...] }`, the talks of that character in table order. A talk holds:
 
@@ -74,9 +74,9 @@ A step holds `op`, the name of the call, and the keys of the table below. A key 
 | `mysekaiCharacterTalkSomeCharacterTalks` | The rows that make a talk of several characters a common one |
 | `birthdayPartyScenarios`, `mysekaiTutorialTalks` | The party and tutorial scripts |
 
-A talk belongs to `units` when its group holds one character and none of its conditions is of the type `mysekai_fixture_id`, `mysekai_fixture_tag_id` or `after_set_fixture`. A talk belongs to `commonSomeCharacter` when its group holds two to five characters, none of its conditions is of the type `mysekai_fixture_id`, and the table of links has a row for it. Other talks are not in the document.
+A talk belongs to `units` when its group holds one character and none of its conditions is of the type `mysekai_fixture_id`, `mysekai_fixture_tag_id` or `after_set_fixture`. A talk belongs to `commonSomeCharacter` when its group holds two to five characters, none of its conditions is of the type `mysekai_fixture_id`, and the table of links has a row for it. Other talks are not in the document. Master data can reach a version before the scripts it names: a talk, a party row or a tutorial row whose script the bundle does not hold cannot be played, so it is left out and its script is listed in `missingScripts`.
 
-**Outcomes other than a document:** a version without either bundle has no asset. A script that does not parse or is not found, a statement that is not a call of an operation above, a unit group, condition group, condition or tweet that its table does not hold makes the asset an error with the code `malformed`.
+**Outcomes other than a document:** a version without either bundle has no asset. A script that does not parse, a statement that is not a call of an operation above, a unit group, condition group, condition or tweet that its table does not hold makes the asset an error with the code `malformed`.
 
 ## 4. Container
 
@@ -84,7 +84,7 @@ The member is finished bytes, a UTF-8 JSON file as described in section 2. There
 
 ## 5. Correctness
 
-Tests on synthetic tables and scripts cover the keys of each kind of operation, the selection of talks, the joins of the tables and every outcome above that is an error. The asset of a real version must have a script for every selected row.
+Tests on synthetic tables and scripts cover the keys of each kind of operation, the selection of talks, the joins of the tables the rows left out for a missing script and every outcome above that is an error. On a real version, `missingScripts` lists only names absent from the bundle.
 
 ## 6. Version
 

@@ -14,7 +14,7 @@ One member:
 |---|---|
 | `document` | A JSON document, extension `json` |
 
-The document holds `version` (1) and `talks`, the talks in table order. A talk holds:
+The document holds `version` (1), `talks`, the talks in table order, and `missingScripts`, the sorted names of the scripts of talks left out because the version does not ship them. A talk holds:
 
 | Key | Value |
 |---|---|
@@ -32,7 +32,7 @@ The document holds `version` (1) and `talks`, the talks in table order. A talk h
 
 The scripts and tables are those of the `talks` form, section 3, and `mysekaiCharacterTalkNoTalkMysekaiFixtureActions`, with rows of `mysekaiFixtureId` and `gameCharacterUnitId`.
 
-A talk is in the document when it has at least one pair. Its pieces of furniture are the values of its conditions of the type `mysekai_fixture_id`.
+A talk is in the document when it has at least one pair. Its pieces of furniture are the values of its conditions of the type `mysekai_fixture_id`. A talk whose script the bundle does not hold cannot be played, so it is left out and its script is listed in `missingScripts`.
 
 **Outcomes other than a document:** those of the `talks` form, section 3.
 
@@ -42,7 +42,7 @@ The member is finished bytes, a UTF-8 JSON file as described in section 2. There
 
 ## 5. Correctness
 
-Tests on synthetic tables and scripts cover the selection of talks, the pairs and the two values of `form`. The asset of a real version must have a script for every selected row.
+Tests on synthetic tables and scripts cover the selection of talks, the pairs, the two values of `form` and the talks left out for a missing script. On a real version, `missingScripts` lists only names absent from the bundle.
 
 ## 6. Version
 

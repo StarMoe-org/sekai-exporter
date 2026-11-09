@@ -34,7 +34,7 @@ An entry is added in the same change that adds the component, and removed in the
 | ETC1, ETC2 and EAC decoding | Khronos Data Format Specification; [texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | Specification; reference: decoded pixels are compared byte by byte | MIT (texture2ddecoder) |
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
-| Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp) | Linked | MIT OR Apache-2.0 |
+| Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp), with the change listed in [`third_party`](../third_party/README.md) | Linked | MIT OR Apache-2.0 |
 | Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`webp`](https://crates.io/crates/webp) and [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
 
 ## Audio and video
@@ -46,7 +46,7 @@ An entry is added in the same change that adds the component, and removed in the
 | USM demultiplexing | [WannaCRI](https://github.com/donmai-me/WannaCRI) | Reference: separated streams are compared byte by byte | MIT |
 | HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
 | OpenEXR writing (the canonical HDR image form) | [`exr`](https://crates.io/crates/exr) | Linked | BSD-3-Clause |
-| FLAC writing | [`flacenc`](https://crates.io/crates/flacenc) | Linked | Apache-2.0 |
+| FLAC writing | [`flacenc`](https://crates.io/crates/flacenc), with the change listed in [`third_party`](../third_party/README.md), and [`libm`](https://crates.io/crates/libm) | Linked | Apache-2.0; MIT |
 | FLAC reading | [`claxon`](https://crates.io/crates/claxon) | Linked with the `storage-view` feature, which reads canonical FLAC members, and in tests, where written FLAC is decoded and compared sample by sample | Apache-2.0 |
 | AAC writing | [FFmpeg libavcodec](https://ffmpeg.org/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later |
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
@@ -67,6 +67,7 @@ An entry is added in the same change that adds the component, and removed in the
 |---|---|---|---|
 | Manifest and interface decryption | [`aes`](https://crates.io/crates/aes), [`cbc`](https://crates.io/crates/cbc) | Linked | MIT OR Apache-2.0 |
 | Base64 | [`base64`](https://crates.io/crates/base64) | Linked with the `cdn` feature, which reads the user id inside an account credential | MIT or Apache-2.0 |
+| JavaScript bindings | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen), [`js-sys`](https://crates.io/crates/js-sys) | Linked on `wasm32` | MIT or Apache-2.0 |
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | Linked | MIT |
 | Hashing | [`sha2`](https://crates.io/crates/sha2) | Linked | MIT OR Apache-2.0 |
 | HTTP and TLS | [`ureq`](https://crates.io/crates/ureq), [`rustls`](https://crates.io/crates/rustls), [`ring`](https://crates.io/crates/ring), [`webpki-roots`](https://crates.io/crates/webpki-roots), [`socks`](https://crates.io/crates/socks) | Linked when the `cdn` or `s3` feature is enabled | MIT OR Apache-2.0; Apache-2.0 OR ISC OR MIT; Apache-2.0 AND ISC; CDLA-Permissive-2.0; MIT OR Apache-2.0 |

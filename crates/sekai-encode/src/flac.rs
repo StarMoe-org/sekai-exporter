@@ -12,7 +12,7 @@ use crate::EncodeError;
 pub const NAME: &str = "flac";
 
 /// The encoder version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The samples per channel in one FLAC frame.
 const BLOCK_SIZE: usize = 4096;

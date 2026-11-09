@@ -56,6 +56,13 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p sekai-wasm --target wasm32-unknown-unknown
+      - run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+      - run: cargo build --release -p sekai-wasm --target wasm32-unknown-unknown
+      - run: wasm-bindgen --target nodejs --out-dir wasm-package target/wasm32-unknown-unknown/release/sekai_wasm.wasm
+      - run: cargo run --release -p sekai-exporter -- export crates/sekai-unity/tests/fixtures/lz4 native
+      - run: node tools/wasm-runner/run.mjs wasm-package crates/sekai-unity/tests/fixtures/lz4 wasm
+      - run: python3 tools/compare-storage/determinism.py native/store wasm/store
+      - run: diff native/assets.tsv wasm/assets.tsv
 
   unitypy:
     runs-on: ubuntu-latest

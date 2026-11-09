@@ -96,6 +96,11 @@ impl<'a> Lazy<'a> {
         self
     }
 
+    /// Roots that cannot be told apart from another root by name, as `(logical path, path ID)`.
+    pub fn unnamed(&self) -> &[(String, i64)] {
+        &self.plan.unnamed
+    }
+
     /// The names of the assets, in order.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.plan.derivations.iter().map(|plan| plan.name.as_str())

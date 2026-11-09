@@ -148,13 +148,24 @@ fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -
     args
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn program() -> OsString {
     std::env::var_os("SEKAI_FFMPEG").unwrap_or_else(|| "ffmpeg".into())
 }
 
 /// Encodes `movie` with the `ffmpeg` program.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn encode(movie: &Movie) -> Result<Vec<u8>, EncodeError> {
     encode_with(&program(), movie)
+}
+
+/// Reports that this target cannot run the `ffmpeg` program.
+#[cfg(target_arch = "wasm32")]
+pub fn encode(_movie: &Movie) -> Result<Vec<u8>, EncodeError> {
+    Err(EncodeError::Unavailable {
+        encoder: NAME,
+        message: "this target cannot run programs".to_owned(),
+    })
 }
 
 /// Encodes `movie` with `program`.

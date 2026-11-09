@@ -62,6 +62,8 @@ Assets are named by their logical path and asset form. When several assets would
 
 The lazy evaluator takes the eager evaluator's names and fingerprints from the index of the version, reads only the bundles of the asset that is requested, and writes the same documents and members. Concurrent requests for one fingerprint compute it once. A request can name an asset or a bundle and object.
 
+On `wasm32` the core produces textures, sprites, audio as FLAC, text, fonts and scenarios, and they are byte-identical to native output. Video needs the `ffmpeg` program and reports `encoder_unavailable`. An asset estimated to need more than 2 GiB of memory reports `too_large`.
+
 ## Disciplines the model depends on
 
 1. **Determinism.** Converters and encoders do not read the clock, do not depend on thread order and do not iterate unordered containers. The same input gives the same bytes with one thread or many, natively or on `wasm32`, and with or without the optimizations described in [Performance](performance.md). Continuous integration checks all three.

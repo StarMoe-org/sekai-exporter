@@ -34,7 +34,7 @@
 | ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
-| 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp) | 链接 | MIT OR Apache-2.0 |
+| 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp)，修改见 [`third_party`](../third_party/README.zh-CN.md) | 链接 | MIT OR Apache-2.0 |
 | 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`webp`](https://crates.io/crates/webp) 与 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 
 ## 音频与视频
@@ -46,7 +46,7 @@
 | USM 解复用 | [WannaCRI](https://github.com/donmai-me/WannaCRI) | 参考：分离出的流逐字节比对 | MIT |
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
 | OpenEXR 写出（规范 HDR 图像形式） | [`exr`](https://crates.io/crates/exr) | 链接 | BSD-3-Clause |
-| FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc) | 链接 | Apache-2.0 |
+| FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc)，修改见 [`third_party`](../third_party/README.zh-CN.md)；[`libm`](https://crates.io/crates/libm) | 链接 | Apache-2.0；MIT |
 | FLAC 读取 | [`claxon`](https://crates.io/crates/claxon) | 随 `storage-view` feature 链接，用于读取规范层 FLAC 成员；测试中也用于解码写出的 FLAC 并逐采样比对 | Apache-2.0 |
 | AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |
 | MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
@@ -67,6 +67,7 @@
 |---|---|---|---|
 | 清单与接口解密 | [`aes`](https://crates.io/crates/aes)、[`cbc`](https://crates.io/crates/cbc) | 链接 | MIT OR Apache-2.0 |
 | Base64 | [`base64`](https://crates.io/crates/base64) | 随 `cdn` feature 链接，用于读取账号凭据中的用户 ID | MIT 或 Apache-2.0 |
+| JavaScript 绑定 | [`wasm-bindgen`](https://crates.io/crates/wasm-bindgen)、[`js-sys`](https://crates.io/crates/js-sys) | 在 `wasm32` 上链接 | MIT 或 Apache-2.0 |
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | 链接 | MIT |
 | 哈希 | [`sha2`](https://crates.io/crates/sha2) | 链接 | MIT OR Apache-2.0 |
 | HTTP 与 TLS | [`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |

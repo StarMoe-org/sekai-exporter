@@ -10,7 +10,7 @@ use crate::EncodeError;
 pub const NAME: &str = "webp-lossless";
 
 /// The encoder version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Writes `surface` as a lossless WebP.
 ///

@@ -14,8 +14,16 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 sekai-unity.workspace = true
 sekai-format.workspace = true
-sekai-convert.workspace = true
+sekai-catalog.workspace = true
+sekai-game.workspace = true
+sekai-convert = { workspace = true, features = ["image", "audio", "video", "text"] }
 sekai-pipeline.workspace = true
+sekai-moesekai = { workspace = true, features = ["scenario"] }
+sha2 = "0.11.1"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.127"
+js-sys = "0.3"
 
 [lints]
 workspace = true

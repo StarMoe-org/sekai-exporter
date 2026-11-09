@@ -896,6 +896,7 @@ dependencies = [
  "aes",
  "base64",
  "cbc",
+ "flate2",
  "rmp-serde",
  "sekai-format",
  "sekai-unity",

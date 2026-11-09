@@ -1,6 +1,6 @@
 # Episode
 
-The `episode` form is everything one story episode needs, as a JSON document that names the assets it uses. Converter: `episode` in `sekai-moesekai` (feature `episode`). Form version: 1.
+The `episode` form is everything one story episode needs, as a JSON document that names the assets it uses. Converter: `episode` in `sekai-moesekai` (feature `episode`). Form version: 2.
 
 ## 1. Runtime
 
@@ -63,7 +63,7 @@ A costume is `{ "costume_type": "…", "model": "…", "motions": { … } }`. `m
 { "asset": "sound/scenario/bgm/bgm00000/bgm00000", "cue": "bgm00000", "waveforms": [ … ] }
 ```
 
-`asset` is the name of the [`audio`](audio.md) asset, `cue` the cue in it, and `waveforms` the entries of the cue in its [cue table](audio.md#2-contents).
+`asset` is the name of the [`audio`](audio.md) asset, `cue` the cue in it, and `waveforms` and `arrangement` the entries of the cue in its [cue table](audio.md#2-contents), `arrangement` absent on a cue without one.
 
 ### Area conversations
 
@@ -159,3 +159,4 @@ The rules of section 3 are those the game's client applies to find the resources
 | Version | Change |
 |---|---|
 | 1 | First version |
+| 2 | Sounds carry the arrangement of their cue |

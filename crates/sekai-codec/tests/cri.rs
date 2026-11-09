@@ -595,6 +595,224 @@ fn a_cue_plays_at_the_product_of_the_volumes_on_its_way() {
     assert_eq!(acb.cues[1].volumes, [0.5]);
 }
 
+#[test]
+fn a_cue_built_of_tracks_gives_its_arrangement() {
+    use Cell::{Data, F32, Text, U8, U16, U32};
+    use sekai_codec::cri::{Arrangement, Block, Layer, Note, VolumeControl};
+    let note = |waveform: u8| vec![0x07, 0xD0, 4, 0, 1, 0, waveform];
+    // Waits of one second and of 500 microseconds between two notes.
+    let wait = vec![0x07, 0xD1, 4, 0, 0, 3, 0xE8, 0x07, 0xD5, 2, 1, 0xF4];
+    let late = [note(0), wait, note(1)].concat();
+    let track =
+        |event: u16, command: u16, local: Vec<u8>| vec![U16(event), U16(command), Data(local)];
+    let cue = |kind: u8, index: u16, id: u32| vec![U8(kind), U16(index), U32(id), U32(0)];
+    let name = |name, index: u16| vec![Text(name), U16(index)];
+    let block = |tracks: Vec<u8>, length: u32, looping: u8, parts: u16| {
+        vec![
+            U16(tracks.len() as u16 / 2),
+            Data(tracks),
+            U32(length),
+            U16(500 * u16::from(looping)),
+            U8(looping),
+            U16(2),
+            U8(looping),
+            U16(parts),
+            U8(looping),
+        ]
+    };
+    let data = utf(
+        "Header",
+        &[
+            "AcbVolume",
+            "CueTable",
+            "CueNameTable",
+            "WaveformTable",
+            "SequenceTable",
+            "BlockSequenceTable",
+            "BlockTable",
+            "TrackTable",
+            "TrackEventTable",
+            "TrackCommandTable",
+            "AisacTable",
+            "GraphTable",
+            "AisacControlNameTable",
+        ],
+        &[vec![
+            F32(0.5),
+            Data(utf(
+                "Cue",
+                &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
+                &[cue(8, 0, 1), cue(3, 0, 2), cue(3, 1, 3)],
+            )),
+            Data(utf(
+                "CueName",
+                &["CueName", "CueIndex"],
+                &[name("blocks", 0), name("layers", 1), name("plain", 2)],
+            )),
+            Data(utf(
+                "Waveform",
+                &["EncodeType"],
+                &[vec![U8(2)], vec![U8(2)], vec![U8(2)]],
+            )),
+            Data(utf(
+                "Sequence",
+                &["NumTracks", "TrackIndex"],
+                &[
+                    vec![U16(2), Data(vec![0, 4, 0, 5])],
+                    vec![U16(1), Data(vec![0, 5, 0, 0])],
+                ],
+            )),
+            Data(utf(
+                "BlockSequence",
+                &["NumTracks", "TrackIndex", "NumBlocks", "BlockIndex"],
+                &[vec![
+                    U16(2),
+                    Data(vec![0, 0, 0, 1]),
+                    U16(2),
+                    Data(vec![0, 0, 0, 1]),
+                ]],
+            )),
+            Data(utf(
+                "Block",
+                &[
+                    "NumTracks",
+                    "TrackIndex",
+                    "Length",
+                    "LengthUs",
+                    "PlaybackType",
+                    "NumLoops",
+                    "TransitionTiming",
+                    "TransitionTimingValue",
+                    "TransitionMode",
+                ],
+                &[
+                    block(vec![0, 2, 0, 3], 2000, 1, 4),
+                    block(vec![0, 3], 1000, 0, 0xFFFF),
+                ],
+            )),
+            Data(utf(
+                "Track",
+                &["EventIndex", "CommandIndex", "LocalAisacs"],
+                &[
+                    track(0xFFFF, 0, vec![0, 0]),
+                    track(0xFFFF, 0xFFFF, Vec::new()),
+                    track(0, 0xFFFF, Vec::new()),
+                    track(1, 0xFFFF, Vec::new()),
+                    track(2, 0xFFFF, Vec::new()),
+                    track(3, 0xFFFF, Vec::new()),
+                ],
+            )),
+            Data(utf(
+                "TrackEvent",
+                &["Command"],
+                &[
+                    vec![Data(late)],
+                    vec![Data(note(2))],
+                    vec![Data(note(0))],
+                    vec![Data(note(1))],
+                ],
+            )),
+            Data(utf(
+                "TrackCommand",
+                &["Command"],
+                &[vec![Data(volumes(&[50]))]],
+            )),
+            Data(utf(
+                "Aisac",
+                &[
+                    "ControlId",
+                    "DefaultControlFlag",
+                    "DefaultControl",
+                    "GraphIndexes",
+                ],
+                &[vec![U16(7), U8(1), F32(0.25), Data(vec![0, 1, 0, 0])]],
+            )),
+            Data(utf(
+                "Graph",
+                &["Type", "Controls", "Destinations"],
+                &[
+                    vec![
+                        U8(1),
+                        Data([0f32.to_be_bytes(), 1f32.to_be_bytes()].concat()),
+                        Data(vec![0, 0, 0x13, 0x88]),
+                    ],
+                    vec![U8(2), Data(Vec::new()), Data(Vec::new())],
+                ],
+            )),
+            Data(utf(
+                "AisacControlName",
+                &["AisacControlId", "AisacControlName"],
+                &[vec![U16(7), Text("BGM_VERTICAL")]],
+            )),
+        ]],
+    );
+    let acb = read_acb(&data).expect("sheet");
+    let at = |at_us, waveform, volume| Note {
+        at_us,
+        waveform,
+        volume,
+    };
+    assert_eq!(acb.cues[0].waveforms, [0, 1, 2, 2]);
+    assert_eq!(acb.cues[0].volumes, [0.25, 0.25, 0.5, 0.25]);
+    assert_eq!(
+        acb.cues[0].arrangement,
+        Some(Arrangement {
+            layers: vec![
+                Layer {
+                    control: Some(VolumeControl {
+                        name: "BGM_VERTICAL".into(),
+                        default: 0.25,
+                        points: vec![[0.0, 0.0], [1.0, 0.5]],
+                    }),
+                    notes: Vec::new(),
+                },
+                Layer {
+                    control: None,
+                    notes: Vec::new(),
+                },
+            ],
+            blocks: vec![
+                Block {
+                    length_us: 2_000_500,
+                    looping: true,
+                    repeats: 0,
+                    transition_parts: Some(4),
+                    relative: true,
+                    layers: vec![
+                        vec![at(0, 0, 0.25), at(1_000_500, 1, 0.25)],
+                        vec![at(0, 2, 0.5)],
+                    ],
+                },
+                Block {
+                    length_us: 1_000_000,
+                    looping: false,
+                    repeats: 2,
+                    transition_parts: None,
+                    relative: false,
+                    layers: vec![vec![at(0, 2, 0.25)]],
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        acb.cues[1].arrangement,
+        Some(Arrangement {
+            layers: vec![
+                Layer {
+                    control: None,
+                    notes: vec![at(0, 0, 0.5)],
+                },
+                Layer {
+                    control: None,
+                    notes: vec![at(0, 1, 0.5)],
+                },
+            ],
+            blocks: Vec::new(),
+        })
+    );
+    assert_eq!(acb.cues[2].arrangement, None);
+}
+
 /// The header of `data` with a `loop` chunk after its `comp` chunk, with a valid checksum.
 fn with_loop(data: &[u8], chunk: [u32; 2], delays: [u16; 2]) -> Vec<u8> {
     const AFTER_COMP: usize = 40;

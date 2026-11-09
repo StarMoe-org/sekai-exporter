@@ -47,7 +47,7 @@ impl TableConverter for Episode {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
@@ -705,6 +705,7 @@ impl<'p> Builder<'p, '_> {
                         asset: self.refer(&entry.name),
                         cue: cue.to_owned(),
                         waveforms: found.waveforms.clone(),
+                        arrangement: found.arrangement.clone(),
                     }));
                 }
             }

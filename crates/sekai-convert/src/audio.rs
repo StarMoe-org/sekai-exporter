@@ -2,9 +2,14 @@
 //!
 //! [`Audio`] produces the `audio` form, specified in `docs/spec/audio.md`.
 
+use std::collections::BTreeMap;
+
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{Acb, HcaKey, decode_hca, hca_info, read_acb};
-use sekai_format::audio::{CueEntry, CueTable, CueWaveform, FORMAT, VERSION};
+use sekai_codec::cri::{Acb, Arrangement, HcaKey, Note, decode_hca, hca_info, read_acb};
+use sekai_format::audio::{
+    CueArrangement, CueBlock, CueEntry, CueLayer, CueNote, CueTable, CueVolumeControl, CueWaveform,
+    FORMAT, VERSION,
+};
 use sekai_unity::Value;
 
 use crate::roots;
@@ -36,7 +41,7 @@ impl Converter for Audio {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn is_root(
@@ -73,12 +78,14 @@ impl Converter for Audio {
             }
             let single = waveforms.len() == 1;
             let mut played = Vec::new();
+            let mut roles = BTreeMap::new();
             for (n, (w, volume)) in waveforms.into_iter().enumerate() {
                 let role = if single {
                     format!("cue/{name}")
                 } else {
                     format!("cue/{name}/{}", n + 1)
                 };
+                roles.insert(w, role.clone());
                 let (pcm, loop_frames) = self.waveform(&acb, w, name)?;
                 played.push(CueWaveform {
                     role: role.clone(),
@@ -97,6 +104,10 @@ impl Converter for Audio {
                 cues.push(CueEntry {
                     name: name.clone(),
                     waveforms: played,
+                    arrangement: cue
+                        .arrangement
+                        .as_ref()
+                        .map(|arrangement| cue_arrangement(arrangement, &roles)),
                 });
             }
         }
@@ -135,6 +146,41 @@ impl Converter for Audio {
             class: CostClass::Heavy,
             memory,
         }
+    }
+}
+
+/// `arrangement` with each waveform given by the role of its member. `roles` has every waveform
+/// the cue plays, and an arrangement names no others.
+fn cue_arrangement(arrangement: &Arrangement, roles: &BTreeMap<usize, String>) -> CueArrangement {
+    let notes = |notes: &[Note]| {
+        notes
+            .iter()
+            .map(|note| CueNote {
+                at_us: note.at_us,
+                role: roles[&note.waveform].clone(),
+                volume: note.volume,
+            })
+            .collect::<Vec<_>>()
+    };
+    let layers = arrangement.layers.iter().map(|layer| CueLayer {
+        control: layer.control.as_ref().map(|control| CueVolumeControl {
+            name: control.name.clone(),
+            default: control.default,
+            points: control.points.clone(),
+        }),
+        notes: notes(&layer.notes),
+    });
+    let blocks = arrangement.blocks.iter().map(|block| CueBlock {
+        length_us: block.length_us,
+        looping: block.looping,
+        repeats: block.repeats,
+        transition_parts: block.transition_parts,
+        relative: block.relative,
+        layers: block.layers.iter().map(|layer| notes(layer)).collect(),
+    });
+    CueArrangement {
+        layers: layers.collect(),
+        blocks: blocks.collect(),
     }
 }
 

@@ -1,16 +1,28 @@
 //! ACB cue sheets.
 
+mod arrangement;
+
 use std::collections::BTreeMap;
 
 use super::awb::{Awb, read_awb};
 use super::utf::Table;
 use crate::DecodeError;
 
+pub use arrangement::{Arrangement, Block, Layer, Note, VolumeControl};
+
 /// How deeply the objects of a cue may refer to each other.
 const MAX_DEPTH: usize = 8;
 const NO_INDEX: i64 = 0xFFFF;
 const NOTE_ON: u16 = 2000;
 const NOTE_ON_WITH_NO: u16 = 2003;
+/// A wait before the next command: a 32-bit value in milliseconds.
+const WAIT_MILLISECONDS: u16 = 2001;
+/// A wait before the next command: a 16-bit value in microseconds.
+const WAIT_MICROSECONDS: u16 = 2005;
+/// The reference to a sequence.
+const SEQUENCE: u8 = 3;
+/// The reference to a block sequence.
+const BLOCK_SEQUENCE: u8 = 8;
 /// A volume command: a 16-bit value in hundredths.
 const VOLUME: u16 = 0x0057;
 
@@ -23,6 +35,10 @@ fn malformed(message: impl Into<String>) -> DecodeError {
 
 fn be16(bytes: &[u8]) -> usize {
     usize::from(u16::from_be_bytes([bytes[0], bytes[1]]))
+}
+
+fn be32(bytes: &[u8]) -> u64 {
+    u64::from(u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// One waveform of a cue sheet, with the values of the `WaveformTable` row.
@@ -64,6 +80,8 @@ pub struct Cue {
     /// The volume each entry of `waveforms` plays at: the volume of the cue sheet times every
     /// volume command on the way from the cue to the waveform.
     pub volumes: Vec<f32>,
+    /// How the cue plays its tracks, when it has more to say than the waveforms it plays.
+    pub arrangement: Option<Arrangement>,
 }
 
 /// A cue sheet.
@@ -87,6 +105,11 @@ struct Tables<'a> {
     synth_commands: Option<Table<'a>>,
     sequence_commands: Option<Table<'a>>,
     track_commands: Option<Table<'a>>,
+    aisac: Option<Table<'a>>,
+    graph: Option<Table<'a>>,
+    control_names: Option<Table<'a>>,
+    /// The `AcbVolume` of the sheet.
+    sheet_volume: f64,
 }
 
 /// A volume as a product of percentages, exact until it is read.
@@ -153,7 +176,19 @@ fn indices(
 
 type Played = Vec<(usize, Percent)>;
 
+/// A waveform a track starts, with the volume on its way there.
+struct TrackNote {
+    at_us: u64,
+    waveform: usize,
+    volume: Percent,
+}
+
 impl Tables<'_> {
+    /// `volume` as the volume a waveform plays at.
+    fn level(&self, volume: Percent) -> f32 {
+        (self.sheet_volume * volume.value()) as f32
+    }
+
     /// `volume` times the volume commands of row `row` of `table`, whose `CommandIndex` is a row
     /// of `commands`.
     fn times(
@@ -217,11 +252,44 @@ impl Tables<'_> {
         let table = require(&self.block_sequence, "BlockSequenceTable")?;
         let volume = Self::times(volume, self.sequence_commands.as_ref(), table, index)?;
         self.tracks(table, index, depth, volume, out)?;
+        let layer_volumes = self.layer_volumes(table, index, volume)?;
         for block in indices(table, index, "NumBlocks", "BlockIndex")? {
-            let blocks = require(&self.block, "BlockTable")?;
-            self.tracks(blocks, block, depth + 1, volume, out)?;
+            for (track, layer_volume) in self.block_tracks(block, &layer_volumes)? {
+                self.track(track, depth + 2, layer_volume, out)?;
+            }
         }
         Ok(())
+    }
+
+    /// `volume` times the volume commands of each track of row `index` of a block sequence.
+    fn layer_volumes(
+        &self,
+        table: &Table<'_>,
+        index: usize,
+        volume: Percent,
+    ) -> Result<Vec<Percent>, DecodeError> {
+        let tracks = require(&self.track, "TrackTable")?;
+        indices(table, index, "NumTracks", "TrackIndex")?
+            .into_iter()
+            .map(|track| Self::times(volume, self.track_commands.as_ref(), tracks, track))
+            .collect()
+    }
+
+    /// The tracks of block `block`, each with the volume of the layer it plays in.
+    fn block_tracks(
+        &self,
+        block: usize,
+        layer_volumes: &[Percent],
+    ) -> Result<Vec<(usize, Percent)>, DecodeError> {
+        let table = require(&self.block, "BlockTable")?;
+        let tracks = indices(table, block, "NumTracks", "TrackIndex")?;
+        if tracks.len() > layer_volumes.len() {
+            return Err(malformed("a block has more tracks than its sequence"));
+        }
+        Ok(tracks
+            .into_iter()
+            .zip(layer_volumes.iter().copied())
+            .collect())
     }
 
     /// The tracks listed by row `index` of `table` in `NumTracks` and `TrackIndex`.
@@ -246,21 +314,46 @@ impl Tables<'_> {
         volume: Percent,
         out: &mut Played,
     ) -> Result<(), DecodeError> {
+        let notes = self.track_notes(index, depth, volume)?;
+        out.extend(notes.into_iter().map(|note| (note.waveform, note.volume)));
+        Ok(())
+    }
+
+    /// What track `index` plays, in the order of its commands. A wait delays what follows it.
+    fn track_notes(
+        &self,
+        index: usize,
+        depth: usize,
+        volume: Percent,
+    ) -> Result<Vec<TrackNote>, DecodeError> {
         let table = require(&self.track, "TrackTable")?;
         let volume = Self::times(volume, self.track_commands.as_ref(), table, index)?;
         let event = table.int(index, "EventIndex")?.unwrap_or(NO_INDEX);
         if event == NO_INDEX {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let events = require(&self.event, "TrackEventTable")?;
         let command = events.data(event as usize, "Command")?.unwrap_or(&[]);
+        let (mut at_us, mut notes) = (0, Vec::new());
         each_command(command, |code, value| {
-            if matches!(code, NOTE_ON | NOTE_ON_WITH_NO) && value.len() >= 4 {
-                let (kind, target) = (be16(value) as u8, be16(&value[2..]));
-                self.reference(kind, target, depth + 1, volume, out)?;
+            match code {
+                NOTE_ON | NOTE_ON_WITH_NO if value.len() >= 4 => {
+                    let (kind, target) = (be16(value) as u8, be16(&value[2..]));
+                    let mut played = Vec::new();
+                    self.reference(kind, target, depth + 1, volume, &mut played)?;
+                    notes.extend(played.into_iter().map(|(waveform, volume)| TrackNote {
+                        at_us,
+                        waveform,
+                        volume,
+                    }));
+                }
+                WAIT_MILLISECONDS if value.len() >= 4 => at_us += be32(value) * 1000,
+                WAIT_MICROSECONDS if value.len() >= 2 => at_us += be16(value) as u64,
+                _ => {}
             }
             Ok(())
-        })
+        })?;
+        Ok(notes)
     }
 
     /// Adds what a reference leads to. Kinds that hold no waveform are skipped.
@@ -278,8 +371,8 @@ impl Tables<'_> {
         match kind {
             1 => out.push((index, volume)),
             2 => self.synth(index, depth, volume, out)?,
-            3 => self.sequence(index, depth, volume, out)?,
-            8 => self.block_sequence(index, depth, volume, out)?,
+            SEQUENCE => self.sequence(index, depth, volume, out)?,
+            BLOCK_SEQUENCE => self.block_sequence(index, depth, volume, out)?,
             _ => {}
         }
         Ok(())
@@ -350,8 +443,11 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
         Some(table) => Ok(Some(table)),
         None => header.table(0, "CommandTable"),
     };
-    let sheet_volume = f64::from(header.float(0, "AcbVolume")?.unwrap_or(1.0));
     let tables = Tables {
+        sheet_volume: f64::from(header.float(0, "AcbVolume")?.unwrap_or(1.0)),
+        aisac: header.table(0, "AisacTable")?,
+        graph: header.table(0, "GraphTable")?,
+        control_names: header.table(0, "AisacControlNameTable")?,
         synth_commands: commands("SynthCommandTable")?,
         sequence_commands: commands("SeqCommandTable")?,
         track_commands: commands("TrackCommandTable")?,
@@ -388,8 +484,9 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
             waveforms: played.iter().map(|&(waveform, _)| waveform).collect(),
             volumes: played
                 .iter()
-                .map(|&(_, volume)| (sheet_volume * volume.value()) as f32)
+                .map(|&(_, volume)| tables.level(volume))
                 .collect(),
+            arrangement: tables.arrangement(kind, index)?,
         });
     }
 

@@ -62,6 +62,7 @@ impl Version {
                 .map(|cue| CueEntry {
                     name: (*cue).to_owned(),
                     waveforms: vec![waveform(cue)],
+                    arrangement: None,
                 })
                 .collect(),
         };

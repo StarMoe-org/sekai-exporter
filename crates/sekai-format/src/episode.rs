@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::audio::CueWaveform;
+use crate::audio::{CueArrangement, CueWaveform};
 
 /// The value of the `format` key.
 pub const FORMAT: &str = "episode";
@@ -166,6 +166,9 @@ pub struct Sound {
     pub cue: String,
     /// The entries of the cue in the cue table.
     pub waveforms: Vec<CueWaveform>,
+    /// The arrangement of the cue in the cue table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrangement: Option<CueArrangement>,
 }
 
 /// How an area conversation plays.

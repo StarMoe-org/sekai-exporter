@@ -1,6 +1,6 @@
 # Audio
 
-The `audio` form is the sound of each cue of a CRI cue sheet (ACB), as PCM. Converter: `audio` in `sekai-convert` (feature `audio`). Form version: 2.
+The `audio` form is the sound of each cue of a CRI cue sheet (ACB), as PCM. Converter: `audio` in `sekai-convert` (feature `audio`). Form version: 3.
 
 ## 1. Runtime
 
@@ -42,6 +42,31 @@ The last member is the cue table:
 | `frames`, `sample_rate`, `channels` | The length in samples per channel, the sample rate in hertz and the channel count of the member |
 | `loop` | Present when the waveform loops: `[start, end)` in samples per channel of the member. A looping cue plays the waveform once up to `end`, then `start` to `end` again and again |
 | `volume` | The volume the cue plays the waveform at, 1 being the stored level |
+| `arrangement` | Present on a cue with more to say than the waveforms it plays, as below |
+
+An arrangement states when each waveform of a cue built of tracks plays. The layers of a cue play at the same time. A sequence has the notes of each layer in the layer; a block sequence plays one block after another, each with the notes of every layer:
+
+```json
+{ "layers": [ { "control": { "name": "BGM_VERTICAL", "default": 0.0, "points": [[0.0, 0.0], [1.0, 1.0]] } }, {} ],
+  "blocks": [
+    { "length_us": 8000000, "loop": true, "transition_parts": 4, "relative": true,
+      "layers": [ [ { "at_us": 0, "role": "cue/bgm90001/1", "volume": 0.63 } ], [] ] }
+  ] }
+```
+
+| Key | Value |
+|---|---|
+| `layers` | The layers, in the order of the tracks of the cue |
+| `control` | Present on a layer whose volume follows a control: `name` of the control, the value `default` it has until set, and `points`, the curve as `[control, volume]`, linear between the points |
+| `notes` | The notes of a layer of a sequence. Absent when empty |
+| `blocks` | The blocks of a block sequence, in order. Absent on a sequence |
+| `length_us` | The length of the block in microseconds |
+| `loop` | Whether the block repeats until a transition is requested |
+| `repeats` | How many more times a block that does not loop plays. Absent when 0 |
+| `transition_parts` | Present when a requested transition waits for the next of this many equal parts of the block. Without it, a transition waits for the end of the block |
+| `relative` | Whether the next block starts at the position this one has reached, rather than at its start |
+| `at_us` | When the waveform starts, in microseconds from the start of its layer's track or block |
+| `role`, `volume` | The role of the member and the volume the note plays at |
 
 ## 3. Sources
 
@@ -53,7 +78,9 @@ The last member is the cue table:
 
 **Loop.** The loop of a waveform comes from the `loop` chunk of its HCA header: it starts at sample `start frame × 1024 + start delay` and ends before sample `(end frame + 1) × 1024 − end padding`, both less the encoder delay. A chunk that gives no range within the member gives no loop.
 
-**Volume.** The volume is `AcbVolume` of the sheet times every volume command (`0x0057`, a 16-bit value in hundredths) on the way from the cue to the waveform: those of its sequence or block sequence, of each track and of each synth. The commands of a row are found by its `CommandIndex` in `SeqCommandTable`, `TrackCommandTable` or `SynthCommandTable`, or in `CommandTable` for a sheet without the former. The product is computed exactly and then converted to a 32-bit float. A waveform a cue reaches in several ways has the volume of the first.
+**Volume.** The volume is `AcbVolume` of the sheet times every volume command (`0x0057`, a 16-bit value in hundredths) on the way from the cue to the waveform: those of its sequence or block sequence, of each track and of each synth. A track of a block counts together with the track of the block sequence at the same place. The commands of a row are found by its `CommandIndex` in `SeqCommandTable`, `TrackCommandTable` or `SynthCommandTable`, or in `CommandTable` for a sheet without the former. The product is computed exactly and then converted to a 32-bit float. A waveform a cue reaches in several ways has the volume of the first.
+
+**Arrangement.** A cue gets one when its reference is a block sequence, or a sequence that is more than one track, starts a note after the start of its track, or has a local AISAC. A note is a `0x07D0` or `0x07D3` command (`NoteOn`) of a track's event; a `0x07D1` command waits a 32-bit number of milliseconds and a `0x07D5` command a 16-bit number of microseconds before whatever follows. A note reaching several waveforms gives one note per waveform at the same time. A block's `length_us` is `Length` in milliseconds and `LengthUs`; `PlaybackType` 1 makes it loop, otherwise `NumLoops` gives `repeats`; `TransitionTiming` 1 with a `TransitionTimingValue` between 1 and 65534 gives `transition_parts`; `TransitionMode` 1 makes it `relative`. A layer's control is the volume graph (`Type` 1) of the first of its `LocalAisacs`, its `Controls` and its `Destinations` divided by 10000, and the name of `ControlId` in `AisacControlNameTable`, empty when none is listed; `default` is `DefaultControl` when `DefaultControlFlag` is 1, otherwise 0. A block with more tracks than its block sequence is `malformed`.
 
 **Key.** HCA streams of cipher type 56 are decrypted with a 64-bit key given to the converter (`Audio::new(Some(key))`) and the subkey of the bank the stream comes from. The key is configuration of the run; it is not stored with the assets.
 
@@ -84,3 +111,4 @@ The decoders are checked sample for sample against vgmstream on HCA files made f
 |---|---|
 | 1 | First version |
 | 2 | The cue table |
+| 3 | The arrangement of cues built of tracks, and the volume of a block's track under its layer |

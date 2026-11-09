@@ -9,11 +9,11 @@
 //! [`Streamed::outside`].
 //!
 //! Units run in manifest order, in segments of consecutive units. The bundles of the windows of a
-//! segment are opened together, and the derivations of the segment run through the scheduler as
-//! the eager evaluator runs them. A bundle stays open, indexed and parsed until the last unit
-//! whose window holds it, which the manifest tells in advance. Since every closure stays inside
-//! its own window, the result depends neither on how units are grouped into segments nor on the
-//! number of threads, and publishing is a step after the last unit.
+//! segment are opened together, and the derivations of the segment run through the scheduler. A
+//! bundle stays open, indexed and parsed until the last unit whose window holds it, which the
+//! manifest tells in advance; the ledger of the bundle is settled then too. Since every closure
+//! stays inside its own window, the result depends neither on how units are grouped into segments
+//! nor on the number of threads, and publishing is a step after the last unit.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
@@ -21,17 +21,18 @@ use std::sync::{Arc, Mutex};
 
 use sekai_catalog::{BundleIndexes, Derivations, Store};
 use sekai_convert::{Converter, ObjectId};
-use sekai_format::AssetError;
+use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sekai_unity::{BlockCache, ByteSource};
 
 use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned};
+use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
-use crate::version::{BundleError, BundleInput, Parsed, Version};
+use crate::version::{BundleError, BundleInput, Parsed, Version, bundle_files};
 
 /// The estimated memory of the bundles that stay parsed while a version streams, in bytes.
-const PARSED_BYTES: u64 = 512 << 20;
+pub(crate) const PARSED_BYTES: u64 = 512 << 20;
 
 /// One bundle of a manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +88,7 @@ impl Default for Segment {
 }
 
 /// What a streaming evaluation reads, writes and runs with.
+#[derive(Clone, Copy)]
 pub struct Stream<'a> {
     /// The converters, one per asset form.
     pub converters: &'a [Box<dyn Converter>],
@@ -104,10 +106,16 @@ pub struct Stream<'a> {
     pub recorder: &'a dyn Recorder,
     /// Further files of each converted asset, outside plain mode.
     pub fusion: Option<&'a dyn Fusion>,
-    /// CPU slots, the memory budget and plain mode, as [`eval::evaluate_with`] takes them.
+    /// CPU slots, the memory budget and plain mode.
     pub options: Options,
     /// The size of segments.
     pub segment: Segment,
+    /// The classes and script classes that carry no asset content. With them, a ledger is kept
+    /// for each bundle and listed in [`Streamed::ledgers`]; without them, none is kept.
+    pub ledger: Option<&'a [&'a str]>,
+    /// The most memory an asset may be estimated to need, in bytes. An asset estimated to need
+    /// more fails with the error `too_large` without being converted.
+    pub limit: Option<u64>,
 }
 
 /// A reference that leaves the window of its unit for a file of another bundle.
@@ -128,30 +136,84 @@ pub struct Outside {
 /// The result of a streaming evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Streamed {
-    /// The assets and counts, as the eager evaluator reports them. Assets of different bundles
-    /// that are given the same name are left out and listed in [`Evaluation::unnamed`].
+    /// The assets, in name order, the roots left unnamed, and the counts of derivations. Assets
+    /// of different bundles that are given the same name are left out and listed in
+    /// [`Evaluation::unnamed`].
     pub evaluation: Evaluation,
     /// Bundles that could not be read, opened or indexed, and manifest entries that cannot be
     /// evaluated, in order of name and code.
     pub errors: Vec<BundleError>,
     /// References that leave the window of their unit, in order.
     pub outside: Vec<Outside>,
+    /// What became of the contents of each bundle, in name order, when [`Stream::ledger`] is
+    /// given.
+    pub ledgers: Vec<BundleLedger>,
+}
+
+/// Fills in the dependencies of the entries of `manifest` from the bundles themselves, for a
+/// source whose manifest does not list them. A bundle depends on each other bundle that holds a
+/// file its serialized files name as an external file. When more than one bundle holds a file of
+/// the same name, the first in name order holds it, as in a version. A bundle that cannot be read
+/// or opened is given no dependencies; evaluating it reports the error. Fails only if `indexes`
+/// does.
+pub fn with_dependencies(
+    manifest: &mut [Entry],
+    inputs: &dyn Inputs,
+    cache: &dyn BlockCache,
+    indexes: &dyn BundleIndexes,
+    threads: usize,
+) -> io::Result<()> {
+    let files = eval::parallel(manifest.len(), threads, |i| {
+        let Ok(input) = inputs.open(&manifest[i].name) else {
+            return Ok(Vec::new());
+        };
+        Ok(bundle_files(&input, cache, indexes)?.unwrap_or_default())
+    });
+    let files = files.into_iter().collect::<io::Result<Vec<_>>>()?;
+    let mut order: Vec<usize> = (0..manifest.len()).collect();
+    order.sort_by(|&a, &b| manifest[a].name.cmp(&manifest[b].name));
+    let mut holders: HashMap<&str, usize> = HashMap::new();
+    for &entry in &order {
+        for (path, _) in &files[entry] {
+            holders.entry(path.as_str()).or_insert(entry);
+        }
+    }
+    let dependencies: Vec<Vec<String>> = files
+        .iter()
+        .enumerate()
+        .map(|(entry, files)| {
+            let names: BTreeSet<&str> = files
+                .iter()
+                .flat_map(|(_, externals)| externals)
+                .filter_map(|external| holders.get(external.rsplit('/').next()?))
+                .filter(|&&holder| holder != entry)
+                .map(|&holder| manifest[holder].name.as_str())
+                .collect();
+            names.into_iter().map(str::to_owned).collect()
+        })
+        .collect();
+    for (entry, dependencies) in manifest.iter_mut().zip(dependencies) {
+        entry.dependencies = dependencies;
+    }
+    Ok(())
 }
 
 /// The units of a manifest: each entry with its window.
-struct Units<'m> {
+pub(crate) struct Units<'m> {
     /// The entries that can be evaluated, in name order.
-    entries: Vec<&'m Entry>,
+    pub(crate) entries: Vec<&'m Entry>,
+    /// The position of each entry by name.
+    pub(crate) positions: HashMap<&'m str, usize>,
     /// The window of each entry, as positions in `entries`, in order.
-    windows: Vec<Vec<usize>>,
+    pub(crate) windows: Vec<Vec<usize>>,
     /// For each entry, the last unit whose window holds it.
-    last: Vec<usize>,
+    pub(crate) last: Vec<usize>,
     /// Entries that cannot be evaluated or that name unknown dependencies.
-    errors: Vec<BundleError>,
+    pub(crate) errors: Vec<BundleError>,
 }
 
 impl<'m> Units<'m> {
-    fn new(manifest: &'m [Entry]) -> Self {
+    pub(crate) fn new(manifest: &'m [Entry]) -> Self {
         let mut sorted: Vec<&Entry> = manifest.iter().collect();
         sorted.sort_by(|a, b| a.name.cmp(&b.name));
         let mut errors = Vec::new();
@@ -226,6 +288,7 @@ impl<'m> Units<'m> {
         errors.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
             entries,
+            positions,
             windows,
             last,
             errors,
@@ -288,13 +351,38 @@ struct Held {
     sha256: [u8; 32],
 }
 
-/// An asset of a unit, before or after it runs.
-struct Root<'a> {
-    planned: Planned<'a>,
-    logical: String,
-    path_id: i64,
+/// An asset of a unit, before it runs.
+pub(crate) struct Root<'a> {
+    pub(crate) planned: Planned<'a>,
+    /// The logical path of the root object.
+    pub(crate) logical: String,
+    /// The path ID of the root object.
+    pub(crate) path_id: i64,
     /// The first reference that leaves the window, and how many do.
     outside: Option<(Outside, usize)>,
+}
+
+impl Root<'_> {
+    /// Why the asset is not converted: a reference that leaves its window, or an estimate of its
+    /// memory above `limit`.
+    pub(crate) fn refusal(&self, version: &Version<'_>, limit: Option<u64>) -> Option<AssetError> {
+        if let Some((first, count)) = &self.outside {
+            return Some(AssetError {
+                code: "outside_dependencies".to_owned(),
+                message: format!(
+                    "object {} of {} refers to object {} of {}, which no bundle that {} depends \
+                     on contains ({count} such references)",
+                    first.object, first.bundle, first.path_id, first.file, first.unit,
+                ),
+            });
+        }
+        let limit = limit?;
+        let estimated = eval::estimated_memory(&self.planned, version);
+        (estimated > limit).then(|| AssetError {
+            code: "too_large".to_owned(),
+            message: format!("needs about {estimated} bytes, the limit is {limit}"),
+        })
+    }
 }
 
 /// Everything gathered over the segments.
@@ -307,6 +395,9 @@ struct Gathered {
     reused: usize,
     errors: BTreeMap<(String, &'static str), BundleError>,
     outside: BTreeSet<Outside>,
+    /// The account of each entry that units can still read from.
+    tallies: BTreeMap<usize, Tally>,
+    ledgers: Vec<BundleLedger>,
 }
 
 /// Evaluates every asset of the bundles of `manifest`, whose bytes come from `inputs`, one unit
@@ -317,6 +408,17 @@ pub fn evaluate(
     inputs: &dyn Inputs,
     stream: &Stream<'_>,
 ) -> io::Result<Streamed> {
+    evaluate_in_segments(manifest, inputs, stream, &mut || Ok(()))
+}
+
+/// Evaluates as [`evaluate`] does, and calls `segment_done` after each segment, once the files of
+/// its assets are in the store.
+pub fn evaluate_in_segments(
+    manifest: &[Entry],
+    inputs: &dyn Inputs,
+    stream: &Stream<'_>,
+    segment_done: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<Streamed> {
     let units = Units::new(manifest);
     let parsed = Arc::new(Parsed::new(PARSED_BYTES));
     let kept = Kept {
@@ -326,10 +428,7 @@ pub fn evaluate(
     let mut held: BTreeMap<usize, Held> = BTreeMap::new();
     let mut gathered = Gathered::default();
     for error in &units.errors {
-        gathered
-            .errors
-            .entry((error.name.clone(), error.code))
-            .or_insert_with(|| error.clone());
+        report(&mut gathered, error.clone());
     }
     let mut start = 0;
     while start < units.entries.len() {
@@ -344,7 +443,7 @@ pub fn evaluate(
             &mut held,
             &mut gathered,
         )?;
-        // The bundles no later unit needs are let go.
+        // The bundles no later unit needs are let go, and their ledgers settled.
         let done: Vec<usize> = held
             .keys()
             .copied()
@@ -360,6 +459,17 @@ pub fn evaluate(
             .lock()
             .unwrap()
             .retain(|sha256, _| needed.contains(sha256));
+        let settled: Vec<usize> = gathered
+            .tallies
+            .keys()
+            .copied()
+            .filter(|&entry| units.last[entry] < end)
+            .collect();
+        for entry in settled {
+            let tally = gathered.tallies.remove(&entry).unwrap_or_default();
+            gathered.ledgers.extend(tally.settle());
+        }
+        segment_done()?;
         start = end;
     }
     Ok(finish(gathered))
@@ -454,12 +564,16 @@ fn evaluate_segment(
                 .iter()
                 .filter_map(|&entry| position(entry))
                 .collect();
+            let tally = stream
+                .ledger
+                .map(|ignored| (gathered.tallies.entry(unit).or_default(), ignored));
             plan_unit(
                 &version,
                 bundle,
                 &window,
                 &resources,
                 stream,
+                tally,
                 &mut roots,
                 &mut gathered.outside,
                 &mut gathered.unnamed,
@@ -467,20 +581,14 @@ fn evaluate_segment(
         }
     }
 
-    // Assets with references outside their window fail here; the rest run.
+    // Assets that are refused fail here; the rest run.
+    let first = gathered.outputs.len();
     let mut runnable = Vec::new();
     let mut kept_roots = Vec::new();
     for root in roots {
-        match &root.outside {
-            Some((first, count)) => {
-                let error = AssetError {
-                    code: "outside_dependencies".to_owned(),
-                    message: format!(
-                        "object {} of {} refers to object {} of {}, which no bundle that {} \
-                         depends on contains ({count} such references)",
-                        first.object, first.bundle, first.path_id, first.file, first.unit,
-                    ),
-                };
+        match root.refusal(&version, stream.limit) {
+            Some(error) => {
+                let code = error.code.clone();
                 let document =
                     eval::document(&root.planned, &version, stream.store, Vec::new(), error)?;
                 gathered.converted += 1;
@@ -489,7 +597,7 @@ fn evaluate_segment(
                         name: root.planned.name.clone(),
                         form: root.planned.converter.name(),
                         document,
-                        error: Some("outside_dependencies".to_owned()),
+                        error: Some(code),
                     },
                     root.logical,
                     root.path_id,
@@ -518,46 +626,89 @@ fn evaluate_segment(
             gathered.outputs.push((output, logical, path_id));
         }
     }
+
+    // What the assets of the segment read counts for the ledgers of the bundles they read.
+    if stream.ledger.is_some() {
+        for (output, _, _) in &gathered.outputs[first..] {
+            let bytes = stream.store.read(&output.document)?;
+            let document = AssetDocument::from_bytes(&bytes).map_err(io::Error::other)?;
+            for source in &document.sources {
+                if let Some(&entry) = units.positions.get(source.bundle.as_str()) {
+                    gathered
+                        .tallies
+                        .entry(entry)
+                        .or_default()
+                        .read(source.path_id);
+                }
+            }
+            for resource in &document.resources {
+                if let Some(&entry) = units.positions.get(resource.bundle.as_str()) {
+                    gathered
+                        .tallies
+                        .entry(entry)
+                        .or_default()
+                        .read_resource(&resource.file);
+                }
+            }
+        }
+    }
     Ok(())
 }
 
 /// Finds, names and fingerprints the roots of the unit of `bundle`, whose window holds the
-/// bundles `window` of `version`.
+/// bundles `window` of `version`, and counts the objects of `bundle` in `tally` with the ignored
+/// classes it comes with.
 #[allow(clippy::too_many_arguments)]
-fn plan_unit<'a>(
+pub(crate) fn plan_unit<'a>(
     version: &Version<'_>,
     bundle: usize,
     window: &BTreeSet<usize>,
     resources: &[Vec<[u8; 32]>],
     stream: &Stream<'a>,
+    mut tally: Option<(&mut Tally, &[&str])>,
     roots: &mut Vec<Root<'a>>,
     outside: &mut BTreeSet<Outside>,
     unnamed: &mut Vec<(String, i64)>,
 ) {
     let index = version.index();
     let unit = &index.bundles()[bundle].name;
+    if let Some((tally, _)) = &mut tally {
+        tally.open(unit, resources[bundle].len() as u64);
+    }
     let mut found = Vec::new();
     for (f, file) in index.bundles()[bundle].files.iter().enumerate() {
         for (o, object) in file.objects.iter().enumerate() {
             let paths = index.container_paths(bundle, f, object.path_id);
-            let Some(path) = paths.iter().min() else {
+            let path = paths.iter().min();
+            if path.is_none() && tally.is_none() {
                 continue;
+            }
+            // Only roots list the references their scripts make; an object without a container
+            // path is never a root.
+            let mut unlisted = BTreeSet::new();
+            let listed = if path.is_some() {
+                &mut *outside
+            } else {
+                &mut unlisted
             };
-            let script = script_within(index, unit, bundle, f, o, window, outside);
-            let id = ObjectId {
-                bundle,
-                file: f,
-                path_id: object.path_id,
-            };
+            let script = script_within(index, unit, bundle, f, o, window, listed);
+            let mut root = false;
             for converter in stream.converters {
                 if converter.is_root(object, script, paths) {
-                    found.push((
-                        converter.as_ref(),
-                        id,
-                        object,
-                        path_in_bundle(unit, logical_path(path)),
-                    ));
+                    root = true;
+                    if let Some(path) = path {
+                        let id = ObjectId {
+                            bundle,
+                            file: f,
+                            path_id: object.path_id,
+                        };
+                        let logical = path_in_bundle(unit, logical_path(path));
+                        found.push((converter.as_ref(), id, object, logical));
+                    }
                 }
+            }
+            if let Some((tally, ignored)) = &mut tally {
+                tally.object(object.path_id, &object.class, script, root, ignored);
             }
         }
     }
@@ -644,9 +795,8 @@ fn script_within<'i>(
 }
 
 /// The root, the declared `inputs` and every object reachable from them through references
-/// inside `window`, root first and the rest in order, as the eager evaluator computes a closure
-/// over a version of the window alone. References that leave the window for a file of another
-/// bundle are added to `leaving`.
+/// inside `window`, root first and the rest in order. References that leave the window for a file
+/// of another bundle are added to `leaving`.
 fn closure(
     index: &VersionIndex,
     unit: &str,
@@ -719,6 +869,8 @@ fn finish(gathered: Gathered) -> Streamed {
         reused,
         errors,
         outside,
+        tallies: _,
+        mut ledgers,
     } = gathered;
     outputs.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     let mut kept = Vec::with_capacity(outputs.len());
@@ -734,6 +886,7 @@ fn finish(gathered: Gathered) -> Streamed {
         }
     }
     unnamed.sort();
+    ledgers.sort_by(|a, b| a.bundle.cmp(&b.bundle));
     Streamed {
         evaluation: Evaluation {
             outputs: kept,
@@ -743,6 +896,7 @@ fn finish(gathered: Gathered) -> Streamed {
         },
         errors: errors.into_values().collect(),
         outside: outside.into_iter().collect(),
+        ledgers,
     }
 }
 

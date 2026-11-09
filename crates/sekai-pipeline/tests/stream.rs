@@ -1,4 +1,4 @@
-//! The streaming evaluator against the eager one, on the Unity-built fixtures.
+//! The streaming evaluator on the Unity-built fixtures.
 //!
 //! The two fixture bundles refer to each other: the `data` object of `fixture_data` refers to a
 //! material of `fixture_scene`.
@@ -18,10 +18,7 @@ use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
-use sekai_pipeline::{
-    BundleInput, Evaluation, Fusion, MemoryDerivations, NoBundleIndexes, Options, Version,
-    evaluate_with,
-};
+use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
 use sekai_unity::NoBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -132,24 +129,6 @@ fn files(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     out
 }
 
-fn eager(root: &Path, options: &Options) -> Evaluation {
-    let (version, errors) = Version::open(
-        vec![input("fixture_scene"), input("fixture_data")],
-        &NoBlockCache,
-    );
-    assert!(errors.is_empty(), "{errors:?}");
-    let store = LocalStore::open(root).unwrap();
-    evaluate_with(
-        &version,
-        &converters(),
-        &store,
-        &MemoryDerivations::default(),
-        &NoRecorder,
-        options,
-    )
-    .unwrap()
-}
-
 struct Run<'a> {
     manifest: Vec<Entry>,
     options: Options,
@@ -157,6 +136,7 @@ struct Run<'a> {
     naming: &'a dyn Naming,
     fusion: Option<&'a dyn Fusion>,
     inputs: &'a Fixtures,
+    limit: Option<u64>,
 }
 
 impl Default for Run<'_> {
@@ -169,11 +149,20 @@ impl Default for Run<'_> {
             naming: &InBundle,
             fusion: None,
             inputs: FIXTURES.get_or_init(Fixtures::default),
+            limit: None,
         }
     }
 }
 
 fn streamed(root: &Path, run: &Run<'_>) -> Streamed {
+    streamed_in_segments(root, run, &mut || Ok(()))
+}
+
+fn streamed_in_segments(
+    root: &Path,
+    run: &Run<'_>,
+    segment_done: &mut dyn FnMut() -> io::Result<()>,
+) -> Streamed {
     let store = LocalStore::open(root).unwrap();
     let converters = converters();
     let stream = Stream {
@@ -187,23 +176,105 @@ fn streamed(root: &Path, run: &Run<'_>) -> Streamed {
         fusion: run.fusion,
         options: run.options,
         segment: run.segment,
+        ledger: None,
+        limit: run.limit,
     };
-    stream::evaluate(&run.manifest, run.inputs, &stream).unwrap()
+    stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, segment_done).unwrap()
 }
 
 #[test]
-fn streaming_writes_what_the_eager_evaluator_writes() {
-    let (a, b) = (scratch("eager"), scratch("streamed"));
-    let eager = eager(&a, &Options::threads(2));
-    let streamed = streamed(&b, &Run::default());
-    assert!(streamed.errors.is_empty(), "{:?}", streamed.errors);
-    assert!(streamed.outside.is_empty(), "{:?}", streamed.outside);
-    let forms: BTreeSet<&str> = eager.outputs.iter().map(|o| o.form).collect();
+fn dependencies_are_read_from_the_bundles_when_the_manifest_lists_none() {
+    let mut derived = vec![entry("fixture_data", &[]), entry("fixture_scene", &[])];
+    stream::with_dependencies(
+        &mut derived,
+        &Fixtures::default(),
+        &NoBlockCache,
+        &NoBundleIndexes,
+        2,
+    )
+    .unwrap();
+    assert_eq!(derived, manifest());
+
+    let (a, b) = (scratch("listed"), scratch("derived"));
+    let listed = streamed(&a, &Run::default());
+    let read = streamed(
+        &b,
+        &Run {
+            manifest: derived,
+            ..Run::default()
+        },
+    );
+    assert!(listed.errors.is_empty(), "{:?}", listed.errors);
+    assert!(listed.outside.is_empty(), "{:?}", listed.outside);
+    let forms: BTreeSet<&str> = listed.evaluation.outputs.iter().map(|o| o.form).collect();
     assert_eq!(forms, BTreeSet::from(["data", "texture"]));
-    assert_eq!(streamed.evaluation, eager);
+    assert!(listed.evaluation.outputs.iter().all(|o| o.error.is_none()));
+    assert_eq!(read, listed);
     assert_eq!(files(&a), files(&b));
     std::fs::remove_dir_all(a).unwrap();
     std::fs::remove_dir_all(b).unwrap();
+}
+
+#[test]
+fn unreadable_bundles_are_given_no_dependencies() {
+    let mut derived = vec![entry("absent", &[]), entry("fixture_scene", &[])];
+    stream::with_dependencies(
+        &mut derived,
+        &Fixtures::default(),
+        &NoBlockCache,
+        &NoBundleIndexes,
+        1,
+    )
+    .unwrap();
+    // fixture_scene names a file of fixture_data, which the manifest does not list.
+    assert_eq!(derived, [entry("absent", &[]), entry("fixture_scene", &[])]);
+}
+
+#[test]
+fn each_segment_is_reported_once_its_files_are_written() {
+    let root = scratch("reported");
+    let run = Run {
+        segment: Segment {
+            units: 1,
+            bytes: u64::MAX,
+        },
+        ..Run::default()
+    };
+    let mut counts = Vec::new();
+    let streamed = streamed_in_segments(&root, &run, &mut || {
+        counts.push(files(&root).len());
+        Ok(())
+    });
+    assert_eq!(counts.len(), 2);
+    assert!(counts[0] > 0);
+    assert_eq!(counts[1], files(&root).len());
+    assert!(!streamed.evaluation.outputs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_limit_refuses_assets_without_converting_them() {
+    let root = scratch("limit");
+    let streamed = streamed(
+        &root,
+        &Run {
+            limit: Some(0),
+            ..Run::default()
+        },
+    );
+    let outputs = &streamed.evaluation.outputs;
+    assert!(!outputs.is_empty());
+    assert!(
+        outputs
+            .iter()
+            .all(|o| o.error.as_deref() == Some("too_large"))
+    );
+    let store = LocalStore::open(&root).unwrap();
+    for output in outputs {
+        let document = AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap();
+        assert!(document.members.is_empty());
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

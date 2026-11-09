@@ -102,11 +102,17 @@ const INCOMING: &str = "incoming";
 pub trait Store: Sync {
     /// Stores `bytes` and returns their key.
     fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key>;
+    /// The bytes stored under `key`.
+    fn read(&self, key: &Key) -> io::Result<Vec<u8>>;
 }
 
 impl Store for LocalStore {
     fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
         LocalStore::put(self, bytes, extension)
+    }
+
+    fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
+        LocalStore::read(self, key)
     }
 }
 
@@ -122,6 +128,10 @@ impl Store for MemoryStore {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key.clone(), bytes.to_vec());
         Ok(key)
+    }
+
+    fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
+        MemoryStore::read(self, key)
     }
 }
 

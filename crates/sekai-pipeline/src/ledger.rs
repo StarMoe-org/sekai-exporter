@@ -1,14 +1,10 @@
-//! An account of what became of every object and resource file of a version.
+//! An account of what became of every object and resource file of a bundle.
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use sekai_convert::Converter;
-use sekai_format::AssetDocument;
-
-use crate::version::Version;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// What became of the contents of one bundle. Every object counts once, as the first of root,
-/// read, ignored and unknown that applies to it.
+/// read, ignored and unknown that applies to it. An object is read when an asset of any unit
+/// whose window holds the bundle read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BundleLedger {
     /// The bundle name.
@@ -43,72 +39,89 @@ fn script_class(script: &str) -> &str {
     script.rsplit(['/', '.']).next().unwrap_or(script)
 }
 
-/// The ledger of each bundle of `version`, in bundle order. `documents` are the assets evaluated
-/// with `converters`, and `ignored` names the classes and script classes that carry no asset
-/// content.
-pub fn account(
-    version: &Version<'_>,
-    converters: &[Box<dyn Converter>],
-    documents: &[AssetDocument],
-    ignored: &[&str],
-) -> Vec<BundleLedger> {
-    let index = version.index();
-    let read: BTreeSet<(&str, i64)> = documents
-        .iter()
-        .flat_map(|document| &document.sources)
-        .map(|source| (source.bundle.as_str(), source.path_id))
-        .collect();
-    let resources: BTreeSet<(&str, &str)> = documents
-        .iter()
-        .flat_map(|document| &document.resources)
-        .map(|resource| (resource.bundle.as_str(), resource.file.as_str()))
-        .collect();
-    let mut ledgers: Vec<BundleLedger> = index
-        .bundles()
-        .iter()
-        .enumerate()
-        .map(|(b, bundle)| BundleLedger {
-            bundle: bundle.name.clone(),
+/// The account of one bundle, kept while units can still read from it.
+#[derive(Debug, Default)]
+pub(crate) struct Tally {
+    /// The counts, once the objects of the bundle are counted. Read, ignored and unknown objects
+    /// are counted when the account is settled.
+    ledger: Option<BundleLedger>,
+    /// Each object that is not a root, as its path ID, its class and whether its class or script
+    /// is ignored.
+    rest: Vec<(i64, Box<str>, bool)>,
+    /// The path IDs of the objects a conversion read.
+    read: HashSet<i64>,
+    /// The resource files a conversion read.
+    resources_read: BTreeSet<String>,
+}
+
+impl Tally {
+    /// Starts counting the objects of `bundle`, which has `resources` resource files.
+    pub(crate) fn open(&mut self, bundle: &str, resources: u64) {
+        self.ledger = Some(BundleLedger {
+            bundle: bundle.to_owned(),
             objects: 0,
             roots: 0,
             read: 0,
             ignored: 0,
             unknown: 0,
             unknown_classes: BTreeMap::new(),
-            resources: version.resource_hashes(b).len() as u64,
-            resources_read: resources
-                .iter()
-                .filter(|(name, _)| *name == bundle.name)
-                .count() as u64,
-        })
-        .collect();
-    for (id, object, paths) in version.objects() {
-        let ledger = &mut ledgers[id.bundle];
+            resources,
+            resources_read: 0,
+        });
+    }
+
+    /// Counts an object of the bundle, of class `class` with the script `script`. `ignored` names
+    /// the classes and script classes that carry no asset content.
+    pub(crate) fn object(
+        &mut self,
+        path_id: i64,
+        class: &str,
+        script: Option<&str>,
+        root: bool,
+        ignored: &[&str],
+    ) {
+        let Some(ledger) = &mut self.ledger else {
+            return;
+        };
         ledger.objects += 1;
-        let script = index
-            .position(id)
-            .and_then(|position| index.script(id.bundle, id.file, position))
-            .flatten();
-        if converters
-            .iter()
-            .any(|converter| converter.is_root(object, script, paths))
-        {
+        if root {
             ledger.roots += 1;
-        } else if read.contains(&(ledger.bundle.as_str(), id.path_id)) {
-            ledger.read += 1;
-        } else if ignored.contains(&object.class.as_str())
-            || script.is_some_and(|s| ignored.contains(&script_class(s)))
-        {
-            ledger.ignored += 1;
         } else {
-            ledger.unknown += 1;
-            *ledger
-                .unknown_classes
-                .entry(object.class.clone())
-                .or_default() += 1;
+            let skipped = ignored.contains(&class)
+                || script.is_some_and(|script| ignored.contains(&script_class(script)));
+            self.rest.push((path_id, class.into(), skipped));
         }
     }
-    ledgers
+
+    /// Notes that a conversion read the object `path_id` of the bundle.
+    pub(crate) fn read(&mut self, path_id: i64) {
+        self.read.insert(path_id);
+    }
+
+    /// Notes that a conversion read the resource file `file` of the bundle.
+    pub(crate) fn read_resource(&mut self, file: &str) {
+        if !self.resources_read.contains(file) {
+            self.resources_read.insert(file.to_owned());
+        }
+    }
+
+    /// The ledger of the bundle, once no conversion can read from it any more. `None` if its
+    /// objects were never counted.
+    pub(crate) fn settle(self) -> Option<BundleLedger> {
+        let mut ledger = self.ledger?;
+        for (path_id, class, skipped) in self.rest {
+            if self.read.contains(&path_id) {
+                ledger.read += 1;
+            } else if skipped {
+                ledger.ignored += 1;
+            } else {
+                ledger.unknown += 1;
+                *ledger.unknown_classes.entry(class.into()).or_default() += 1;
+            }
+        }
+        ledger.resources_read = self.resources_read.len() as u64;
+        Some(ledger)
+    }
 }
 
 #[cfg(test)]

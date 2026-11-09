@@ -1,4 +1,5 @@
-//! The eager evaluator: names, fingerprints, conversion, canonical encoding and the store.
+//! Derivations: fingerprints, conversion, canonical encoding, the store, and the scheduling of a
+//! set of derivations.
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,11 +10,10 @@ use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, Ob
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
-use sekai_unity::index::{Resolved, VersionIndex};
+use sekai_unity::index::VersionIndex;
 use sha2::{Digest, Sha256};
 
 use crate::metrics::Recorder;
-use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
 use crate::reads::Reads;
 use crate::sched::{Limits, Need, Resident, Scheduler, Slots};
 use crate::version::Version;
@@ -31,7 +31,7 @@ pub struct Output {
     pub error: Option<String>,
 }
 
-/// The result of evaluating a version.
+/// The assets of an evaluation.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Evaluation {
     /// The assets, in name order.
@@ -56,7 +56,7 @@ pub fn parallel<T: Send>(n: usize, threads: usize, job: impl Fn(usize) -> T + Sy
     scheduler.run(&vec![Need::default(); n], |i, _| job(i))
 }
 
-/// How [`evaluate_with`] runs.
+/// How derivations run.
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
     /// The CPU slots: how many conversions and encodings run at once.
@@ -87,29 +87,6 @@ impl Options {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// The root, the declared `inputs` and every object reachable from them through references, root
-/// first and the rest in order.
-fn closure(index: &VersionIndex, root: ObjectId, inputs: &[ObjectId]) -> Vec<ObjectId> {
-    let mut seen = BTreeSet::from([root]);
-    seen.extend(inputs);
-    let mut queue: Vec<ObjectId> = seen.iter().copied().collect();
-    while let Some(id) = queue.pop() {
-        let Some(position) = index.position(id) else {
-            continue;
-        };
-        for reference in &index.bundles()[id.bundle].files[id.file].objects[position].references {
-            if let Ok(Resolved::Object(target)) = index.resolve(id, *reference)
-                && index.position(target).is_some()
-                && seen.insert(target)
-            {
-                queue.push(target);
-            }
-        }
-    }
-    seen.remove(&root);
-    std::iter::once(root).chain(seen).collect()
 }
 
 /// Further files of an asset, made while its members are still decoded. They must not change any
@@ -150,15 +127,6 @@ impl Planned<'_> {
         let bundles: BTreeSet<usize> = self.closure.iter().map(|id| id.bundle).collect();
         bundles.into_iter().collect()
     }
-}
-
-/// The derivations of a version, before any of them runs.
-pub(crate) struct Plan<'a> {
-    /// The derivations, in name order.
-    pub(crate) derivations: Vec<Planned<'a>>,
-    /// Roots that cannot be told apart from another root by name, as `(logical path, path ID)`,
-    /// in order.
-    pub(crate) unnamed: Vec<(String, i64)>,
 }
 
 pub(crate) fn fingerprint(
@@ -434,139 +402,6 @@ fn build_document(
     }
 }
 
-/// Evaluates every asset of `version`. An asset that cannot be produced is recorded with its
-/// error and the run continues; only a failure to write the store fails the run.
-pub fn evaluate(
-    version: &Version<'_>,
-    converters: &[Box<dyn Converter>],
-    store: &dyn Store,
-    derivations: &dyn Derivations,
-    recorder: &dyn Recorder,
-    threads: usize,
-) -> io::Result<Evaluation> {
-    evaluate_with(
-        version,
-        converters,
-        store,
-        derivations,
-        recorder,
-        &Options::threads(threads),
-    )
-}
-
-/// Evaluates every asset of `version` as [`evaluate`] does, within `options`. The result does
-/// not depend on `options`.
-pub fn evaluate_with(
-    version: &Version<'_>,
-    converters: &[Box<dyn Converter>],
-    store: &dyn Store,
-    derivations: &dyn Derivations,
-    recorder: &dyn Recorder,
-    options: &Options,
-) -> io::Result<Evaluation> {
-    evaluate_fused(
-        version,
-        converters,
-        store,
-        derivations,
-        recorder,
-        options,
-        None,
-    )
-}
-
-/// Evaluates every asset of `version` as [`evaluate_with`] does, and has `fusion` make further
-/// files of each asset that is converted. Plain mode does not use it.
-pub fn evaluate_fused(
-    version: &Version<'_>,
-    converters: &[Box<dyn Converter>],
-    store: &dyn Store,
-    derivations: &dyn Derivations,
-    recorder: &dyn Recorder,
-    options: &Options,
-    fusion: Option<&dyn Fusion>,
-) -> io::Result<Evaluation> {
-    let threads = if options.plain { 1 } else { options.threads };
-    let plan = plan(version, converters, recorder, threads);
-    let fusion = fusion.filter(|_| !options.plain);
-    run(
-        &plan,
-        version,
-        store,
-        derivations,
-        recorder,
-        options,
-        fusion,
-    )
-}
-
-/// Chooses the roots of `version`, names them and computes the closure and fingerprint of each
-/// derivation. Nothing is converted and the store is not read.
-pub(crate) fn plan<'a>(
-    version: &Version<'_>,
-    converters: &'a [Box<dyn Converter>],
-    recorder: &dyn Recorder,
-    threads: usize,
-) -> Plan<'a> {
-    let index = version.index();
-    let _span = recorder.span("plan", "assets", "");
-    let mut roots = Vec::new();
-    for (id, object, paths) in version.objects() {
-        let Some(path) = paths.iter().min() else {
-            continue;
-        };
-        let script = index
-            .position(id)
-            .and_then(|position| index.script(id.bundle, id.file, position))
-            .flatten();
-        for converter in converters {
-            if converter.is_root(object, script, paths) {
-                let bundle = &index.bundles()[id.bundle].name;
-                let named = path_in_bundle(bundle, logical_path(path));
-                roots.push((converter.as_ref(), id, object, named));
-            }
-        }
-    }
-    let candidates: Vec<Candidate<'_>> = roots
-        .iter()
-        .map(|(_, id, object, logical)| Candidate {
-            logical: logical.as_ref(),
-            class_id: object.class_id,
-            class: &object.class,
-            bundle: &index.bundles()[id.bundle].name,
-            path_id: id.path_id,
-        })
-        .collect();
-    let names = assign(&candidates);
-
-    let resources = parallel(index.bundles().len(), threads, |b| {
-        let _span = recorder.span("hash", "resources", &index.bundles()[b].name);
-        version.resource_hashes(b)
-    });
-    let mut unnamed = Vec::new();
-    let mut derivations = Vec::new();
-    for ((converter, id, _, logical), name) in roots.iter().zip(names) {
-        let Some(name) = name else {
-            unnamed.push((logical.to_string(), id.path_id));
-            continue;
-        };
-        let closure = closure(index, *id, &converter.inputs(*id, version));
-        let fingerprint = fingerprint(*converter, &name, index, &closure, &resources);
-        derivations.push(Planned {
-            converter: *converter,
-            name,
-            closure,
-            fingerprint,
-        });
-    }
-    unnamed.sort();
-    derivations.sort_by(|a, b| a.name.cmp(&b.name));
-    Plan {
-        derivations,
-        unnamed,
-    }
-}
-
 /// An estimate of the time a derivation takes, in arbitrary units.
 fn effort(cost: &Cost) -> u64 {
     let weight = match cost.class {
@@ -595,34 +430,6 @@ fn order(plans: &[Planned<'_>], pending: &[(usize, Cost)]) -> Vec<usize> {
     groups.concat()
 }
 
-/// Runs the derivations of `plan` whose output is not recorded in `derivations` yet and records
-/// the new outputs.
-pub(crate) fn run(
-    plan: &Plan<'_>,
-    version: &Version<'_>,
-    store: &dyn Store,
-    derivations: &dyn Derivations,
-    recorder: &dyn Recorder,
-    options: &Options,
-    fusion: Option<&dyn Fusion>,
-) -> io::Result<Evaluation> {
-    let ran = run_each(
-        &plan.derivations,
-        version,
-        store,
-        derivations,
-        recorder,
-        options,
-        fusion,
-    )?;
-    Ok(Evaluation {
-        outputs: ran.outputs.into_iter().flatten().collect(),
-        unnamed: plan.unnamed.clone(),
-        converted: ran.converted,
-        reused: ran.reused,
-    })
-}
-
 /// The outcome of [`run_each`].
 pub(crate) struct Ran {
     /// The asset of each derivation, in order; `None` for a derivation with no asset.
@@ -633,7 +440,10 @@ pub(crate) struct Ran {
     pub(crate) reused: usize,
 }
 
-/// Runs `plans` as [`run`] does and reports the asset of each derivation, in order.
+/// Runs the derivations of `plans` whose output is not recorded in `derivations` yet, records the
+/// new outputs and reports the asset of each derivation, in order. An asset that cannot be
+/// produced is reported with its error and not recorded; only a failure to read or write the
+/// store or the records fails the run.
 pub(crate) fn run_each(
     plans: &[Planned<'_>],
     version: &Version<'_>,

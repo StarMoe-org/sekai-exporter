@@ -51,7 +51,7 @@ Assets are named by their logical path and asset form, inside the directory name
 
 ## Evaluation
 
-**Strategies.** *Eager* evaluation computes every binding in advance; the [pipeline](pipeline.md) is the eager evaluator. *Lazy* evaluation computes a derivation when a request reaches it and caches the result. *Mixed* evaluation computes frequently requested bindings in advance and the rest on demand.
+**Strategies.** *Eager* evaluation computes every binding in advance; the [pipeline](pipeline.md) does so bundle by bundle, with the streaming evaluator. *Lazy* evaluation computes a derivation when a request reaches it and caches the result. *Mixed* evaluation computes frequently requested bindings in advance and the rest on demand.
 
 **Places.** A batch run on one machine, a self-hosted server, a serverless function running the WebAssembly core, a browser running the same core, or another program using the crates as a library.
 
@@ -60,7 +60,7 @@ Assets are named by their logical path and asset form, inside the directory name
 - **By bundle** (`<region>/bundle/<bundle name>/…`): fully lazy. A request can be served by fetching the bundle, unpacking it and returning the object, with no index prepared in advance.
 - **By logical path** (`<region>/<view>/<logical path>`): the path must first be mapped to its bundle and objects, which requires the binding index. The index derivations are inexpensive and are computed eagerly; only the expensive convert and transform derivations are left lazy.
 
-The lazy evaluator takes the eager evaluator's names and fingerprints from the index of the version, reads only the bundles of the asset that is requested, and writes the same documents and members. Concurrent requests for one fingerprint compute it once. A request can name an asset or a bundle and object.
+The lazy evaluator names and fingerprints the assets of a bundle from the unit of that bundle, as the streaming evaluator does, and writes the same documents and members. A request opens only the window of its bundle and reads object bytes only from the bundles of the closure of the asset. Concurrent requests for one fingerprint compute it once. A request can name an asset or a bundle and object.
 
 On `wasm32` the core produces textures, sprites, audio as FLAC, text, fonts and scenarios, and they are byte-identical to native output. Video needs the `ffmpeg` program and reports `encoder_unavailable`. An asset estimated to need more than 2 GiB of memory reports `too_large`.
 
@@ -100,7 +100,7 @@ The workspace has fourteen crates in a flat `crates/` directory. A crate boundar
 | 2 | `sekai-convert` | The converter interface, writers and the general-purpose converters |
 | 2 | `sekai-encode` | Encoders for decoded content. The canonical encoders are pure Rust and always present; every C dependency of an encoder is confined here, one feature each |
 | 2 | `sekai-publish` | Layouts, stores, the publication protocol and asset listings |
-| 3 | `sekai-pipeline` | The eager, streaming and lazy evaluators, the scheduler and the derivation cache |
+| 3 | `sekai-pipeline` | The streaming and lazy evaluators, the scheduler and the derivation cache |
 | 3 | `sekai-moesekai` | Scenarios, episodes, virtual lives, costumes and the storage view |
 | 3 | `sekai-mysekai` | MySekai assets in the full form a game-reproducing runtime needs |
 | 4 | `sekai-exporter` | The command-line program |

@@ -1,6 +1,9 @@
-//! Evaluating the Unity-built fixtures: outputs, determinism and reuse.
+//! Evaluating the Unity-built fixtures: outputs, determinism, reuse and scheduling.
+//!
+//! The two fixture bundles refer to each other, so each depends on the other.
 
 use std::collections::BTreeSet;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,9 +15,9 @@ use sekai_convert::{
 };
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
+use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{
-    BundleInput, Evaluation, Fusion, MemoryDerivations, Options, Version, evaluate, evaluate_fused,
-    evaluate_with,
+    BundleInput, Evaluation, Fusion, MemoryDerivations, NoBundleIndexes, Options,
 };
 use sekai_unity::NoBlockCache;
 use sha2::{Digest, Sha256};
@@ -31,6 +34,56 @@ fn input(file: &str) -> BundleInput {
     }
 }
 
+struct Fixtures;
+
+impl Inputs for Fixtures {
+    fn open(&self, name: &str) -> io::Result<BundleInput> {
+        Ok(input(name))
+    }
+}
+
+/// Evaluates the fixtures, each depending on the other, with `converters` into the store at
+/// `root`.
+fn evaluate(
+    converters: &[Box<dyn Converter>],
+    root: &Path,
+    options: &Options,
+    derivations: &MemoryDerivations,
+    fusion: Option<&dyn Fusion>,
+) -> Evaluation {
+    let manifest = ["fixture_data", "fixture_scene"].map(|name| Entry {
+        name: name.to_owned(),
+        size: 1,
+        dependencies: vec![
+            if name == "fixture_data" {
+                "fixture_scene"
+            } else {
+                "fixture_data"
+            }
+            .to_owned(),
+        ],
+    });
+    let store = LocalStore::open(root).unwrap();
+    let stream = Stream {
+        converters,
+        naming: &InBundle,
+        store: &store,
+        derivations,
+        indexes: &NoBundleIndexes,
+        cache: &NoBlockCache,
+        recorder: &NoRecorder,
+        fusion,
+        options: *options,
+        segment: Segment::default(),
+        ledger: None,
+        limit: None,
+    };
+    let streamed = stream::evaluate(&manifest, &Fixtures, &stream).unwrap();
+    assert!(streamed.errors.is_empty(), "{:?}", streamed.errors);
+    assert!(streamed.outside.is_empty(), "{:?}", streamed.outside);
+    streamed.evaluation
+}
+
 fn run(root: &Path, threads: usize, derivations: &MemoryDerivations) -> Evaluation {
     run_with(Box::new(Texture), root, threads, derivations)
 }
@@ -41,21 +94,8 @@ fn run_with(
     threads: usize,
     derivations: &MemoryDerivations,
 ) -> Evaluation {
-    let (version, errors) = Version::open(
-        vec![input("fixture_scene"), input("fixture_data")],
-        &NoBlockCache,
-    );
-    assert!(errors.is_empty(), "{errors:?}");
-    let store = LocalStore::open(root).unwrap();
-    evaluate(
-        &version,
-        &[converter],
-        &store,
-        derivations,
-        &NoRecorder,
-        threads,
-    )
-    .unwrap()
+    let options = Options::threads(threads);
+    evaluate(&[converter], root, &options, derivations, None)
 }
 
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -77,28 +117,15 @@ impl Fusion for CountingFusion {
 }
 
 fn run_fused(root: &Path, plain: bool, fusion: &CountingFusion) -> Evaluation {
-    let (version, errors) = Version::open(
-        vec![input("fixture_scene"), input("fixture_data")],
-        &NoBlockCache,
-    );
-    assert!(errors.is_empty(), "{errors:?}");
-    let store = LocalStore::open(root).unwrap();
     let options = Options {
         threads: 2,
         memory: u64::MAX,
         resident: None,
         plain,
     };
-    evaluate_fused(
-        &version,
-        &[Box::new(Texture) as Box<dyn Converter>],
-        &store,
-        &MemoryDerivations::default(),
-        &NoRecorder,
-        &options,
-        Some(fusion),
-    )
-    .unwrap()
+    let converters = [Box::new(Texture) as Box<dyn Converter>];
+    let derivations = MemoryDerivations::default();
+    evaluate(&converters, root, &options, &derivations, Some(fusion))
 }
 
 #[test]
@@ -315,21 +342,7 @@ fn run_options(
     options: &Options,
     derivations: &MemoryDerivations,
 ) -> Evaluation {
-    let (version, errors) = Version::open(
-        vec![input("fixture_scene"), input("fixture_data")],
-        &NoBlockCache,
-    );
-    assert!(errors.is_empty(), "{errors:?}");
-    let store = LocalStore::open(root).unwrap();
-    evaluate_with(
-        &version,
-        &[converter],
-        &store,
-        derivations,
-        &NoRecorder,
-        options,
-    )
-    .unwrap()
+    evaluate(&[converter], root, options, derivations, None)
 }
 
 #[test]

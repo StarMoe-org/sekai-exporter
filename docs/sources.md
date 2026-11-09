@@ -20,7 +20,7 @@ The game data tables have their own sources: `git`, which reads a repository of 
 
 ## Region configuration
 
-A region of `"kind": "dir"` needs only `"directory"`: the files under it are its bundles, named by their relative paths. Any region can list `"stores"`, the output directories of earlier runs. A bundle with the same declared hash is copied from the first of them that holds it instead of being downloaded.
+A region of `"kind": "dir"` needs only `"directory"`: the files under it are its bundles, named by their relative paths, and their dependencies are read from the external files the bundles name (see [Streaming evaluation](pipeline.md#streaming-evaluation)). Any region can list `"stores"`, the output directories of earlier runs. A bundle with the same declared hash is copied from the first of them that holds it instead of being downloaded.
 
 Regions are defined by the deployer in a JSON configuration file, which is passed to the exporter with `--config`. The exporter contains no addresses, application identifiers or client identities. An entry gives the protocol of the region (`kind`: `cp` or `nuverse`), its platform, its hosts, its address templates, the client identity (application version, application hash, asset version and hash, Unity version, user agent, device model and operating system), the names of its secrets, an optional feed and the network settings. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The configuration never contains secret values.**
 

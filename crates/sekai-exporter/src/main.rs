@@ -63,12 +63,13 @@ usage: sekai-exporter <command> [options]
 
 commands:
   export <input> <output> [--tree <dir>] [--threads <n>] [--memory <bytes>] [--plain]
-      Convert every bundle file directly inside <input> to canonical assets in
-      <output>/store, and list them in <output>/assets.tsv. What became of every
-      object of each bundle is in <output>/ledger.tsv. CPU and memory use
-      and the time of each stage are written to <output>/metrics.jsonl. The
-      index is published under <output>/published, and --tree also writes a
-      path tree.
+      Convert every bundle file under <input>, named by its path under <input>
+      with / separators, to canonical assets in <output>/store, and list them in
+      <output>/assets.tsv. Each bundle is evaluated with the bundles that hold
+      the external files it names. What became of every object of each bundle
+      is in <output>/ledger.tsv. CPU and memory use and the time of each stage
+      are written to <output>/metrics.jsonl. The index is published under
+      <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
          [--plain] [--force]

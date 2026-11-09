@@ -25,7 +25,8 @@ impl Secrets {
         Self { directory }
     }
 
-    fn read(&self, name: &str) -> Result<Vec<u8>, SourceError> {
+    /// The text of the secret `name`, without surrounding whitespace.
+    fn text(&self, name: &str) -> Result<String, SourceError> {
         let missing = || SourceError::new("secret", format!("the secret {name} is not set"));
         let text = match std::env::var(name) {
             Ok(text) => text,
@@ -34,9 +35,28 @@ impl Secrets {
                 std::fs::read_to_string(directory.join(name)).map_err(|_| missing())?
             }
         };
-        parse_hex(text.trim()).ok_or_else(|| {
+        Ok(text.trim().to_owned())
+    }
+
+    fn read(&self, name: &str) -> Result<Vec<u8>, SourceError> {
+        parse_hex(&self.text(name)?).ok_or_else(|| {
             SourceError::new("secret", format!("the secret {name} is not hexadecimal"))
         })
+    }
+
+    /// The key of encrypted HCA audio, when `names` name one: one to sixteen hexadecimal digits.
+    pub fn hca_key(&self, names: &SecretNames) -> Result<Option<u64>, SourceError> {
+        let Some(name) = &names.hca else {
+            return Ok(None);
+        };
+        let text = self.text(name)?;
+        if text.is_empty() || text.len() > 16 || !text.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(SourceError::new(
+                "secret",
+                format!("the secret {name} is not a 64-bit hexadecimal number"),
+            ));
+        }
+        Ok(u64::from_str_radix(&text, 16).ok())
     }
 }
 
@@ -111,6 +131,42 @@ mod tests {
             .read("SEKAI_TEST_BAD")
             .unwrap_err();
         assert!(!error.message.contains("not-hex-value"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn the_hca_key_is_a_hexadecimal_number() {
+        let directory = std::env::temp_dir().join(format!("sekai-hca-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SEKAI_TEST_HCA"),
+            " 0123456789ABCDE
+",
+        )
+        .unwrap();
+        std::fs::write(directory.join("SEKAI_TEST_HCA_LONG"), "0123456789abcdef0").unwrap();
+        std::fs::write(directory.join("SEKAI_TEST_HCA_BAD"), "0x12").unwrap();
+        let secrets = Secrets::new(Some(directory.clone()));
+        let names = |hca: Option<&str>| SecretNames {
+            key: String::new(),
+            iv: String::new(),
+            hca: hca.map(str::to_owned),
+        };
+        assert_eq!(secrets.hca_key(&names(None)).unwrap(), None);
+        assert_eq!(
+            secrets.hca_key(&names(Some("SEKAI_TEST_HCA"))).unwrap(),
+            Some(0x0123456789ABCDE)
+        );
+        for name in ["SEKAI_TEST_HCA_LONG", "SEKAI_TEST_HCA_BAD"] {
+            let error = secrets.hca_key(&names(Some(name))).unwrap_err();
+            assert_eq!(error.code, "secret");
+            assert!(error.message.contains(name));
+            assert!(!error.message.contains("0x12"));
+        }
+        let error = secrets
+            .hca_key(&names(Some("SEKAI_TEST_HCA_NOT_SET")))
+            .unwrap_err();
+        assert!(error.message.contains("is not set"));
         std::fs::remove_dir_all(directory).unwrap();
     }
 }

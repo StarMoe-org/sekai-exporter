@@ -62,6 +62,10 @@ pub struct SecretNames {
     pub key: String,
     /// The AES initialization vector, as hexadecimal.
     pub iv: String,
+    /// The key of encrypted HCA audio, a 64-bit number in hexadecimal. Without it, encrypted
+    /// audio is reported as `missing_key`.
+    #[serde(default)]
+    pub hca: Option<String>,
 }
 
 /// How a source uses the network.
@@ -156,7 +160,7 @@ mod tests {
         "hosts": ["h"],
         "urls": {"version": "v", "manifest": "m", "bundle": "b"},
         "client": {"application_version": "1.2.3"},
-        "secrets": {"key": "K", "iv": "I"},
+        "secrets": {"key": "K", "iv": "I", "hca": "H"},
         "network": {"retries": 1}
     }}}"#;
 
@@ -167,6 +171,7 @@ mod tests {
         assert_eq!(region.client.application_version.unwrap(), "1.2.3");
         assert_eq!(region.network.retries, 1);
         assert_eq!(region.network.back_off_ms, 500);
+        assert_eq!(region.secrets.hca.as_deref(), Some("H"));
     }
 
     #[test]

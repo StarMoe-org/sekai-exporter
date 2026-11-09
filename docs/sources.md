@@ -35,7 +35,7 @@ Regions are defined by the deployer in a JSON configuration file, which is passe
         "bundle": "https://{host}/{application_version}/{download_path}/{bundle}"
       },
       "client": { "application_version": "1.0.0" },
-      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV" },
+      "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV", "hca": "SEKAI_HCA_KEY" },
       "feed": "https://feed.example.invalid/versions.json",
       "network": { "concurrency": 8, "rate_limit": 20, "retries": 4, "back_off_ms": 500 }
     }
@@ -93,6 +93,7 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 - Secret values are never written to logs, reports, the catalog or asset documents. Reports name the secret that was used, not its value.
 - The guest account is created once by a separate command that the deployer runs, and is then stored as a secret and reused. Runs do not create accounts.
 - The configuration holds only the name of each secret. Its value must be obtained by the user from their own client, and is written as hexadecimal.
+- `secrets.hca` is optional and names the key of encrypted HCA audio, a 64-bit number written as one to sixteen hexadecimal digits. The audio converter decrypts with it and the subkey stored in each cue sheet. Without it, encrypted audio is reported with the error `missing_key`.
 
 ## Network
 

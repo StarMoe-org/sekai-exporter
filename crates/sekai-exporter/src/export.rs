@@ -42,12 +42,12 @@ pub(crate) fn video() -> Vec<Box<dyn Converter>> {
 }
 
 #[cfg(feature = "audio")]
-fn audio() -> Vec<Box<dyn Converter>> {
-    vec![Box::new(sekai_convert::audio::Audio::new(None))]
+fn audio(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_convert::audio::Audio::new(hca_key))]
 }
 
 #[cfg(not(feature = "audio"))]
-fn audio() -> Vec<Box<dyn Converter>> {
+fn audio(_hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
     Vec::new()
 }
 
@@ -74,9 +74,9 @@ fn scenario() -> Vec<Box<dyn Converter>> {
     Vec::new()
 }
 
-/// Every converter of this build.
-pub(crate) fn converters() -> Vec<Box<dyn Converter>> {
-    [image(), audio(), video(), text(), scenario()]
+/// Every converter of this build. `hca_key` decrypts encrypted HCA audio.
+pub(crate) fn converters(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
+    [image(), audio(hca_key), video(), text(), scenario()]
         .into_iter()
         .flatten()
         .collect()
@@ -182,7 +182,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
     let evaluation = evaluate(
         &version,
-        &converters(),
+        &converters(None),
         &store,
         derivations.as_ref(),
         monitor,

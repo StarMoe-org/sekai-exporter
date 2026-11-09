@@ -20,7 +20,7 @@ The game data tables have their own sources: `git`, which reads a repository of 
 
 ## The region table
 
-The hosts, application identifiers, channels and platforms of each region, together with the client identity (application version, application hash, user agent and device model), are kept in a data file in this repository. The configuration can override any entry. These values are required for the exporter to work at all, and anyone with an installed client can read them. **The region table never contains keys.**
+The hosts, application identifiers, channels and platforms of each region, together with the client identity (application version, application hash, Unity version, user agent and device model), are kept in a data file in this repository. The configuration can override any entry. These values are required for the exporter to work at all, and anyone with an installed client can read them. The Unity version is only sent with requests: readers follow the format versions stored in each file. **The region table never contains keys.**
 
 ## Version discovery
 
@@ -48,7 +48,7 @@ A committed version is named by its asset identity and table identity together, 
 
 ## Declared hashes and content hashes
 
-A manifest row declares a bundle hash (`hash` for `cp`, `crc` for `nuverse`), and for `cp` also a `crc` and a size. These are two different kinds of hash from the SHA-256 that identifies a stored input:
+A manifest row declares a bundle hash (`hash` for `cp`, `crc` for `nuverse`) and other fields, such as a size. These are two different kinds of hash from the SHA-256 that identifies a stored input:
 
 - The **declared hash** decides whether a bundle is fetched again. A bundle whose declared hash matches the last run is not downloaded, and keeps its stored bytes and its index. The other declared fields can change while the declared hash stays the same, so they are recorded but not compared.
 - The **content hash** is the SHA-256 the exporter computes while the bytes arrive. Everything after the download identifies the bundle by it.
@@ -66,7 +66,7 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 
 ## Network
 
-Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a rate limit, retries with back-off and host rotation. Manifests carry no content digest and their declared size is not the size of the download, so the exporter checks each bundle against the length of its response and records its SHA-256.
+Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a rate limit, retries with back-off and host rotation. Manifests carry no content digest. The exporter checks the length of each bundle, against the declared size for `nuverse` and against the length of the response for `cp`, whose declared size is not the size of the download, and records its SHA-256.
 
 ## The input store
 

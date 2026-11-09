@@ -42,7 +42,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 | Video | VP9 streams are written into MP4 without re-encoding |
 | Object documents | Written as JSON directly by the compiled reading program, without building a value tree |
 | Store writes | Content-addressed; content that already exists is skipped. A local store materializes path trees with hard links |
-| Catalog | SQLite in WAL mode with batched transactions; read-only queries use separate connections and do not wait for writes |
+| Catalog | One redb file with batched write transactions; read transactions see a snapshot and do not wait for writes |
 
 Fused encoding does not change fingerprints: each output is the same bytes it would be without fusion, and comparing fused and unfused evaluation in continuous integration is planned together with fused encoding.
 

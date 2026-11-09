@@ -69,7 +69,7 @@
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | 链接 | MIT |
 | 哈希 | [`sha2`](https://crates.io/crates/sha2) | 链接 | MIT OR Apache-2.0 |
 | HTTP 与 TLS | [`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT |
-| 目录 | [`rusqlite`](https://crates.io/crates/rusqlite)，内置 SQLite | 链接 | MIT（`rusqlite`），公有领域（SQLite） |
+| 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
 | 运行时加载库 | [`libloading`](https://crates.io/crates/libloading) | 链接 | ISC |
 | 命令行解析 | [`lexopt`](https://crates.io/crates/lexopt) | 链接 | MIT |
 

@@ -109,7 +109,7 @@ bytes ──unpack──▶ object graph ──convert──▶ assets ──vie
 - **Convert** is a set of converters. Each one declares which root objects it takes, which game tables it reads and which asset form it produces, and points to the specification of that form.
 - **Views** arrange converted assets into the directory layout and file formats one consumer expects. Several views can be produced from the same assets.
 - **Object documents** are always available too: every object's fields as JSON, with references resolved. A batch run writes them with every bundle, and a server can generate them on request. Anything without a converter yet is still available there, without loss.
-- **The catalog** (SQLite) records versions, bundles, objects, assets and files, so a consumer can browse the output and only changed assets are rebuilt.
+- **The catalog** records versions, bundles, objects, assets and files, so a consumer can browse the output and only changed assets are rebuilt.
 
 ## Adding the asset form you want
 

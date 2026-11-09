@@ -13,7 +13,7 @@ sekai-format.workspace = true
 sha2 = { version = "0.11.1", default-features = false }
 
 [features]
-sqlite = []
+catalog-db = []
 
 [lints]
 workspace = true

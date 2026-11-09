@@ -47,7 +47,7 @@ A **view** is a function that produces bindings. A view that only rearranges pat
 | Reference | Each PPtr resolved to `(bundle, path ID)`. External files are resolved through the external file table to the bundle that contains them. References into engine built-in resources are recorded as external references and are not errors |
 | Logical path | The container path without the `assets/sekai/assetbundle/resources/<category>/` prefix and without the extension |
 
-Assets are named by their logical path and asset form. When several assets would receive the same name, the names are decided after the whole version is indexed. Assets whose root objects have different classes are ordered by class priority (`Sprite` before `Texture2D` before other classes), and each asset other than the first receives an `@<class>` suffix. Assets whose root objects have the same class are ordered by the `(bundle, path ID)` of the root, and each asset other than the first receives an `@<n>` suffix. The result depends only on the index of the version, never on the order in which work finishes. When any member of such a group changes, the names of the whole group are decided again.
+Assets are named by their logical path and asset form. When several assets would receive the same name, the names are decided after the whole version is indexed. Assets whose root objects have different classes are ordered by class priority (`Sprite` before `Texture2D` before other classes), and each asset other than the first receives an `@<class>` suffix. Assets whose root objects have the same class are ordered by the `(bundle, path ID)` of the root, and each asset other than the first receives an `@<path ID>` suffix, with the path ID in decimal as in object documents. When both apply, the class suffix comes first. Assets of a group that have the same path ID in different bundles cannot be told apart by name and are reported as asset errors. The result depends only on the index of the version, never on the order in which work finishes. When any member of such a group changes, the names of the whole group are decided again.
 
 ## Evaluation
 
@@ -83,7 +83,7 @@ When a converter cannot produce a correct asset, it reports a named error for th
 
 ## Crates
 
-The workspace has fourteen crates in a flat `crates/` directory. A crate boundary exists where the dependency set differs (C libraries, networking, SQLite), where a large body of code is optional, or where a stable interface is used by several crates. Everything else is a module behind a feature.
+The workspace has fourteen crates in a flat `crates/` directory. A crate boundary exists where the dependency set differs (C libraries, networking, the catalog database), where a large body of code is optional, or where a stable interface is used by several crates. Everything else is a module behind a feature.
 
 | Layer | Crate | Contents |
 |---|---|---|

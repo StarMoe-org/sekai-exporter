@@ -32,7 +32,7 @@ For each asset form there is also a **listing**: logical path, asset form, finge
 
 ## The storage view
 
-The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. It is materialized as a `tree` at fixed public paths, which cannot be switched atomically. It is therefore written in this order:
+The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. Assets that share a logical path use the names defined in the [architecture](architecture.md). It is materialized as a `tree` at fixed public paths, which cannot be switched atomically. It is therefore written in this order:
 
 1. every new file is written;
 2. the listing of the new version is written;

@@ -26,7 +26,7 @@ Terms used throughout the documents and the code. The Chinese term is the one us
 | materialization | 物化 | Writing a set of bindings in some shape to some place. 将一组绑定以某种形状写入某处。 |
 | layout (publishing) | 布局（发布） | The shape of a materialization: `index` or `tree`. 物化的形状：`index` 或 `tree`。 |
 | store | store | The content-addressed place where bytes are kept. 按内容寻址存放字节之处。 |
-| catalog | 目录 | The SQLite index of inputs, derivations, bindings and publications. 输入、派生、绑定与发布的 SQLite 索引。 |
+| catalog | 目录 | The index of inputs, derivations, bindings and publications. 输入、派生、绑定与发布的索引。 |
 | listing | 列表 | All assets of one form in a region and version. 某区服某版本中某种形式的全部资产。 |
 | evaluator | 求值器 | The part that decides when and where derivations are computed: eager or lazy. 决定派生何时、何处计算的部分：急切或惰性。 |
 | logical path | 逻辑路径 | A container path without its fixed prefix and extension. 去掉固定前缀与扩展名的容器路径。 |

@@ -69,7 +69,7 @@ An entry is added in the same change that adds the component, and removed in the
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | Linked | MIT |
 | Hashing | [`sha2`](https://crates.io/crates/sha2) | Linked | MIT OR Apache-2.0 |
 | HTTP and TLS | [`ureq`](https://crates.io/crates/ureq), [`rustls`](https://crates.io/crates/rustls) | Linked when the `cdn` or `s3` feature is enabled | MIT OR Apache-2.0; Apache-2.0 OR ISC OR MIT |
-| Catalog | [`rusqlite`](https://crates.io/crates/rusqlite) with bundled SQLite | Linked | MIT (`rusqlite`), public domain (SQLite) |
+| Catalog | [`redb`](https://crates.io/crates/redb) | Linked when the `catalog-db` feature is enabled | MIT OR Apache-2.0 |
 | Loading libraries at run time | [`libloading`](https://crates.io/crates/libloading) | Linked | ISC |
 | Command-line parsing | [`lexopt`](https://crates.io/crates/lexopt) | Linked | MIT |
 

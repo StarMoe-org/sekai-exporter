@@ -64,7 +64,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 |---|---|---|
 | `cdn` | `sekai-game` | The `cp` and `nuverse` sources, with HTTP and TLS |
 | `client` | `sekai-game`, `sekai-pipeline` | The `apk` source, and the field layout tables (`sekai-layouts`) for assets inside the client package |
-| `sqlite` | `sekai-catalog` | The catalog kept in SQLite |
+| `catalog-db` | `sekai-catalog` | The catalog kept in a redb database |
 | `s3` | `sekai-publish` | S3-compatible stores |
 | `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server |
 
@@ -72,7 +72,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 
 | Preset | Contents |
 |---|---|
-| `default` | Everything the default consumer needs: `cdn`, `sqlite`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
+| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, every general converter family, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `mp3`, `aac` |
 | `preset-mysekai` | `default` and `mysekai` |
 | `preset-client` | `default` and `client` |
 | `full` | Every feature |

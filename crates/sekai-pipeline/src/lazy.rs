@@ -1,20 +1,18 @@
 //! The lazy evaluator: computes a derivation when it is requested.
 //!
-//! Names and fingerprints are computed in advance, from the index of the version, exactly as the
-//! eager evaluator computes them. A request converts and encodes one asset and reads only the
-//! bundles that asset needs. It uses no threads of its own.
+//! The assets of a bundle are named and fingerprinted from the unit of that bundle, exactly as the
+//! streaming evaluator computes them: the bundle with every bundle it depends on. A request opens
+//! only that window and converts and encodes one asset. It uses no threads of its own.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use sekai_catalog::{Derivations, Derived, Store};
-use sekai_convert::Converter;
-use sekai_format::AssetError;
+use sekai_catalog::Derived;
 
-use crate::eval::{self, Output, Plan, Planned};
-use crate::metrics::Recorder;
-use crate::version::Version;
+use crate::eval::{self, Output};
+use crate::stream::{Entry, Inputs, PARSED_BYTES, Root, Stream, Units, plan_unit};
+use crate::version::{BundleError, Parsed, Version};
 
 #[derive(Default)]
 struct State {
@@ -24,16 +22,24 @@ struct State {
     failed: BTreeMap<[u8; 32], (Derived, String)>,
 }
 
-/// Evaluates the assets of a version one request at a time.
+/// The window of a unit, opened, with the assets of its bundle.
+struct Opened<'a> {
+    unit: usize,
+    version: Version<'a>,
+    /// The assets of the bundle, in name order.
+    roots: Vec<Root<'a>>,
+    unnamed: Vec<(String, i64)>,
+    errors: Vec<BundleError>,
+}
+
+/// Evaluates the assets of the bundles of a manifest one request at a time.
 pub struct Lazy<'a> {
-    version: &'a Version<'a>,
-    plan: Plan<'a>,
-    /// Each root as (bundle name, path ID), with the positions of its derivations in the plan.
-    roots: BTreeMap<(&'a str, i64), Vec<usize>>,
-    store: &'a dyn Store,
-    derivations: &'a dyn Derivations,
-    recorder: &'a dyn Recorder,
-    memory_limit: Option<u64>,
+    units: Units<'a>,
+    inputs: &'a dyn Inputs,
+    stream: Stream<'a>,
+    parsed: Arc<Parsed>,
+    /// The unit opened last.
+    recent: Mutex<Option<Arc<Opened<'a>>>>,
     state: Mutex<State>,
     finished: Condvar,
 }
@@ -52,86 +58,182 @@ impl Drop for Running<'_> {
     }
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 impl<'a> Lazy<'a> {
-    /// Prepares `version` for requests. Only the index of the version is read.
-    pub fn new(
-        version: &'a Version<'a>,
-        converters: &'a [Box<dyn Converter>],
-        store: &'a dyn Store,
-        derivations: &'a dyn Derivations,
-        recorder: &'a dyn Recorder,
-        threads: usize,
-    ) -> Self {
-        let plan = eval::plan(version, converters, recorder, threads);
-        let bundles = version.index().bundles();
-        let mut roots: BTreeMap<_, Vec<usize>> = BTreeMap::new();
-        for (position, planned) in plan.derivations.iter().enumerate() {
-            let root = planned.closure[0];
-            roots
-                .entry((bundles[root.bundle].name.as_str(), root.path_id))
-                .or_default()
-                .push(position);
-        }
+    /// Prepares the bundles of `manifest`, whose bytes come from `inputs`, for requests. Nothing
+    /// is read before the first request. Of `stream`, the converters, naming, store, records,
+    /// indexes, block cache, recorder and memory limit are used.
+    pub fn new(manifest: &'a [Entry], inputs: &'a dyn Inputs, stream: Stream<'a>) -> Self {
         Self {
-            version,
-            plan,
-            roots,
-            store,
-            derivations,
-            recorder,
-            memory_limit: None,
+            units: Units::new(manifest),
+            inputs,
+            stream,
+            parsed: Arc::new(Parsed::new(PARSED_BYTES)),
+            recent: Mutex::default(),
             state: Mutex::default(),
             finished: Condvar::new(),
         }
     }
 
-    /// Refuses, with the error `too_large`, assets estimated to need more than `bytes` of memory.
-    #[must_use]
-    pub fn with_memory_limit(mut self, bytes: u64) -> Self {
-        self.memory_limit = Some(bytes);
-        self
+    /// Manifest entries that cannot be evaluated, in order of name.
+    pub fn errors(&self) -> &[BundleError] {
+        &self.units.errors
     }
 
-    /// Roots that cannot be told apart from another root by name, as `(logical path, path ID)`.
-    pub fn unnamed(&self) -> &[(String, i64)] {
-        &self.plan.unnamed
+    /// The bundles whose assets can be requested, in name order.
+    pub fn bundles(&self) -> impl Iterator<Item = &str> {
+        self.units.entries.iter().map(|entry| entry.name.as_str())
     }
 
-    /// The names of the assets, in order.
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.plan.derivations.iter().map(|plan| plan.name.as_str())
+    /// The names of the assets of `bundle`, in order. Empty for a bundle the manifest does not
+    /// list.
+    pub fn names(&self, bundle: &str) -> io::Result<Vec<String>> {
+        let Some(opened) = self.bundle(bundle)? else {
+            return Ok(Vec::new());
+        };
+        let names = opened.roots.iter().map(|root| root.planned.name.clone());
+        Ok(names.collect())
     }
 
-    /// The asset `name`, computed if it has not been. `None` if the version has no such asset.
+    /// Roots of `bundle` that cannot be told apart from another root by name, as
+    /// `(logical path, path ID)`.
+    pub fn unnamed(&self, bundle: &str) -> io::Result<Vec<(String, i64)>> {
+        Ok(self
+            .bundle(bundle)?
+            .map(|opened| opened.unnamed.clone())
+            .unwrap_or_default())
+    }
+
+    /// The bundles of the window of `bundle` that could not be read, opened or indexed.
+    pub fn bundle_errors(&self, bundle: &str) -> io::Result<Vec<BundleError>> {
+        Ok(self
+            .bundle(bundle)?
+            .map(|opened| opened.errors.clone())
+            .unwrap_or_default())
+    }
+
+    /// The asset `name`, computed if it has not been. `None` if no bundle has such an asset.
     pub fn asset(&self, name: &str) -> io::Result<Option<Output>> {
-        let derivations = &self.plan.derivations;
-        match derivations.binary_search_by(|plan| plan.name.as_str().cmp(name)) {
-            Ok(position) => self.output(&derivations[position]),
-            Err(_) => Ok(None),
+        // An asset is named under the directory of its bundle, so its name starts with the
+        // bundle name; the longest bundle name comes first.
+        let ends = name
+            .char_indices()
+            .filter(|&(_, c)| c == '/' || c == '@')
+            .map(|(i, _)| i)
+            .chain([name.len()]);
+        let ends: BTreeSet<usize> = ends.collect();
+        for end in ends.into_iter().rev() {
+            let Some(&unit) = self.units.positions.get(&name[..end]) else {
+                continue;
+            };
+            let opened = self.open(unit)?;
+            let found = opened
+                .roots
+                .binary_search_by(|root| root.planned.name.as_str().cmp(name));
+            if let Ok(position) = found {
+                return self.output(&opened, position);
+            }
         }
+        Ok(None)
     }
 
     /// The assets rooted at the object `path_id` of the bundle `bundle`, computed if they have
     /// not been.
     pub fn object(&self, bundle: &str, path_id: i64) -> io::Result<Vec<Output>> {
-        let positions = self.roots.get(&(bundle, path_id));
+        let Some(opened) = self.bundle(bundle)? else {
+            return Ok(Vec::new());
+        };
+        let positions = (0..opened.roots.len()).filter(|&i| opened.roots[i].path_id == path_id);
         positions
-            .into_iter()
-            .flatten()
-            .filter_map(|position| self.output(&self.plan.derivations[*position]).transpose())
+            .filter_map(|position| self.output(&opened, position).transpose())
             .collect()
     }
 
-    fn output(&self, plan: &Planned<'_>) -> io::Result<Option<Output>> {
-        let (derived, error) = self.derived(plan)?;
+    fn bundle(&self, bundle: &str) -> io::Result<Option<Arc<Opened<'a>>>> {
+        match self.units.positions.get(bundle) {
+            Some(&unit) => self.open(unit).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Opens the window of `unit` and plans the assets of its bundle.
+    fn open(&self, unit: usize) -> io::Result<Arc<Opened<'a>>> {
+        if let Some(opened) = lock(&self.recent).as_ref().filter(|o| o.unit == unit) {
+            return Ok(opened.clone());
+        }
+        let mut errors = Vec::new();
+        let mut inputs = Vec::new();
+        for &entry in &self.units.windows[unit] {
+            let name = &self.units.entries[entry].name;
+            match self.inputs.open(name) {
+                Ok(input) => inputs.push(input),
+                Err(e) => errors.push(BundleError {
+                    name: name.clone(),
+                    code: "unreadable",
+                    message: e.to_string(),
+                }),
+            }
+        }
+        let (version, more) =
+            Version::open_indexed(inputs, self.stream.cache, self.stream.indexes, 1)?;
+        errors.extend(more);
+        errors.sort_by(|a, b| a.name.cmp(&b.name));
+        let version = version.sharing(self.parsed.clone());
+        let mut roots = Vec::new();
+        let mut unnamed = Vec::new();
+        {
+            let index = version.index();
+            let position = |entry: usize| {
+                let name = self.units.entries[entry].name.as_str();
+                index
+                    .bundles()
+                    .binary_search_by(|bundle| bundle.name.as_str().cmp(name))
+                    .ok()
+            };
+            if let Some(bundle) = position(unit) {
+                let window: BTreeSet<usize> = self.units.windows[unit]
+                    .iter()
+                    .filter_map(|&entry| position(entry))
+                    .collect();
+                let resources: Vec<Vec<[u8; 32]>> = (0..index.bundles().len())
+                    .map(|b| version.resource_hashes(b))
+                    .collect();
+                plan_unit(
+                    &version,
+                    bundle,
+                    &window,
+                    &resources,
+                    &self.stream,
+                    None,
+                    &mut roots,
+                    &mut BTreeSet::new(),
+                    &mut unnamed,
+                );
+            }
+        }
+        roots.sort_by(|a, b| a.planned.name.cmp(&b.planned.name));
+        unnamed.sort();
+        let opened = Arc::new(Opened {
+            unit,
+            version,
+            roots,
+            unnamed,
+            errors,
+        });
+        *lock(&self.recent) = Some(opened.clone());
+        Ok(opened)
+    }
+
+    fn output(&self, opened: &Opened<'_>, position: usize) -> io::Result<Option<Output>> {
+        let root = &opened.roots[position];
+        let (derived, error) = self.derived(opened, root)?;
         Ok(match derived {
             Derived::Document(document) => Some(Output {
-                name: plan.name.clone(),
-                form: plan.converter.name(),
+                name: root.planned.name.clone(),
+                form: root.planned.converter.name(),
                 document,
                 error,
             }),
@@ -139,15 +241,19 @@ impl<'a> Lazy<'a> {
         })
     }
 
-    /// The output of `plan`. Concurrent requests for one fingerprint compute it once.
-    fn derived(&self, plan: &Planned<'_>) -> io::Result<(Derived, Option<String>)> {
-        let fingerprint = plan.fingerprint;
+    /// The output of `root`. Concurrent requests for one fingerprint compute it once.
+    fn derived(
+        &self,
+        opened: &Opened<'_>,
+        root: &Root<'_>,
+    ) -> io::Result<(Derived, Option<String>)> {
+        let fingerprint = root.planned.fingerprint;
         let mut state = lock(&self.state);
         loop {
             if let Some((derived, code)) = state.failed.get(&fingerprint) {
                 return Ok((derived.clone(), Some(code.clone())));
             }
-            if let Some(derived) = self.derivations.get(&fingerprint)? {
+            if let Some(derived) = self.stream.derivations.get(&fingerprint)? {
                 return Ok((derived, None));
             }
             if state.running.insert(fingerprint) {
@@ -164,7 +270,25 @@ impl<'a> Lazy<'a> {
             state: &self.state,
             finished: &self.finished,
         };
-        let (derived, error) = self.compute(plan)?;
+        let (derived, error) = match root.refusal(&opened.version, self.stream.limit) {
+            Some(error) => {
+                let code = error.code.clone();
+                let document = eval::document(
+                    &root.planned,
+                    &opened.version,
+                    self.stream.store,
+                    Vec::new(),
+                    error,
+                )?;
+                (Derived::Document(document), Some(code))
+            }
+            None => eval::derive(
+                &root.planned,
+                &opened.version,
+                self.stream.store,
+                self.stream.recorder,
+            )?,
+        };
         match &error {
             Some(code) => {
                 lock(&self.state)
@@ -172,25 +296,10 @@ impl<'a> Lazy<'a> {
                     .insert(fingerprint, (derived.clone(), code.clone()));
             }
             None => {
-                self.derivations.put(fingerprint, derived.clone())?;
-                self.derivations.flush()?;
+                self.stream.derivations.put(fingerprint, derived.clone())?;
+                self.stream.derivations.flush()?;
             }
         }
         Ok((derived, error))
-    }
-
-    fn compute(&self, plan: &Planned<'_>) -> io::Result<(Derived, Option<String>)> {
-        if let Some(limit) = self.memory_limit {
-            let estimated = eval::estimated_memory(plan, self.version);
-            if estimated > limit {
-                let error = AssetError {
-                    code: "too_large".to_owned(),
-                    message: format!("needs about {estimated} bytes, the limit is {limit}"),
-                };
-                let document = eval::document(plan, self.version, self.store, Vec::new(), error)?;
-                return Ok((Derived::Document(document), Some("too_large".to_owned())));
-            }
-        }
-        eval::derive(plan, self.version, self.store, self.recorder)
     }
 }

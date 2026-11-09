@@ -1,6 +1,6 @@
 //! `sekai-exporter update`: the current version of a region, from its source to a publication.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write};
@@ -11,16 +11,17 @@ use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::identity::VersionIdentity;
-use sekai_game::cdn::{self, BundleEntry, Region, Secrets, Source};
+use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Version, evaluate_fused, parallel};
+use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
+use sekai_pipeline::{BundleInput, parallel};
 use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
 use crate::budget;
-use crate::export::{BLOCK_CACHE_BYTES, converters, publish, write_ledger};
+use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
 use crate::monitor::Monitor;
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -130,12 +131,11 @@ fn previous_identity(catalog: &Catalog, region: &str) -> io::Result<Option<Versi
 
 /// The entries whose names start with one of `only`, with everything they depend on. Without
 /// prefixes, every entry.
-fn select(entries: Vec<BundleEntry>, only: &[String]) -> Vec<BundleEntry> {
+fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
     if only.is_empty() {
         return entries;
     }
-    let by_name: BTreeMap<&str, &BundleEntry> =
-        entries.iter().map(|e| (e.name.as_str(), e)).collect();
+    let by_name: BTreeMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
     let mut pending: Vec<&str> = by_name
         .keys()
         .copied()
@@ -152,6 +152,26 @@ fn select(entries: Vec<BundleEntry>, only: &[String]) -> Vec<BundleEntry> {
     let mut entries = entries;
     entries.retain(|entry| selected.contains(&entry.name));
     entries
+}
+
+/// The bundles of the input store, by name.
+struct Stored<'s> {
+    inputs: &'s LocalStore,
+    keys: HashMap<String, Key>,
+}
+
+impl Inputs for Stored<'_> {
+    fn open(&self, name: &str) -> io::Result<BundleInput> {
+        let key = self.keys.get(name).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, format!("{name} was not fetched"))
+        })?;
+        let source = FileSource::open(self.inputs.path(key)).map_err(io::Error::other)?;
+        Ok(BundleInput {
+            name: name.to_owned(),
+            source: Arc::new(source),
+            sha256: key.sha256,
+        })
+    }
 }
 
 /// Why a selection of bundles cannot run here. A selection is not a version, so it must not
@@ -314,6 +334,8 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let config = std::fs::read_to_string(&options.config)
         .map_err(|e| format!("{}: {e}", options.config.display()))?;
     let region = Region::load(region_name, &config).map_err(|e| e.to_string())?;
+    // A directory lists no dependencies; they are read from the bundles once they are fetched.
+    let listed = region.kind != Kind::Dir;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
     let earlier = region
         .stores
@@ -358,13 +380,27 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         return Ok(true);
     }
 
-    let entries = {
+    let all = {
         let _span = monitor.span("manifest", "manifest", region_name);
-        select(
-            source.manifest(&identity).map_err(|e| e.to_string())?,
-            &options.only,
-        )
+        source.manifest(&identity).map_err(|e| e.to_string())?
     };
+    let mut manifest: Vec<Entry> = all
+        .iter()
+        .map(|entry| Entry {
+            name: entry.name.clone(),
+            size: entry.size,
+            dependencies: entry.dependencies.clone(),
+        })
+        .collect();
+    if listed {
+        manifest = select(manifest, &options.only);
+    }
+    let wanted: BTreeSet<&str> = manifest.iter().map(|entry| entry.name.as_str()).collect();
+    let entries: Vec<BundleEntry> = all
+        .iter()
+        .filter(|entry| wanted.contains(entry.name.as_str()))
+        .cloned()
+        .collect();
     let (stored, failed) = fetch_all(
         source.as_ref(),
         &identity,
@@ -380,48 +416,50 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         return Ok(false);
     }
 
-    let bundles = stored
-        .into_iter()
-        .map(|(name, key)| {
-            let source = FileSource::open(inputs.path(&key)).map_err(|e| e.to_string())?;
-            Ok(BundleInput {
-                name,
-                source: Arc::new(source),
-                sha256: key.sha256,
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let (version, errors) = {
-        let _span = monitor.span("open", "version", region_name);
-        Version::open_indexed(bundles, &cache, &catalog.bundle_indexes(), options.threads)
-            .map_err(|e| e.to_string())?
+    let stored = Stored {
+        inputs: &inputs,
+        keys: stored.into_iter().collect(),
     };
-    for e in &errors {
-        eprintln!("{}: {}: {}", e.name, e.code, e.message);
-    }
-    if !errors.is_empty() {
-        return Ok(false);
+    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+    let indexes = catalog.bundle_indexes();
+    if !listed {
+        let _span = monitor.span("manifest", "dependencies", region_name);
+        stream::with_dependencies(&mut manifest, &stored, &cache, &indexes, options.threads)
+            .map_err(|e| e.to_string())?;
+        manifest = select(manifest, &options.only);
     }
 
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
     let converters = converters(hca_key);
-    let evaluation = evaluate_fused(
-        &version,
-        &converters,
-        &store,
-        &derivations,
-        monitor,
-        &budget::options(options.threads, options.memory, options.plain),
-        options
-            .storage
-            .is_some()
-            .then_some(&fusion as &dyn sekai_pipeline::Fusion),
+    let streamed = stream::evaluate(
+        &manifest,
+        &stored,
+        &Stream {
+            converters: &converters,
+            naming: &InBundle,
+            store: &store,
+            derivations: &derivations,
+            indexes: &indexes,
+            cache: &cache,
+            recorder: monitor,
+            fusion: options
+                .storage
+                .is_some()
+                .then_some(&fusion as &dyn sekai_pipeline::Fusion),
+            options: budget::options(options.threads, options.memory, options.plain),
+            segment: Segment::default(),
+            ledger: Some(IGNORED),
+            limit: None,
+        },
     )
     .map_err(|e| e.to_string())?;
+    if report(&streamed) > 0 {
+        return Ok(false);
+    }
+    let evaluation = &streamed.evaluation;
     let target = format!("{region_name}/canonical");
     let (pointer, plan) = publish(
-        &evaluation,
+        evaluation,
         &name,
         &target,
         &options.output,
@@ -429,14 +467,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &store,
         monitor,
     )?;
-    write_ledger(
-        &evaluation,
-        &version,
-        &converters,
-        &options.output,
-        &store,
-        monitor,
-    )?;
+    write_ledger(&streamed.ledgers, &options.output, monitor)?;
     if !selection {
         publish_bucket(
             &config,
@@ -450,7 +481,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 
     if let Some(root) = &options.storage {
         crate::storage::publish(
-            &evaluation,
+            evaluation,
             &name,
             root,
             &store,
@@ -624,7 +655,7 @@ mod tests {
         }
     }
 
-    fn names(entries: &[BundleEntry]) -> Vec<&str> {
+    fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
     }
 
@@ -690,12 +721,19 @@ mod tests {
 
     #[test]
     fn a_selection_brings_its_dependencies() {
-        let entries = vec![
+        let entries: Vec<Entry> = [
             entry("a/one", &["c/shared"]),
             entry("b/two", &[]),
             entry("c/shared", &["d/deep", "missing"]),
             entry("d/deep", &[]),
-        ];
+        ]
+        .into_iter()
+        .map(|entry| Entry {
+            name: entry.name,
+            size: entry.size,
+            dependencies: entry.dependencies,
+        })
+        .collect();
         let selected = select(entries.clone(), &["a/".to_owned()]);
         assert_eq!(names(&selected), ["a/one", "c/shared", "d/deep"]);
         assert_eq!(select(entries, &[]).len(), 4);

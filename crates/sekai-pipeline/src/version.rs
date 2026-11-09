@@ -114,6 +114,46 @@ fn record(
     Ok(record)
 }
 
+/// Each serialized file of a bundle as its path and the paths of its external files.
+pub(crate) type BundleFiles = Vec<(String, Vec<String>)>;
+
+/// The serialized files of a bundle: from the stored index of the bundle when `indexes` holds it,
+/// and otherwise from the file headers.
+pub(crate) fn bundle_files(
+    input: &BundleInput,
+    cache: &dyn BlockCache,
+    indexes: &dyn BundleIndexes,
+) -> io::Result<sekai_unity::Result<BundleFiles>> {
+    let paths = |externals: Vec<sekai_unity::serialized::External>| {
+        externals
+            .into_iter()
+            .map(|external| external.path)
+            .collect()
+    };
+    if let Some(record) = indexes
+        .get(&input.sha256)?
+        .as_deref()
+        .and_then(IndexRecord::decode)
+    {
+        let files = record.files.into_iter();
+        return Ok(Ok(files
+            .map(|file| (file.path, paths(file.externals)))
+            .collect()));
+    }
+    let read = || -> sekai_unity::Result<_> {
+        let bundle = Bundle::open(input.source.clone(), input.sha256)?;
+        let mut files = Vec::new();
+        for (i, entry) in bundle.entries().iter().enumerate() {
+            if entry.is_serialized() {
+                let file = SerializedFile::parse(&bundle.entry(i, cache))?;
+                files.push((entry.path.clone(), paths(file.externals)));
+            }
+        }
+        Ok(files)
+    };
+    Ok(read())
+}
+
 /// The most recently used parsed bundles, by content hash, within an estimate of their memory.
 #[derive(Default)]
 struct Recent {

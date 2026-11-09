@@ -1,17 +1,18 @@
 //! `sekai-exporter export`: canonical assets for a directory of bundles.
 
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sekai_catalog::{Derivations, LocalStore};
 use sekai_convert::Converter;
-use sekai_format::AssetDocument;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
-use sekai_pipeline::ledger::account;
+use sekai_pipeline::ledger::BundleLedger;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes, Version, evaluate_with, parallel};
+use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
+use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes};
 use sekai_publish::{Binding, Plan, index, plan, tree};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
@@ -144,14 +145,43 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     })
 }
 
-fn read(path: &Path) -> Result<BundleInput, String> {
-    let mut bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-    deobfuscate(&mut bytes).map_err(|e| e.to_string())?;
-    Ok(BundleInput {
-        name: path.file_name().unwrap().to_string_lossy().into_owned(),
-        sha256: Sha256::digest(&bytes).into(),
-        source: Arc::new(Arc::<[u8]>::from(bytes)),
-    })
+/// The bundles of a directory, by their paths under it with `/` separators.
+struct Directory<'a> {
+    root: &'a Path,
+}
+
+impl Inputs for Directory<'_> {
+    fn open(&self, name: &str) -> io::Result<BundleInput> {
+        let mut bytes = std::fs::read(self.root.join(name))?;
+        deobfuscate(&mut bytes).map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(BundleInput {
+            name: name.to_owned(),
+            sha256: Sha256::digest(&bytes).into(),
+            source: Arc::new(Arc::<[u8]>::from(bytes)),
+        })
+    }
+}
+
+/// Every file under `directory`, as an entry named by its path under the root with `/`
+/// separators, appended to `out`.
+fn walk(directory: &Path, prefix: &str, out: &mut Vec<Entry>) -> io::Result<()> {
+    for item in std::fs::read_dir(directory)? {
+        let item = item?;
+        let name = format!("{prefix}{}", item.file_name().to_string_lossy());
+        let path = item.path();
+        // Links are followed.
+        let metadata = std::fs::metadata(&path)?;
+        if metadata.is_dir() {
+            walk(&path, &format!("{name}/"), out)?;
+        } else if metadata.is_file() {
+            out.push(Entry {
+                name,
+                size: metadata.len(),
+                dependencies: Vec::new(),
+            });
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
@@ -165,54 +195,53 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
 }
 
 fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let mut paths: Vec<PathBuf> = std::fs::read_dir(&options.input)
-        .map_err(|e| format!("{}: {e}", options.input.display()))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file())
-        .collect();
-    paths.sort();
-
-    let mut failed = 0usize;
-    let mut inputs = Vec::new();
-    for (path, result) in paths
-        .iter()
-        .zip(parallel(paths.len(), options.threads, |i| read(&paths[i])))
-    {
-        match result {
-            Ok(input) => inputs.push(input),
-            Err(e) => {
-                failed += 1;
-                eprintln!("{}: {e}", path.display());
-            }
-        }
-    }
-    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let (version, errors) = {
-        let _span = monitor.span("open", "version", "");
-        Version::open_indexed(inputs, &cache, &NoBundleIndexes, options.threads)
-            .map_err(|e| e.to_string())?
+    let input = |e: io::Error| format!("{}: {e}", options.input.display());
+    let mut manifest = Vec::new();
+    walk(&options.input, "", &mut manifest).map_err(input)?;
+    let inputs = Directory {
+        root: &options.input,
     };
-    for e in &errors {
-        eprintln!("{}: {}: {}", e.name, e.code, e.message);
+    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+    {
+        let _span = monitor.span("manifest", "dependencies", "");
+        stream::with_dependencies(
+            &mut manifest,
+            &inputs,
+            &cache,
+            &NoBundleIndexes,
+            options.threads,
+        )
+        .map_err(|e| e.to_string())?;
     }
-    failed += errors.len();
 
     let store = LocalStore::open(options.output.join("store"))
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
     let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
     let converters = converters(None);
-    let evaluation = evaluate_with(
-        &version,
-        &converters,
-        &store,
-        derivations.as_ref(),
-        monitor,
-        &budget::options(options.threads, options.memory, options.plain),
+    let streamed = stream::evaluate(
+        &manifest,
+        &inputs,
+        &Stream {
+            converters: &converters,
+            naming: &InBundle,
+            store: &store,
+            derivations: derivations.as_ref(),
+            indexes: &NoBundleIndexes,
+            cache: &cache,
+            recorder: monitor,
+            fusion: None,
+            options: budget::options(options.threads, options.memory, options.plain),
+            segment: Segment::default(),
+            ledger: Some(IGNORED),
+            limit: None,
+        },
     )
     .map_err(|e| e.to_string())?;
+    let failed = report(&streamed);
+    let evaluation = &streamed.evaluation;
 
     publish(
-        &evaluation,
+        evaluation,
         "local",
         "local/canonical",
         &options.output,
@@ -220,18 +249,11 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &store,
         monitor,
     )?;
-    write_ledger(
-        &evaluation,
-        &version,
-        &converters,
-        &options.output,
-        &store,
-        monitor,
-    )?;
+    write_ledger(&streamed.ledgers, &options.output, monitor)?;
     let errored = evaluation.outputs.iter().filter(|o| o.error.is_some());
     println!(
         "bundles {} failed {failed} assets {} errors {} unnamed {} converted {} reused {}",
-        version.index().bundles().len(),
+        manifest.len(),
         evaluation.outputs.len(),
         errored.count(),
         evaluation.unnamed.len(),
@@ -241,10 +263,28 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     Ok(failed == 0)
 }
 
+/// Prints the bundles that could not be evaluated and the references that leave the window of
+/// their unit, and returns the number of such bundles.
+pub(crate) fn report(streamed: &Streamed) -> usize {
+    for e in &streamed.errors {
+        eprintln!("{}: {}: {}", e.name, e.code, e.message);
+    }
+    for o in &streamed.outside {
+        eprintln!(
+            "{}: outside_dependencies: object {} of {} refers to object {} of {}",
+            o.unit, o.object, o.bundle, o.path_id, o.file
+        );
+    }
+    if !streamed.outside.is_empty() {
+        println!("references outside dependencies {}", streamed.outside.len());
+    }
+    streamed.errors.len()
+}
+
 /// The classes and script classes that carry no asset content. `AssetBundle` is the table of
 /// contents of a bundle, read when the bundle is indexed. `MonoScript` names the script of other
 /// objects. `SoundBundleBuildData` and `MovieBundleBuildData` list the files of a bundle.
-const IGNORED: &[&str] = &[
+pub(crate) const IGNORED: &[&str] = &[
     "AssetBundle",
     "MonoScript",
     "SoundBundleBuildData",
@@ -253,27 +293,15 @@ const IGNORED: &[&str] = &[
 
 /// Writes what became of the contents of each bundle to `<output>/ledger.tsv`.
 pub(crate) fn write_ledger(
-    evaluation: &Evaluation,
-    version: &Version<'_>,
-    converters: &[Box<dyn Converter>],
+    ledgers: &[BundleLedger],
     output: &Path,
-    store: &LocalStore,
     monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
     let _span = monitor.span("publish", "ledger", "");
-    let documents = evaluation
-        .outputs
-        .iter()
-        .map(|o| {
-            let bytes = store.read(&o.document).map_err(|e| e.to_string())?;
-            AssetDocument::from_bytes(&bytes).map_err(|e| e.to_string())
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let ledgers = account(version, converters, &documents, IGNORED);
     let mut text = String::from(
         "bundle\tobjects\troots\tread\tignored\tunknown\tresources\tresources_read\tunknown_classes\n",
     );
-    for l in &ledgers {
+    for l in ledgers {
         let classes: Vec<String> = l
             .unknown_classes
             .iter()

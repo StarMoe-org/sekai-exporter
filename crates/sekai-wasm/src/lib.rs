@@ -1,18 +1,21 @@
-//! The exporter core for WebAssembly: unpacking, conversion and lazy evaluation without a server.
+//! The exporter core for WebAssembly: unpacking, conversion and streaming evaluation without a
+//! server.
 //!
-//! [`run`] evaluates bundles given as bytes, in memory, and hands each file over as soon as it is
-//! written. On `wasm32` it is exported to JavaScript as `evaluate`.
+//! [`run`] evaluates bundles given as bytes, in memory, one bundle after another, and hands the
+//! files of each bundle's assets over once they are written. On `wasm32` it is exported to
+//! JavaScript as `evaluate`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use sekai_catalog::{Key, MemoryDerivations, MemoryStore};
+use sekai_catalog::{Key, MemoryDerivations, MemoryStore, NoBundleIndexes};
 use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::NoRecorder;
-use sekai_pipeline::{BundleInput, Lazy, Output, Version};
+use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
+use sekai_pipeline::{BundleInput, Options, Output};
 use sekai_unity::BoundedBlockCache;
 use sha2::{Digest, Sha256};
 
@@ -60,43 +63,85 @@ impl fmt::Display for Report {
     }
 }
 
-/// Evaluates every asset of `bundles`, given as (name, bytes). `on_file` receives the files of an
-/// asset, which are then released, and `on_asset` the asset after them.
+/// The bundles given to [`run`], deobfuscated, with the SHA-256 of their bytes.
+struct Memory(BTreeMap<String, (Arc<[u8]>, [u8; 32])>);
+
+impl Inputs for Memory {
+    fn open(&self, name: &str) -> io::Result<BundleInput> {
+        let (bytes, sha256) = self
+            .0
+            .get(name)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, name.to_owned()))?;
+        Ok(BundleInput {
+            name: name.to_owned(),
+            source: Arc::new(bytes.clone()),
+            sha256: *sha256,
+        })
+    }
+}
+
+/// Evaluates every asset of `bundles`, given as (name, bytes), with the dependencies their files
+/// name. `on_file` receives the files of the assets of each bundle, which are then released, and
+/// `on_asset` each asset at the end, in name order.
 pub fn run(
     bundles: Vec<(String, Vec<u8>)>,
     on_file: &mut dyn FnMut(&Key, &[u8]) -> io::Result<()>,
     on_asset: &mut dyn FnMut(&Output) -> io::Result<()>,
 ) -> io::Result<Report> {
-    let mut inputs = Vec::with_capacity(bundles.len());
+    let mut manifest = Vec::with_capacity(bundles.len());
+    let mut memory = BTreeMap::new();
     let mut report = Report::default();
     for (name, mut bytes) in bundles {
         match deobfuscate(&mut bytes) {
-            Ok(()) => inputs.push(BundleInput {
-                name,
-                sha256: Sha256::digest(&bytes).into(),
-                source: Arc::new(Arc::<[u8]>::from(bytes)),
-            }),
+            Ok(()) => {
+                manifest.push(Entry {
+                    name: name.clone(),
+                    size: bytes.len() as u64,
+                    dependencies: Vec::new(),
+                });
+                let sha256 = Sha256::digest(&bytes).into();
+                memory.insert(name, (Arc::<[u8]>::from(bytes), sha256));
+            }
             Err(_) => report.bundle_errors.push((name, "obfuscation".to_owned())),
         }
     }
+    let inputs = Memory(memory);
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let (version, errors) = Version::open(inputs, &cache);
-    let errors = errors.into_iter().map(|e| (e.name, e.code.to_owned()));
-    report.bundle_errors.extend(errors);
+    stream::with_dependencies(&mut manifest, &inputs, &cache, &NoBundleIndexes, 1)?;
     let converters = converters();
     let store = MemoryStore::default();
     let derivations = MemoryDerivations::default();
-    let lazy = Lazy::new(&version, &converters, &store, &derivations, &NoRecorder, 1)
-        .with_memory_limit(MEMORY_LIMIT);
-    report.unnamed = lazy.unnamed().len();
-    for name in lazy.names() {
-        let Some(output) = lazy.asset(name)? else {
-            continue;
-        };
-        for (key, bytes) in store.drain() {
-            on_file(&key, &bytes)?;
-        }
-        on_asset(&output)?;
+    let streamed = stream::evaluate_in_segments(
+        &manifest,
+        &inputs,
+        &Stream {
+            converters: &converters,
+            naming: &InBundle,
+            store: &store,
+            derivations: &derivations,
+            indexes: &NoBundleIndexes,
+            cache: &cache,
+            recorder: &NoRecorder,
+            fusion: None,
+            options: Options::threads(1),
+            segment: Segment { units: 1, bytes: 0 },
+            ledger: None,
+            limit: Some(MEMORY_LIMIT),
+        },
+        &mut || {
+            for (key, bytes) in store.drain() {
+                on_file(&key, &bytes)?;
+            }
+            Ok(())
+        },
+    )?;
+    let errors = streamed.errors.into_iter();
+    report
+        .bundle_errors
+        .extend(errors.map(|e| (e.name, e.code.to_owned())));
+    report.unnamed = streamed.evaluation.unnamed.len();
+    for output in &streamed.evaluation.outputs {
+        on_asset(output)?;
         report.assets += 1;
         if let Some(code) = &output.error {
             *report.errors.entry(code.clone()).or_default() += 1;

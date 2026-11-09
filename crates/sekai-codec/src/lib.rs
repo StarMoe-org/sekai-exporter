@@ -4,6 +4,7 @@
 //! return a [`Surface`] or [`Pcm`]; they know nothing about Unity objects, files or encoders.
 
 mod error;
+mod movie;
 mod pcm;
 mod surface;
 
@@ -13,5 +14,6 @@ pub mod cri;
 pub mod texture;
 
 pub use error::DecodeError;
+pub use movie::Movie;
 pub use pcm::Pcm;
 pub use surface::{HdrSurface, Surface};

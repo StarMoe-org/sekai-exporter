@@ -54,7 +54,7 @@ fn coefficients(cutoff: u16, sample_rate: u32) -> (i32, i32) {
 }
 
 /// Decodes a stream that is not encrypted to PCM.
-pub(super) fn decode(data: &[u8]) -> Result<Pcm, DecodeError> {
+pub(super) fn decode(data: &[u8], available: bool) -> Result<Pcm, DecodeError> {
     if data.len() < HISTORY_OFFSET {
         return Err(DecodeError::Truncated {
             what: "ADX header",
@@ -90,6 +90,15 @@ pub(super) fn decode(data: &[u8]) -> Result<Pcm, DecodeError> {
     let samples = u32::from_be_bytes([data[12], data[13], data[14], data[15]]) as usize;
     if channels == 0 || sample_rate == 0 || samples == 0 {
         return Err(malformed("empty format"));
+    }
+    let samples = if available {
+        let whole = data.len().saturating_sub(start) / (channels * FRAME_SIZE);
+        samples.min(whole * SAMPLES_PER_FRAME)
+    } else {
+        samples
+    };
+    if samples == 0 {
+        return Err(malformed("the stream holds no whole frame"));
     }
     let frames = samples.div_ceil(SAMPLES_PER_FRAME);
     let needed = frames

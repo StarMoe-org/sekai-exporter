@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-pub use sekai_codec::{DecodeError, HdrSurface, Pcm, Surface};
+pub use sekai_codec::{DecodeError, HdrSurface, Movie, Pcm, Surface};
 pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
 pub use sekai_unity::{Chunk, Value};
 
@@ -130,6 +130,8 @@ pub enum Content {
     HdrImage(HdrSurface),
     /// Audio, encoded by the evaluator.
     Audio(Pcm),
+    /// A video, encoded by the evaluator.
+    Video(Movie),
     /// Finished bytes, written as they are.
     File {
         /// The file extension, without the dot.

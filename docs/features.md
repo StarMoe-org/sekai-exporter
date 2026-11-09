@@ -21,7 +21,7 @@ In `sekai-convert`, general to Unity content:
 |---|---|
 | `image` | `Texture2D`, `Sprite` and sprite atlases into images |
 | `audio` | `AudioClip` and CRI ACB/AWB cues into audio files and cue tables |
-| `video` | CRI USM and MPEG streams into video files |
+| `video` | CRI USM files into MP4 with H.264 and AAC, through the `ffmpeg` program with `libx264`, which is not distributed with the exporter |
 | `model` | Prefab hierarchies, meshes, skins and materials into glTF |
 | `animation` | `AnimationClip` into curve documents, and into glTF animation where the bindings allow it |
 | `live2d` | Live2D Cubism models and their motions |

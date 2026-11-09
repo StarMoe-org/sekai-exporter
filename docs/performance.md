@@ -39,7 +39,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 | Texture decoding (ASTC, ETC2, BC) | Parallel over blocks of the image, with portable SIMD in the inner loops |
 | Image encoding | **Fused**: one decoded surface is encoded in every format the run needs (the lossless canonical image and the format a view requires) in the same task, without decoding again or queueing the surface |
 | Audio | HCA is decoded once, and the samples are passed to every encoder the run needs |
-| Video | VP9 streams are written into MP4 without re-encoding |
+| Video | Each movie is encoded by one `ffmpeg` process with a fixed thread count |
 | Object documents | Written as JSON directly by the compiled reading program, without building a value tree |
 | Store writes | Content-addressed; content that already exists is skipped. A local store materializes path trees with hard links |
 | Catalog | One redb file with batched write transactions; read transactions see a snapshot and do not wait for writes |

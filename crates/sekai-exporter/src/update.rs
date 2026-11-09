@@ -17,7 +17,7 @@ use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
 use sekai_unity::{BoundedBlockCache, FileSource};
 
-use crate::export::{BLOCK_CACHE_BYTES, image, publish};
+use crate::export::{BLOCK_CACHE_BYTES, converters, publish};
 use crate::monitor::Monitor;
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -317,7 +317,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
 
     let evaluation = evaluate(
         &version,
-        &image(),
+        &converters(),
         &store,
         &derivations,
         monitor,

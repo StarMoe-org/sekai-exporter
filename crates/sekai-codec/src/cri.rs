@@ -32,7 +32,13 @@ pub struct HcaKey {
 /// Streams that are not version 4, encoding type 3 with four-bit samples, including encrypted
 /// ones, are reported as [`DecodeError::Unsupported`].
 pub fn decode_adx(data: &[u8]) -> Result<Pcm, DecodeError> {
-    adx::decode(data)
+    adx::decode(data, false)
+}
+
+/// Decodes the whole frames of one ADX stream. A stream carried in a USM file can end before the
+/// sample count of its header.
+pub fn decode_adx_available(data: &[u8]) -> Result<Pcm, DecodeError> {
+    adx::decode(data, true)
 }
 
 /// Decodes one HCA stream to PCM, without its encoder delay and padding.

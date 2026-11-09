@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use sekai_catalog::{Derivations, Derived, Key, LocalStore};
 use sekai_convert::{Content, ConvertError, Converter, ObjectId};
-use sekai_encode::{EncodeError, exr, flac, webp_lossless};
+use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject};
 use sekai_unity::index::{Resolved, VersionIndex};
@@ -112,7 +112,7 @@ fn fingerprint(
     resources: &[Vec<[u8; 32]>],
 ) -> [u8; 32] {
     let mut text = format!(
-        "fingerprint 1\nform {} {}\nname {name}\nencoder {} {}\nencoder {} {}\nencoder {} {}\n",
+        "fingerprint 1\nform {} {}\nname {name}\nencoder {} {}\nencoder {} {}\nencoder {} {}\nencoder {} {}\n",
         converter.name(),
         converter.version(),
         webp_lossless::NAME,
@@ -121,6 +121,8 @@ fn fingerprint(
         exr::VERSION,
         flac::NAME,
         flac::VERSION,
+        mp4::NAME,
+        mp4::VERSION,
     );
     let mut bundles = BTreeSet::new();
     for id in closure {
@@ -155,6 +157,7 @@ fn encode(content: &Content) -> Result<Encoded<'_>, EncodeError> {
         Content::Image(surface) => encoded(webp_lossless::encode(surface)?, "webp", "image/webp"),
         Content::HdrImage(surface) => encoded(exr::encode(surface)?, "exr", "image/x-exr"),
         Content::Audio(pcm) => encoded(flac::encode(pcm)?, "flac", "audio/flac"),
+        Content::Video(movie) => encoded(mp4::encode(movie)?, "mp4", "video/mp4"),
         Content::File { extension, bytes } => Encoded {
             bytes: bytes.into(),
             extension,

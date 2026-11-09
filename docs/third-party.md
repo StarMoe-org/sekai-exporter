@@ -52,7 +52,7 @@ An entry is added in the same change that adds the component, and removed in the
 | MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
 | Loading LAME and libavcodec at run time | [`libloading`](https://crates.io/crates/libloading) | Linked in native builds | ISC |
 | AAC writing for MP4 audio tracks | [FFmpeg](https://ffmpeg.org/) libavcodec | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later, when FFmpeg is built without GPL components |
-| MP4 container | ISO/IEC 14496-12 and 14496-14; VP9 codec binding for ISO-BMFF | Specification | — |
+| MP4 writing with H.264 and AAC | [FFmpeg](https://ffmpeg.org/) with [x264](https://www.videolan.org/developers/x264.html) | Run as a separate program; not linked or distributed with the exporter | GPL-2.0-or-later |
 
 ## Models and documents
 

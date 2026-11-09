@@ -20,12 +20,66 @@ pub(crate) const BLOCK_CACHE_BYTES: usize = 256 << 20;
 
 #[cfg(feature = "image")]
 pub(crate) fn image() -> Vec<Box<dyn Converter>> {
-    vec![Box::new(sekai_convert::image::Texture)]
+    vec![
+        Box::new(sekai_convert::image::Texture),
+        Box::new(sekai_convert::image::Sprite),
+    ]
 }
 
 #[cfg(not(feature = "image"))]
 pub(crate) fn image() -> Vec<Box<dyn Converter>> {
     Vec::new()
+}
+
+#[cfg(feature = "video")]
+pub(crate) fn video() -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_convert::video::Video)]
+}
+
+#[cfg(not(feature = "video"))]
+pub(crate) fn video() -> Vec<Box<dyn Converter>> {
+    Vec::new()
+}
+
+#[cfg(feature = "audio")]
+fn audio() -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_convert::audio::Audio::new(None))]
+}
+
+#[cfg(not(feature = "audio"))]
+fn audio() -> Vec<Box<dyn Converter>> {
+    Vec::new()
+}
+
+#[cfg(feature = "text")]
+fn text() -> Vec<Box<dyn Converter>> {
+    vec![
+        Box::new(sekai_convert::text::Text),
+        Box::new(sekai_convert::text::Font),
+    ]
+}
+
+#[cfg(not(feature = "text"))]
+fn text() -> Vec<Box<dyn Converter>> {
+    Vec::new()
+}
+
+#[cfg(feature = "scenario")]
+fn scenario() -> Vec<Box<dyn Converter>> {
+    vec![Box::new(sekai_moesekai::scenario::Scenario)]
+}
+
+#[cfg(not(feature = "scenario"))]
+fn scenario() -> Vec<Box<dyn Converter>> {
+    Vec::new()
+}
+
+/// Every converter of this build.
+pub(crate) fn converters() -> Vec<Box<dyn Converter>> {
+    [image(), audio(), video(), text(), scenario()]
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 #[cfg(feature = "catalog-db")]
@@ -128,7 +182,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let derivations = derivations(&options.output, &store).map_err(|e| e.to_string())?;
     let evaluation = evaluate(
         &version,
-        &image(),
+        &converters(),
         &store,
         derivations.as_ref(),
         monitor,

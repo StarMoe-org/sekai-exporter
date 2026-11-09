@@ -409,6 +409,34 @@ fn movie() -> Vec<u8> {
 }
 
 #[test]
+fn bytes_after_the_last_stream_end_are_ignored() {
+    use Cell::U32;
+    let video = utf(
+        "VIDEO_HDRINFO",
+        &[
+            "mpeg_codec",
+            "width",
+            "height",
+            "framerate_n",
+            "framerate_d",
+        ],
+        &[vec![U32(1), U32(640), U32(360), U32(30000), U32(1000)]],
+    );
+    let directory = utf("CRIUSF_DIR_STREAM", &["fmtver"], &[vec![U32(1)]]);
+    let mut data = [
+        usm_chunk(b"CRID", 0, 1, 0, &directory),
+        usm_chunk(b"@SFV", 0, 1, 0, &video),
+        usm_chunk(b"@SFV", 0, 2, 0, b"#HEADER END"),
+        usm_chunk(b"@SFV", 0, 0, 0, b"only"),
+        usm_chunk(b"@SFV", 0, 2, 0, b"#CONTENTS END"),
+    ]
+    .concat();
+    data.extend([0xA9; 64]);
+    let usm = read_usm(&data).expect("movie");
+    assert_eq!(usm.video[0].frames.len(), 1);
+}
+
+#[test]
 fn movie_separates_frames_and_audio() {
     let data = movie();
     let usm = read_usm(&data).expect("movie");

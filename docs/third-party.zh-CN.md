@@ -52,7 +52,7 @@
 | MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
 | 运行时加载 LAME 与 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
 | MP4 音轨的 AAC 写出 | [FFmpeg](https://ffmpeg.org/) libavcodec | 在原生构建中运行时加载，不随导出器分发 | 不含 GPL 组件构建时为 LGPL-2.1-or-later |
-| MP4 容器 | ISO/IEC 14496-12 与 14496-14；VP9 的 ISO-BMFF 封装规范 | 规范 | — |
+| H.264 与 AAC 的 MP4 写出 | [FFmpeg](https://ffmpeg.org/) 与 [x264](https://www.videolan.org/developers/x264.html) | 作为独立程序运行；不链接，也不随导出器分发 | GPL-2.0-or-later |
 
 ## 模型与文档
 

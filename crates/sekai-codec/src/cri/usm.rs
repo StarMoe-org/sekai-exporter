@@ -7,6 +7,8 @@ const CHUNK_HEADER: usize = 8;
 const DATA_STREAM: u8 = 0;
 const DATA_HEADER: u8 = 1;
 const DATA_SEEK: u8 = 3;
+const DATA_MARKER: u8 = 2;
+const CONTENTS_END: &[u8] = b"#CONTENTS END";
 
 fn malformed(message: impl Into<String>) -> DecodeError {
     DecodeError::Malformed {
@@ -154,7 +156,8 @@ fn audio_stream<'a>(channel: u8, table: &Table<'_>) -> Result<AudioStream<'a>, D
     })
 }
 
-/// Separates the streams of a USM file without decoding them.
+/// Separates the streams of a USM file without decoding them. Bytes after the end of the last
+/// stream are not part of the file.
 pub fn read_usm(data: &[u8]) -> Result<Usm<'_>, DecodeError> {
     if data.get(..4) != Some(b"CRID") {
         return Err(malformed("no CRID signature"));
@@ -164,10 +167,17 @@ pub fn read_usm(data: &[u8]) -> Result<Usm<'_>, DecodeError> {
         audio: Vec::new(),
     };
     let mut seek_points: Vec<(u8, u32)> = Vec::new();
+    let mut ended = 0;
     for chunk in chunks(data) {
         let chunk = chunk?;
         match (&chunk.kind, chunk.data_type) {
             (b"CRID", _) => {}
+            (b"@SFV" | b"@SFA", DATA_MARKER) if chunk.payload.starts_with(CONTENTS_END) => {
+                ended += 1;
+                if ended == usm.video.len() + usm.audio.len() {
+                    break;
+                }
+            }
             (b"@SFV", DATA_HEADER) => {
                 usm.video
                     .push(video_stream(chunk.channel, &Table::open(chunk.payload)?)?);

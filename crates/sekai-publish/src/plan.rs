@@ -13,7 +13,8 @@ use sha2::{Digest, Sha256};
 /// A failure of a publication, with the name of the stage that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishError {
-    /// The stage: `plan`, `documents`, `verify`, `files`, `listing`, `delete` or `pointer`.
+    /// The stage: `config`, `plan`, `documents`, `verify`, `files`, `listing`, `delete` or
+    /// `pointer`.
     pub stage: &'static str,
     /// A description for people.
     pub message: String,

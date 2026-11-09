@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sekai_catalog::db::{BundleRow, Catalog, PublicationRow};
@@ -15,6 +15,7 @@ use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::{BundleInput, Version, evaluate, parallel};
+use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource};
 
 use crate::export::{BLOCK_CACHE_BYTES, converters, publish};
@@ -325,13 +326,21 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     )
     .map_err(|e| e.to_string())?;
     let target = format!("{region_name}/canonical");
-    let pointer = publish(
+    let (pointer, plan) = publish(
         &evaluation,
         &name,
         &target,
         &options.output,
         options.tree.as_deref(),
         &store,
+        monitor,
+    )?;
+    publish_bucket(
+        &config,
+        options.secrets.as_deref(),
+        &store,
+        &target,
+        &plan,
         monitor,
     )?;
 
@@ -363,6 +372,112 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation.reused
     );
     Ok(true)
+}
+
+/// The `publish.s3` section of the configuration, if there is one.
+fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
+    let config: serde_json::Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
+    Ok(config.get("publish").and_then(|p| p.get("s3")).cloned())
+}
+
+/// The value of the secret `name`: the environment variable of that name, or else the file of that
+/// name in `secrets`, without surrounding whitespace.
+#[cfg(feature = "s3")]
+fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
+    if let Ok(value) = std::env::var(name) {
+        return Ok(value.trim().to_owned());
+    }
+    secrets
+        .and_then(|directory| std::fs::read_to_string(directory.join(name)).ok())
+        .map(|value| value.trim().to_owned())
+        .ok_or_else(|| format!("the secret {name} is not set").into())
+}
+
+/// Publishes `plan` to the bucket that the `publish.s3` section of the configuration describes.
+#[cfg(feature = "s3")]
+fn publish_bucket(
+    config: &str,
+    secrets: Option<&Path>,
+    store: &LocalStore,
+    target: &str,
+    plan: &Plan,
+    monitor: &Monitor,
+) -> Result<(), lexopt::Error> {
+    use sekai_publish::s3::{self, Bucket, Credentials, S3};
+
+    let Some(section) = bucket_section(config)? else {
+        return Ok(());
+    };
+    let text = |value: Option<&serde_json::Value>, key: &str| {
+        value
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| lexopt::Error::from(format!("publish.s3.{key} is not a string")))
+    };
+    let names = section.get("secrets");
+    let credentials = Credentials {
+        access_key_id: secret(
+            &text(
+                names.and_then(|n| n.get("access_key_id")),
+                "secrets.access_key_id",
+            )?,
+            secrets,
+        )?,
+        secret_access_key: secret(
+            &text(
+                names.and_then(|n| n.get("secret_access_key")),
+                "secrets.secret_access_key",
+            )?,
+            secrets,
+        )?,
+    };
+    let bucket = Bucket {
+        endpoint: text(section.get("endpoint"), "endpoint")?,
+        region: text(section.get("region"), "region")?,
+        prefix: match section.get("prefix") {
+            None => String::new(),
+            value => text(value, "prefix")?,
+        },
+        connections: match section.get("connections") {
+            None => 8,
+            Some(value) => value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .ok_or("publish.s3.connections is not a number")?,
+        },
+    };
+    let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
+    let _span = monitor.span("publish", "s3", target);
+    let (_, report) = s3::publish(store, &s3, target, plan).map_err(|e| e.to_string())?;
+    println!(
+        "bucket uploaded {} present {} pointer {}",
+        report.uploaded,
+        report.present,
+        if report.pointer_written {
+            "written"
+        } else {
+            "unchanged"
+        }
+    );
+    Ok(())
+}
+
+/// Refuses a configuration that names a bucket, which this build cannot publish to.
+#[cfg(not(feature = "s3"))]
+fn publish_bucket(
+    config: &str,
+    _secrets: Option<&Path>,
+    _store: &LocalStore,
+    _target: &str,
+    _plan: &Plan,
+    _monitor: &Monitor,
+) -> Result<(), lexopt::Error> {
+    match bucket_section(config)? {
+        Some(_) => {
+            Err("the configuration names an S3 bucket, but this build has no s3 feature".into())
+        }
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

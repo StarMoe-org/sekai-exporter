@@ -1,0 +1,7 @@
+{
+  "name": "compare-live2d-motion",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "dependencies": { "esbuild": "0.25.12" }
+}

@@ -61,6 +61,14 @@ An entry is added in the same change that adds the component, and removed in the
 | glTF writing | Khronos glTF 2.0 specification; [glTF Validator](https://github.com/KhronosGroup/glTF-Validator) | Specification; every written file passes the validator without errors | Apache-2.0 (validator) |
 | JSON | [`serde`](https://crates.io/crates/serde), [`serde_json`](https://crates.io/crates/serde_json) | Linked | MIT OR Apache-2.0 |
 
+## Live2D
+
+| Component | Source | Use | Licence |
+|---|---|---|---|
+| Evaluation of `motion3.json` curves in [`compare-live2d-motion`](../tools/compare-live2d-motion/README.md) | [Cubism Web Framework](https://github.com/Live2D/CubismWebFramework) `5-r.5` | Reference: curves are evaluated by its `evaluateCurve`, from a checkout the user provides; not distributed | Live2D Open Software License |
+| Mapping of `motion3.json` segments to Unity keyframes | [Cubism SDK for Unity](https://github.com/Live2D/CubismUnityComponents) `5-r.5` (`CubismMotion3Json`) | Read for the mapping described in [Live2D motions](live2d-motion.md); no code is copied | Live2D Open Software License |
+| Bundling the framework for the comparison | [`esbuild`](https://www.npmjs.com/package/esbuild) | Installed with the comparison script; not distributed | MIT |
+
 ## Inputs, storage and the command line
 
 | Component | Source | Use | Licence |

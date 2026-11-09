@@ -61,6 +61,14 @@
 | glTF 写出 | Khronos glTF 2.0 规范；[glTF Validator](https://github.com/KhronosGroup/glTF-Validator) | 规范；写出的每个文件均须通过校验器且无错误 | Apache-2.0（校验器） |
 | JSON | [`serde`](https://crates.io/crates/serde)、[`serde_json`](https://crates.io/crates/serde_json) | 链接 | MIT OR Apache-2.0 |
 
+## Live2D
+
+| 组件 | 来源 | 使用方式 | 许可证 |
+|---|---|---|---|
+| [`compare-live2d-motion`](../tools/compare-live2d-motion/README.zh-CN.md) 中 `motion3.json` 曲线的求值 | [Cubism Web Framework](https://github.com/Live2D/CubismWebFramework) `5-r.5` | 参考：曲线由其 `evaluateCurve` 求值，框架取自使用者提供的检出；不随本项目分发 | Live2D Open Software License |
+| `motion3.json` 分段到 Unity 关键帧的映射 | [Cubism SDK for Unity](https://github.com/Live2D/CubismUnityComponents) `5-r.5`（`CubismMotion3Json`） | 阅读其映射，见 [Live2D 动作](live2d-motion.zh-CN.md)；未复制代码 | Live2D Open Software License |
+| 为比较打包框架 | [`esbuild`](https://www.npmjs.com/package/esbuild) | 随比较脚本安装；不随本项目分发 | MIT |
+
 ## 输入、存储与命令行
 
 | 组件 | 来源 | 使用方式 | 许可证 |

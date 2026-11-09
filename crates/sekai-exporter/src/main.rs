@@ -99,10 +99,11 @@ commands:
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.
-  objects <input> <output> [--threads <n>]
-      Write the object document of every bundle file directly inside <input>
-      to <output>/<bundle>/_objects.json. Payloads larger than the inline limit
-      are written to <output>/_payloads/<aa>/<sha256>.bin.
+  objects <input> <output> [--class-table <file>] [--threads <n>]
+      Write the object document of every bundle file under <input> to
+      <output>/<bundle>/_objects.json. Payloads larger than the inline limit are
+      written to <output>/_payloads/<aa>/<sha256>.bin. --class-table is the same
+      as for export.
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the
       converters whose memory estimates are furthest from their decoded size.

@@ -10,7 +10,7 @@ Programs and people that need the objects themselves: browsing and debugging too
 
 ## 2. Contents
 
-One document is written per bundle, at `<bundle>/_objects.json`. A bundle from the client package is treated as a bundle whose name is the player data file name.
+One document is written per bundle, at `<bundle>/_objects.json`. The player data of a client package is one bundle named `player`.
 
 ```json
 {

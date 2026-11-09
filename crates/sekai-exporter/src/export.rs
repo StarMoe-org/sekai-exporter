@@ -217,10 +217,13 @@ pub(crate) struct Source<'a> {
 
 /// The source of an export: a client package when a class table comes with it, and otherwise a
 /// directory of bundles.
-fn source(options: &Options) -> Result<Source<'_>, lexopt::Error> {
-    match &options.class_table {
-        Some(table) => client::source(&options.input, table),
-        None => directory(&options.input),
+pub(crate) fn source<'a>(
+    input: &'a Path,
+    class_table: Option<&Path>,
+) -> Result<Source<'a>, lexopt::Error> {
+    match class_table {
+        Some(table) => client::source(input, table),
+        None => directory(input),
     }
 }
 
@@ -288,7 +291,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         mut manifest,
         inputs,
         classes,
-    } = source(options)?;
+    } = source(&options.input, options.class_table.as_deref())?;
     let inputs = inputs.as_ref();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     {

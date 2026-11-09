@@ -12,7 +12,9 @@ use aes::Aes128;
 use aes::cipher::block_padding::Pkcs7;
 use aes::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use sekai_format::identity::{AssetIdentity, ClientIdentity, VersionIdentity};
-use sekai_game::cdn::{BundleEntry, Region, Secrets, Source, create_account, open};
+use sekai_game::cdn::{
+    BundleEntry, Network, Region, Secrets, Source, TableSource, Tables, create_account, open,
+};
 use sekai_game::sink::Sink;
 use serde_json::json;
 
@@ -402,6 +404,7 @@ fn the_newest_confirmed_version_wins() {
             application_hash: Some("app".to_owned()),
             multiplayer_version: None,
         },
+        tables: None,
     };
     let identity = source.identity(Some(&previous)).unwrap();
     assert_eq!(identity.client.application_version, "2.0.0");
@@ -443,6 +446,7 @@ fn cp_identity() -> VersionIdentity {
             application_hash: Some("app".to_owned()),
             multiplayer_version: None,
         },
+        tables: None,
     }
 }
 
@@ -538,7 +542,54 @@ fn nuverse_identity() -> VersionIdentity {
             application_hash: None,
             multiplayer_version: None,
         },
+        tables: None,
     }
+}
+
+#[test]
+fn tables_are_read_at_the_current_revision() {
+    let base = serve(|request| match request.path.as_str() {
+        "/commits/HEAD" => reply(200, json!({"sha": "abc123", "other": 1}).to_string()),
+        "/raw/abc123/cards.json" => reply(200, "[{\"id\":1}]"),
+        _ => reply(404, ""),
+    });
+    let source = TableSource::Git {
+        revision: format!("http://{base}/commits/HEAD"),
+        revision_field: "sha".to_owned(),
+        table: format!("http://{base}/raw/{{revision}}/{{name}}.json"),
+    };
+    let tables = Tables::open(&source, &Network::default()).unwrap();
+    assert_eq!(tables.revision(), "abc123");
+    assert_eq!(tables.read("cards").unwrap(), b"[{\"id\":1}]");
+    assert_eq!(tables.read("events").unwrap_err().code, "status");
+}
+
+#[test]
+fn a_revision_document_without_the_field_is_an_error() {
+    let base = serve(|_| reply(200, "{}"));
+    let source = TableSource::Git {
+        revision: format!("http://{base}/commits/HEAD"),
+        revision_field: "sha".to_owned(),
+        table: format!("http://{base}/{{name}}"),
+    };
+    let error = Tables::open(&source, &Network::default()).err().unwrap();
+    assert_eq!(error.code, "decode");
+}
+
+#[test]
+fn tables_in_a_directory_are_named_by_their_contents() {
+    let directory = std::env::temp_dir().join(format!("sekai-tables-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(directory.join("cards.json"), "[1]").unwrap();
+    let source = TableSource::Dir {
+        directory: directory.clone(),
+    };
+    let first = Tables::open(&source, &Network::default()).unwrap();
+    assert_eq!(first.read("cards").unwrap(), b"[1]");
+    std::fs::write(directory.join("cards.json"), "[2]").unwrap();
+    let second = Tables::open(&source, &Network::default()).unwrap();
+    assert_ne!(first.revision(), second.revision());
+    std::fs::remove_dir_all(&directory).unwrap();
 }
 
 #[test]

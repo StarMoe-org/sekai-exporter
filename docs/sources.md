@@ -16,7 +16,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 
 A region can list several sources in order, for example `store` first and `cp` when the store does not have the bundle.
 
-The game data tables have their own sources: `git`, which reads a repository of table dumps at a given commit and is the default, and `api`, which reads the game's interface and requires an account. The commit or interface version is recorded in the [table identity](#version-identity) of the version, and the hash of each row a converter reads enters that converter's fingerprints.
+The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the hash of each row a converter reads enters that converter's fingerprints.
 
 ## Region configuration
 
@@ -39,6 +39,11 @@ Regions are defined by the deployer in a JSON configuration file, which is passe
       "client": { "application_version": "1.0.0" },
       "secrets": { "key": "SEKAI_MANIFEST_KEY", "iv": "SEKAI_MANIFEST_IV", "hca": "SEKAI_HCA_KEY" },
       "feed": "https://feed.example.invalid/versions.json",
+      "tables": {
+        "kind": "git",
+        "revision": "https://tables.example.invalid/commits/HEAD",
+        "table": "https://tables.example.invalid/{revision}/{name}.json"
+      },
       "network": { "concurrency": 8, "rate_limit": 20, "retries": 4, "back_off_ms": 500 }
     }
   }
@@ -71,10 +76,8 @@ The state of a region has three separate parts, and each decides something diffe
 | Part | Fields | When it changes |
 |---|---|---|
 | **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the application version of the distribution paths and the value of the version endpoint | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
-| **Table identity** | The data version the game reports, and the table revision: the commit of the dump repository, or the interface version for the `api` source | Only table rows can differ. P1 to P3 are skipped, the index of the asset identity is reused, and only the assets whose rows changed are evaluated again |
+| **Table identity** | The table revision: the commit of the dump repository, or the hash of the files of a `dir` source | Only table rows can differ. Stored bundles and their indexes are reused, and only the assets whose rows changed are evaluated again |
 | **Client identity** | Application version, application hash and multiplayer version | Recorded with the version, and no asset depends on it. For `cp` it is the key that finds the asset host hash, so the asset identity is read through it |
-
-The data version and the table revision are separate fields because they come from different places: the game assigns one, and the repository that holds the dump assigns the other. A change of either one changes the table identity.
 
 A committed version is named by its asset identity and table identity together, so an update of the tables alone is a new version that shares every unaffected output with the previous one.
 

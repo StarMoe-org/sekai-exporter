@@ -69,6 +69,28 @@ pub struct VersionIdentity {
     pub asset: AssetIdentity,
     /// The client identity.
     pub client: ClientIdentity,
+    /// The revision of the game data tables, when the region has a table source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tables: Option<String>,
+}
+
+impl VersionIdentity {
+    /// The name of the version: the name of the asset identity and, when there is one, the start
+    /// of the table revision.
+    pub fn name(&self) -> String {
+        match &self.tables {
+            Some(tables) => {
+                let start: String = tables.chars().take(12).collect();
+                format!("{}-{start}", self.asset.name())
+            }
+            None => self.asset.name(),
+        }
+    }
+
+    /// Whether the two identities name the same assets and the same tables.
+    pub fn same_content(&self, other: &Self) -> bool {
+        self.asset == other.asset && self.tables == other.tables
+    }
 }
 
 #[cfg(test)]
@@ -87,8 +109,10 @@ mod tests {
                 application_hash: None,
                 multiplayer_version: None,
             },
+            tables: Some("0123456789abcdef".to_owned()),
         };
         assert_eq!(identity.asset.name(), "1.2.0-7");
+        assert_eq!(identity.name(), "1.2.0-7-0123456789ab");
         let text = serde_json::to_string(&identity).unwrap();
         assert_eq!(
             serde_json::from_str::<VersionIdentity>(&text).unwrap(),

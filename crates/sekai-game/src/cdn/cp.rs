@@ -196,6 +196,7 @@ impl Cp {
                 host_hash: version.assetbundle_host_hash,
             },
             client,
+            tables: None,
         })
     }
 

@@ -8,6 +8,7 @@ mod http;
 mod manifest;
 mod nuverse;
 mod region;
+mod tables;
 
 use std::fmt;
 
@@ -15,6 +16,7 @@ use sekai_format::identity::VersionIdentity;
 
 pub use crypto::Secrets;
 pub use region::{Client, Kind, Network, Region, SecretNames, Urls};
+pub use tables::{TableSource, Tables};
 
 use crate::sink::Sink;
 

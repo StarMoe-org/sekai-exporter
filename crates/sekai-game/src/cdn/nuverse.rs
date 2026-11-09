@@ -66,6 +66,7 @@ impl Nuverse {
                             value: value.to_string(),
                         },
                         client: candidate.client(),
+                        tables: None,
                     });
                 }
                 Err(error) => last = Some(error),

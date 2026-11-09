@@ -8,6 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use super::SourceError;
+use super::tables::TableSource;
 
 /// The distribution protocol of a region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -144,6 +145,10 @@ pub struct Region {
     /// Use the client identity as it is given: it is not replaced by discovery.
     #[serde(default)]
     pub force: bool,
+    /// Where the game data tables come from. A region without one produces no asset that needs
+    /// them.
+    #[serde(default)]
+    pub tables: Option<TableSource>,
     /// How the source uses the network.
     #[serde(default)]
     pub network: Network,

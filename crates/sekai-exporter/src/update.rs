@@ -11,7 +11,7 @@ use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::identity::VersionIdentity;
-use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source};
+use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
@@ -346,6 +346,12 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let hca_key = secrets
         .hca_key(&region.secrets)
         .map_err(|e| e.to_string())?;
+    let tables = region
+        .tables
+        .as_ref()
+        .map(|source| Tables::open(source, &region.network))
+        .transpose()
+        .map_err(|e| e.to_string())?;
     let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
 
     let directory = |name: &str| {
@@ -368,14 +374,15 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             return Err(conflict.into());
         }
     }
-    let identity = {
+    let mut identity = {
         let _span = monitor.span("plan", "identity", region_name);
         source
             .identity(previous.as_ref())
             .map_err(|e| e.to_string())?
     };
-    let name = identity.asset.name();
-    if !options.force && previous.is_some_and(|p| p.asset == identity.asset) {
+    identity.tables = tables.as_ref().map(|tables| tables.revision().to_owned());
+    let name = identity.name();
+    if !options.force && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");
         return Ok(true);
     }

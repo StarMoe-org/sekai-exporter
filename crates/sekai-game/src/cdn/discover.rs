@@ -61,7 +61,7 @@ fn from_previous(previous: &VersionIdentity) -> Candidate {
             asset_hash,
             ..
         } => (Some(asset_version.clone()), Some(asset_hash.clone())),
-        AssetIdentity::Nuverse { .. } => (None, None),
+        AssetIdentity::Nuverse { .. } | AssetIdentity::Dir { .. } => (None, None),
     };
     Candidate {
         application_version: previous.client.application_version.clone(),

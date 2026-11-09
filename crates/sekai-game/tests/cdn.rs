@@ -229,6 +229,54 @@ fn cp_service(known: &'static [&'static str]) -> String {
     })
 }
 
+struct Collected(Vec<u8>);
+
+impl Write for Collected {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Sink for Collected {
+    fn reset(&mut self) -> io::Result<()> {
+        self.0.clear();
+        Ok(())
+    }
+}
+
+#[test]
+fn a_directory_is_a_source_of_its_files() {
+    let root = std::env::temp_dir().join(format!("sekai-dir-source-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("music/long")).unwrap();
+    std::fs::write(root.join("music/long/a"), b"first").unwrap();
+    std::fs::write(root.join("b"), b"second!").unwrap();
+    let region = json!({"regions": {"local": {"kind": "dir", "directory": root}}}).to_string();
+    let open_source = || {
+        let region = Region::load("local", &region).unwrap();
+        open(region, &Secrets::new(None))
+            .map_err(|e| e.to_string())
+            .unwrap()
+    };
+    let source = open_source();
+    let identity = source.identity(None).unwrap();
+    assert_eq!(identity, open_source().identity(None).unwrap());
+    let entries = source.manifest(&identity).unwrap();
+    let names: Vec<_> = entries.iter().map(|e| (e.name.as_str(), e.size)).collect();
+    assert_eq!(names, [("b", 7), ("music/long/a", 5)]);
+    let mut sink = Collected(Vec::new());
+    assert_eq!(source.fetch(&identity, &entries[1], &mut sink).unwrap(), 5);
+    assert_eq!(sink.0, b"first");
+    std::fs::write(root.join("b"), b"changed").unwrap();
+    assert_ne!(identity, source.identity(None).unwrap());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn cp_reads_the_identity_and_manifest_with_signed_cookies() {
     let base = cp_service(&["2.0.0"]);

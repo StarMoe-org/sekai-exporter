@@ -24,6 +24,11 @@ pub enum AssetIdentity {
         /// The value of the version endpoint.
         value: String,
     },
+    /// The contents of a local directory.
+    Dir {
+        /// The hash of the names and bytes of the files.
+        value: String,
+    },
 }
 
 impl AssetIdentity {
@@ -39,6 +44,7 @@ impl AssetIdentity {
                 application_version,
                 value,
             } => format!("{application_version}-{value}"),
+            AssetIdentity::Dir { value } => value.clone(),
         }
     }
 }

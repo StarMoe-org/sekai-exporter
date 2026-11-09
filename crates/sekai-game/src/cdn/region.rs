@@ -2,6 +2,8 @@
 //!
 //! The configuration comes from the deployer; the exporter ships no addresses.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -15,10 +17,12 @@ pub enum Kind {
     Cp,
     /// The `nuverse` protocol.
     Nuverse,
+    /// Bundles in a local directory.
+    Dir,
 }
 
 /// The address templates of a region. `{name}` is replaced by the value of that name.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Urls {
     /// The endpoint that issues the signed cookies of the downloads, if the region has one.
@@ -55,7 +59,7 @@ pub struct Client {
 }
 
 /// The names of the secrets a region uses.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretNames {
     /// The AES key of manifests and interface responses, as hexadecimal.
@@ -102,17 +106,27 @@ impl Default for Network {
 pub struct Region {
     /// The distribution protocol.
     pub kind: Kind,
+    /// The directory of a `dir` region.
+    #[serde(default)]
+    pub directory: Option<PathBuf>,
+    /// The output directories of earlier runs. A bundle with the same declared hash is taken from
+    /// the first of them that holds it, before the source is asked for it.
+    #[serde(default)]
+    pub stores: Vec<PathBuf>,
     /// The platform of the bundles.
+    #[serde(default)]
     pub platform: String,
     /// The hosts that serve the same files, used in rotation for `{host}`.
     #[serde(default)]
     pub hosts: Vec<String>,
     /// The address templates.
+    #[serde(default)]
     pub urls: Urls,
     /// The client identity.
     #[serde(default)]
     pub client: Client,
     /// The names of the secrets.
+    #[serde(default)]
     pub secrets: SecretNames,
     /// The address of a feed of current versions.
     #[serde(default)]

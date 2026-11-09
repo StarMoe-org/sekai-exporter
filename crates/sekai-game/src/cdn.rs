@@ -2,6 +2,7 @@
 
 mod cp;
 mod crypto;
+mod dir;
 mod discover;
 mod http;
 mod manifest;
@@ -21,7 +22,7 @@ use crate::sink::Sink;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceError {
     /// The kind of failure: `config`, `secret`, `network`, `status`, `decode`, `length`,
-    /// `no_version` or `sink`.
+    /// `no_version`, `read` or `sink`.
     pub code: &'static str,
     /// A description for people. It names secrets but never contains their values.
     pub message: String,
@@ -83,8 +84,17 @@ pub trait Source: Sync {
 
 /// Opens the source of `region`, reading its secrets from `secrets`.
 pub fn open(region: Region, secrets: &Secrets) -> Result<Box<dyn Source>, SourceError> {
+    if region.kind != Kind::Dir && region.urls.manifest.is_empty() {
+        return Err(SourceError::new("config", "the region has no urls"));
+    }
     Ok(match region.kind {
         Kind::Cp => Box::new(cp::Cp::new(region, secrets)?),
         Kind::Nuverse => Box::new(nuverse::Nuverse::new(region, secrets)?),
+        Kind::Dir => {
+            let directory = region
+                .directory
+                .ok_or_else(|| SourceError::new("config", "a dir region needs a directory"))?;
+            Box::new(dir::Dir::new(directory))
+        }
     })
 }

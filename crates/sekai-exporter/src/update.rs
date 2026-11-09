@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
+use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -144,6 +145,44 @@ fn select(entries: Vec<BundleEntry>, only: &[String]) -> Vec<BundleEntry> {
     entries
 }
 
+/// The bundles that another output directory holds.
+struct EarlierRun {
+    catalog: Catalog,
+    inputs: LocalStore,
+}
+
+impl EarlierRun {
+    fn open(output: &Path) -> Result<Self, String> {
+        let database = output.join("catalog.redb");
+        if !database.is_file() {
+            return Err(format!("{}: no catalog", output.display()));
+        }
+        let store = LocalStore::open(output.join("store")).map_err(|e| e.to_string())?;
+        Ok(Self {
+            catalog: Catalog::open_or_rebuild(&database, &store).map_err(|e| e.to_string())?,
+            inputs: LocalStore::open(output.join("inputs")).map_err(|e| e.to_string())?,
+        })
+    }
+}
+
+/// Copies the bundle from the first earlier run that holds it under the same declared hash.
+fn from_earlier_runs(
+    earlier: &[EarlierRun],
+    region: &str,
+    entry: &BundleEntry,
+    inputs: &LocalStore,
+) -> io::Result<Option<Key>> {
+    for run in earlier {
+        let Some(key) = already_stored(&run.catalog, region, entry, &run.inputs)? else {
+            continue;
+        };
+        let mut writer = inputs.writer(INPUT_EXTENSION)?;
+        io::copy(&mut File::open(run.inputs.path(&key))?, &mut writer)?;
+        return writer.finish().map(|(key, _)| Some(key));
+    }
+    Ok(None)
+}
+
 /// The key of the bundle that an earlier run stored under the same declared hash.
 fn already_stored(
     catalog: &Catalog,
@@ -194,6 +233,7 @@ fn fetch_all(
     entries: &[BundleEntry],
     inputs: &LocalStore,
     catalog: &Catalog,
+    earlier: &[EarlierRun],
     region: &str,
     concurrency: usize,
     monitor: &Monitor,
@@ -205,9 +245,12 @@ fn fetch_all(
         let results = parallel(chunk.len(), concurrency, |i| {
             match already_stored(catalog, region, &chunk[i], inputs) {
                 Ok(Some(key)) => Ok((key, false)),
-                Ok(None) => {
-                    download(source, identity, &chunk[i], inputs, monitor).map(|key| (key, true))
-                }
+                Ok(None) => match from_earlier_runs(earlier, region, &chunk[i], inputs) {
+                    Ok(Some(key)) => Ok((key, true)),
+                    Ok(None) => download(source, identity, &chunk[i], inputs, monitor)
+                        .map(|key| (key, true)),
+                    Err(e) => Err(e.to_string()),
+                },
                 Err(e) => Err(e.to_string()),
             }
         });
@@ -249,6 +292,11 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         .map_err(|e| format!("{}: {e}", options.config.display()))?;
     let region = Region::load(region_name, &config).map_err(|e| e.to_string())?;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
+    let earlier = region
+        .stores
+        .iter()
+        .map(|output| EarlierRun::open(output))
+        .collect::<Result<Vec<_>, _>>()?;
     let secrets = Secrets::new(options.secrets.clone());
     let hca_key = secrets
         .hca_key(&region.secrets)
@@ -292,6 +340,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &entries,
         &inputs,
         catalog,
+        &earlier,
         region_name,
         concurrency,
         monitor,
@@ -528,6 +577,47 @@ mod tests {
 
     fn names(entries: &[BundleEntry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn a_bundle_is_taken_from_an_earlier_run_with_the_same_declared_hash() {
+        let root = std::env::temp_dir().join(format!("sekai-earlier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let output = root.join("earlier");
+        std::fs::create_dir_all(&output).unwrap();
+        let store = LocalStore::open(output.join("store")).unwrap();
+        let catalog = Catalog::open_or_rebuild(&output.join("catalog.redb"), &store).unwrap();
+        let earlier_inputs = LocalStore::open(output.join("inputs")).unwrap();
+        let key = earlier_inputs
+            .put(b"bundle bytes", INPUT_EXTENSION)
+            .unwrap();
+        let mut batch = catalog.write().unwrap();
+        let row = BundleRow {
+            declared: "h".to_owned(),
+            sha256: key.to_string()[..64].to_owned(),
+        };
+        batch.put_bundle("r", "a/one", &row).unwrap();
+        batch.commit().unwrap();
+        drop(catalog);
+
+        let runs = [EarlierRun::open(&output).unwrap()];
+        let inputs = LocalStore::open(root.join("inputs")).unwrap();
+        let found = from_earlier_runs(&runs, "r", &entry("a/one", &[]), &inputs).unwrap();
+        assert_eq!(found, Some(key.clone()));
+        assert_eq!(inputs.read(&key).unwrap(), b"bundle bytes");
+
+        let mut changed = entry("a/one", &[]);
+        changed.declared = "other".to_owned();
+        assert_eq!(
+            from_earlier_runs(&runs, "r", &changed, &inputs).unwrap(),
+            None
+        );
+        assert_eq!(
+            from_earlier_runs(&runs, "r", &entry("a/two", &[]), &inputs).unwrap(),
+            None
+        );
+        drop(runs);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

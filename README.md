@@ -6,7 +6,7 @@ An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the g
 
 ## Status
 
-In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8, crunched DXT5, ASTC LDR and ASTC HDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust. `sekai-encode` writes PNG, lossless and lossy WebP, OpenEXR, FLAC, MP3 and AAC. Converters for textures, sprites, fonts, text assets, story scenes, CRI movies, CRI cue sheets, Live2D models and motion sets, and costume parts and motions are in place, and [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet. `sekai-exporter export` and `update` evaluate bundles one at a time into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view. The core also builds for WebAssembly, and continuous integration compares its output with the native build. The documents in [`docs/`](docs/) describe the design that the code implements.
+In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGBA8, crunched DXT5, ASTC LDR and ASTC HDR textures, HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust. `sekai-encode` writes PNG, lossless and lossy WebP, OpenEXR, FLAC, MP3 and AAC. Converters for textures, sprites, fonts, text assets, story scenes, CRI movies, CRI cue sheets, Live2D models and motion sets, and costume parts and motions are in place, and [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet. `sekai-exporter export` and `update` evaluate bundles one at a time into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view. The core also builds for WebAssembly, and continuous integration compares its output with the native build. The documents in [`docs/`](docs/) describe the design that the code implements, and the [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
 
 ## What it does
 
@@ -28,6 +28,7 @@ Why the project is built around converting rather than unpacking is explained in
 | [Sources](docs/sources.md) | Inputs, regions, version discovery and credentials |
 | [Publishing](docs/publishing.md) | Stores, layouts, asset documents and the publication protocol |
 | [Features](docs/features.md) | Crates, Cargo features and presets |
+| [Roadmap](docs/roadmap.md) | The state of every part, and how to pick up open work |
 | [Live2D motions](docs/live2d-motion.md) | How the game stores Live2D motions, and why their canonical form is the clip's curves |
 | [Object documents](docs/spec/object-documents.md) | The specification of object documents |
 | [Texture](docs/spec/texture.md) | The specification of the texture form |

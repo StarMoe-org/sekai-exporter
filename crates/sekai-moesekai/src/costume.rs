@@ -1,7 +1,12 @@
-//! The parts and motions of the 3D costume screen.
+//! The parts, motions, roles and costumes of the 3D costume screen.
 //!
 //! [`CostumeModel`] produces the `costume-model` form and [`CostumeMotion`] the `costume-motion`
-//! form, both specified in `docs/spec/costume.md`.
+//! form; [`CostumeRoles`] produces the `costume-role` form and [`Costumes`] the `costume` form.
+//! All four are specified in `docs/spec/costume.md`.
+
+mod combination;
+mod sources;
+mod tables;
 
 use sekai_convert::animation::clip_document;
 use sekai_convert::model::{ModelConfig, Prefab, component_document, model_file};
@@ -11,6 +16,8 @@ use sekai_convert::{
 };
 
 use crate::roots;
+
+pub use combination::{CostumeRoles, Costumes};
 
 /// The scripts of the springs and colliders the costume viewer simulates.
 const SPRING_SCRIPTS: &[&str] = &[

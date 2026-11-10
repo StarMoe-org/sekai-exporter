@@ -50,7 +50,7 @@ One role: a character in a unit. The asset is named `costume/role/<characterId>-
 
 | Role | Content |
 |---|---|
-| `role` | A JSON document, extension `json` |
+| `costume-role` | A JSON document, extension `json` |
 
 | Key | Value |
 |---|---|

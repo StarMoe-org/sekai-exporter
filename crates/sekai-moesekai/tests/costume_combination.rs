@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use sekai_convert::tables::{AssetEntry, TableAsset, TableContext, TableConverter, TablePlan};
-use sekai_convert::{Content, ConvertError};
+use sekai_convert::{Content, ConvertError, Member};
 use sekai_format::AssetDocument;
 use sekai_format::asset::MemberFile;
 use sekai_format::costume::{CostumeDocument, RoleDocument, Slot};
@@ -199,21 +199,38 @@ fn converted(plan: &dyn TablePlan) -> Vec<(String, TableAsset)> {
         .collect()
 }
 
-fn bytes_of(asset: &TableAsset) -> Vec<u8> {
-    match &asset.asset.members[0].content {
-        Content::File { bytes, .. } => bytes.clone(),
-        _ => panic!("the member is a file"),
-    }
-}
-
 /// The documents of all `costume-role` assets.
 fn roles(version: &Version) -> Vec<(String, RoleDocument)> {
+    role_documents(version)
+        .into_iter()
+        .map(|(name, bytes)| (name, RoleDocument::from_bytes(&bytes).expect("a role")))
+        .collect()
+}
+
+/// The name and bytes of every `costume-role` asset.
+fn role_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
     let plan = CostumeRoles.plan(version).expect("the tables are read");
-    converted(plan.as_ref())
+    documents(plan.as_ref(), "costume-role")
+}
+
+/// The name and bytes of every `costume` asset.
+fn costume_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
+    let plan = Costumes.plan(version).expect("the tables are read");
+    documents(plan.as_ref(), "costume")
+}
+
+/// The name of each asset of `plan` and the bytes of its only member, whose role must be `role`.
+fn documents(plan: &dyn TablePlan, role: &str) -> Vec<(String, Vec<u8>)> {
+    converted(plan)
         .into_iter()
         .map(|(name, asset)| {
-            let document = RoleDocument::from_bytes(&bytes_of(&asset)).expect("a role");
-            (name, document)
+            let [member] = <[Member; 1]>::try_from(asset.asset.members)
+                .unwrap_or_else(|members| panic!("one member, not {members:?}"));
+            assert_eq!(member.role, role, "the role of the member of {name}");
+            match member.content {
+                Content::File { bytes, .. } => (name, bytes),
+                _ => panic!("the member is a file"),
+            }
         })
         .collect()
 }
@@ -242,12 +259,13 @@ fn role_names(found: &[(String, RoleDocument)]) -> Vec<&str> {
 
 /// The documents of all `costume` assets.
 fn costumes(version: &Version) -> Vec<(String, CostumeDocument)> {
-    let plan = Costumes.plan(version).expect("the tables are read");
-    converted(plan.as_ref())
+    costume_documents(version)
         .into_iter()
-        .map(|(name, asset)| {
-            let document = CostumeDocument::from_bytes(&bytes_of(&asset)).expect("a costume");
-            (name, document)
+        .map(|(name, bytes)| {
+            (
+                name,
+                CostumeDocument::from_bytes(&bytes).expect("a costume"),
+            )
         })
         .collect()
 }
@@ -1075,22 +1093,6 @@ fn the_same_inputs_give_the_same_bytes() {
     let first = costume_documents(&version);
     let second = costume_documents(&version);
     assert_eq!(first, second);
-}
-
-fn role_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
-    let plan = CostumeRoles.plan(version).expect("the tables are read");
-    converted(plan.as_ref())
-        .into_iter()
-        .map(|(name, asset)| (name, bytes_of(&asset)))
-        .collect()
-}
-
-fn costume_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
-    let plan = Costumes.plan(version).expect("the tables are read");
-    converted(plan.as_ref())
-        .into_iter()
-        .map(|(name, asset)| (name, bytes_of(&asset)))
-        .collect()
 }
 
 #[test]

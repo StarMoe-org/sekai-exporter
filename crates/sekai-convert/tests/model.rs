@@ -822,7 +822,7 @@ fn a_pass_reads_the_values_its_state_binds_and_the_values_it_carries() {
         main.culling,
         StateValue::Property {
             name: "_Cull".to_owned(),
-            default: 0.0,
+            default: Some(0.0),
             compiled: 2.0,
         }
     );
@@ -830,7 +830,7 @@ fn a_pass_reads_the_values_its_state_binds_and_the_values_it_carries() {
         main.z_test,
         StateValue::Property {
             name: "_ZTest".to_owned(),
-            default: 8.0,
+            default: Some(8.0),
             compiled: 4.0,
         }
     );
@@ -838,7 +838,7 @@ fn a_pass_reads_the_values_its_state_binds_and_the_values_it_carries() {
         main.z_write,
         StateValue::Property {
             name: "_ZWrite".to_owned(),
-            default: 9.0,
+            default: Some(9.0),
             compiled: 0.0,
         }
     );
@@ -846,7 +846,7 @@ fn a_pass_reads_the_values_its_state_binds_and_the_values_it_carries() {
         main.blend.dest_blend,
         StateValue::Property {
             name: "_DstBlend".to_owned(),
-            default: 3.0,
+            default: Some(3.0),
             compiled: 10.0,
         }
     );
@@ -925,13 +925,13 @@ fn malformed(shader: Object) -> ConvertError {
 }
 
 #[test]
-fn a_state_that_binds_a_property_the_shader_does_not_declare_is_malformed() {
+fn a_state_that_binds_a_property_the_shader_does_not_declare_has_no_default() {
     let mut state = shader_state("Main", &[]);
-    let culling = get_mut(&mut state, "culling");
-    *culling = state_value("_CullFront", 1.0);
+    *get_mut(&mut state, "culling") = state_value("_CullFront", 1.0);
+    let parsed = parse(shader_with_pass(shader_pass(state))).expect("a shader");
     assert_eq!(
-        malformed(shader_with_pass(shader_pass(state))).code,
-        "malformed"
+        parsed.passes_json()[0]["renderState"]["culling"],
+        json!({ "name": "_CullFront", "val": 1.0 })
     );
 }
 

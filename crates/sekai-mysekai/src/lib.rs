@@ -9,6 +9,7 @@ pub mod emoticon;
 pub mod facial;
 pub mod field_camera;
 pub mod fixture_areas;
+pub mod fixture_model;
 pub mod fixture_reactions;
 pub mod fixtures;
 mod lua;

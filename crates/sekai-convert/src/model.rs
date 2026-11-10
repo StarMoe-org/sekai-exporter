@@ -23,5 +23,5 @@ pub use components::component_document;
 pub use config::{MaterialKeys, ModelConfig, NodeKeys};
 pub use file::{ModelFile, model_file};
 pub use mesh::{MeshTriangles, mesh_triangles};
-pub use prefab::Prefab;
+pub use prefab::{Node, Prefab};
 pub use shader::{Blend, ParsedShader, Pass, ShaderProperty, StateValue, SubShader};

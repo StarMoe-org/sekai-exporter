@@ -23,11 +23,15 @@ pub struct Prefab {
     by_path_hash: BTreeMap<u32, usize>,
 }
 
-/// A game object.
+/// A game object of a prefab.
 #[derive(Debug, Clone)]
-pub(super) struct Node {
+pub struct Node {
     /// The game object.
     pub(super) object: ObjectId,
+    /// Its transform.
+    pub(super) transform_id: ObjectId,
+    /// Every component of `m_Component` that resolves, the transform among them, in stored order.
+    pub(super) component_ids: Vec<ObjectId>,
     pub(super) name: String,
     /// The names from below the root down to it, joined by `/`.
     pub(super) path: String,
@@ -36,6 +40,38 @@ pub(super) struct Node {
     pub(super) transform: Transform,
     /// Its components other than the transform, in the order of `m_Component`.
     pub(super) components: Vec<Object>,
+}
+
+impl Node {
+    /// The game object.
+    pub fn object(&self) -> ObjectId {
+        self.object
+    }
+
+    /// The game object's transform.
+    pub fn transform(&self) -> ObjectId {
+        self.transform_id
+    }
+
+    /// Whether the game object is active itself (`m_IsActive`).
+    pub fn active(&self) -> bool {
+        self.active
+    }
+
+    /// The positions of its children in [`Prefab::nodes`], in the order the transform stores them.
+    pub fn children(&self) -> &[usize] {
+        &self.children
+    }
+
+    /// Every component of the game object, the transform among them, in stored order.
+    pub fn component_ids(&self) -> &[ObjectId] {
+        &self.component_ids
+    }
+
+    /// Its components other than the transform, in stored order.
+    pub fn components(&self) -> &[Object] {
+        &self.components
+    }
 }
 
 /// The local transform of a game object, in the engine's coordinates.
@@ -47,6 +83,17 @@ pub(super) struct Transform {
 }
 
 impl Prefab {
+    /// The game objects, in depth-first order with the root first. A node's children are
+    /// positions in this list.
+    pub fn nodes(&self) -> &[Node] {
+        &self.nodes
+    }
+
+    /// The node of the game object or transform `id`.
+    pub fn node(&self, id: ObjectId) -> Option<&Node> {
+        self.node_of(id).map(|node| &self.nodes[node])
+    }
+
     /// Reads the prefab whose root is the game object `root`.
     pub fn read(root: ObjectId, cx: &dyn Context) -> Result<Self, ConvertError> {
         let mut prefab = Self {
@@ -96,10 +143,12 @@ impl Prefab {
         };
         let mut transform = None;
         let mut others = Vec::new();
+        let mut component_ids = Vec::new();
         for entry in array(fields, "m_Component")? {
             let Some(component) = cx.resolve(id, reference(entry, "component")?)? else {
                 continue;
             };
+            component_ids.push(component);
             let component = cx.object(component)?;
             if !matches!(component.class_id, TRANSFORM | RECT_TRANSFORM) {
                 others.push(component);
@@ -119,6 +168,8 @@ impl Prefab {
         }
         self.nodes.push(Node {
             object: id,
+            transform_id: transform.id,
+            component_ids,
             name,
             path: path.clone(),
             active: flag(fields, "m_IsActive")?,

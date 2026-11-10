@@ -94,8 +94,8 @@ pub enum StateValue {
     Property {
         /// The property.
         name: String,
-        /// The default the shader declares for it.
-        default: f32,
+        /// The default the shader declares for it, or `None` when it does not declare it.
+        default: Option<f32>,
         /// The value compiled into the pass.
         compiled: f32,
     },
@@ -245,36 +245,36 @@ impl Blend {
 
 impl StateValue {
     /// Reads a value that binds the property its `name` stores, or no property when the name is
-    /// `<noninit>`. A bound property the shader does not declare is malformed: the value would
-    /// have no default.
+    /// `<noninit>`.
     fn read(value: &Value, properties: &[ShaderProperty]) -> Result<Self, ConvertError> {
         let compiled = number(value, "val")?;
         let name = string(value, "name")?;
         if name == UNBOUND {
             return Ok(Self::Fixed(compiled));
         }
-        let declared = properties
-            .iter()
-            .find(|property| property.name == name)
-            .ok_or_else(|| {
-                malformed(format!("a pass state binds {name}, which is not declared"))
-            })?;
+        let declared = properties.iter().find(|property| property.name == name);
         Ok(Self::Property {
             name: name.to_owned(),
-            default: declared.default,
+            default: declared.map(|property| property.default),
             compiled,
         })
     }
 
-    /// `{ "name", "default", "val" }` for a property, `{ "name": "<noninit>", "val" }` otherwise.
+    /// `{ "name", "default", "val" }` for a property, without `default` when the shader does not
+    /// declare the property; `{ "name": "<noninit>", "val" }` for a fixed value.
     fn json(&self) -> Json {
         match self {
             Self::Fixed(compiled) => json!({ "name": UNBOUND, "val": Number(*compiled) }),
             Self::Property {
                 name,
-                default,
+                default: Some(default),
                 compiled,
             } => json!({ "name": name, "default": Number(*default), "val": Number(*compiled) }),
+            Self::Property {
+                name,
+                default: None,
+                compiled,
+            } => json!({ "name": name, "val": Number(*compiled) }),
         }
     }
 }

@@ -93,16 +93,23 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = Result<Chunk<'_>, DecodeError>> {
 }
 
 fn next_chunk<'a>(data: &'a [u8], position: &mut usize) -> Result<Chunk<'a>, DecodeError> {
-    let head = data
-        .get(*position..*position + 0x20)
-        .ok_or(DecodeError::Truncated {
-            what: "USM chunk header",
-            needed: *position + 0x20,
-            available: data.len(),
-        })?;
+    let head_end = position
+        .checked_add(0x20)
+        .ok_or_else(|| malformed("chunk header offset overflows"))?;
+    let head = data.get(*position..head_end).ok_or(DecodeError::Truncated {
+        what: "USM chunk header",
+        needed: head_end,
+        available: data.len(),
+    })?;
     let be32 = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
-    let size = be32(4) as usize;
-    let end = CHUNK_HEADER + *position + size;
+    let size = usize::try_from(be32(4))
+        .map_err(|_| malformed("chunk size exceeds address space"))?;
+    let body_start = position
+        .checked_add(CHUNK_HEADER)
+        .ok_or_else(|| malformed("chunk offset overflows"))?;
+    let end = body_start
+        .checked_add(size)
+        .ok_or_else(|| malformed("chunk size overflows"))?;
     if end > data.len() {
         return Err(DecodeError::Truncated {
             what: "USM chunk",
@@ -121,7 +128,7 @@ fn next_chunk<'a>(data: &'a [u8], position: &mut usize) -> Result<Chunk<'a>, Dec
         data_type: head[15] & 3,
         time: be32(16),
         time_scale: be32(20),
-        payload: &data[*position + CHUNK_HEADER + offset..end - padding],
+        payload: &data[body_start + offset..end - padding],
     };
     *position = end;
     Ok(chunk)

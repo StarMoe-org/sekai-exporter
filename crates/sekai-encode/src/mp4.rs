@@ -39,10 +39,20 @@ struct Scratch(PathBuf);
 
 impl Scratch {
     fn new() -> io::Result<Self> {
-        let number = NEXT.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("sekai-mp4-{}-{number}", std::process::id()));
-        std::fs::create_dir_all(&path)?;
-        Ok(Self(path))
+        for _ in 0..64 {
+            let number = NEXT.fetch_add(1, Ordering::Relaxed);
+            let name = format!("sekai-mp4-{}-{number}", std::process::id());
+            let path = std::env::temp_dir().join(name);
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not create a unique scratch directory",
+        ))
     }
 }
 
@@ -53,27 +63,41 @@ impl Drop for Scratch {
 }
 
 /// `pcm` as a WAV file.
-fn wav(pcm: &Pcm) -> Vec<u8> {
+fn wav(pcm: &Pcm) -> Result<Vec<u8>, EncodeError> {
     let channels = pcm.channels();
     let rate = pcm.sample_rate();
-    let size = pcm.samples().len() as u32 * 2;
+    let block_align = channels
+        .checked_mul(2)
+        .ok_or_else(|| failed("WAV block alignment overflows"))?;
+    let byte_rate = rate
+        .checked_mul(u32::from(block_align))
+        .ok_or_else(|| failed("WAV byte rate overflows"))?;
+    let size = pcm
+        .samples()
+        .len()
+        .checked_mul(2)
+        .and_then(|bytes| u32::try_from(bytes).ok())
+        .ok_or_else(|| failed("WAV audio exceeds 4 GiB"))?;
+    let riff_size = 36u32
+        .checked_add(size)
+        .ok_or_else(|| failed("WAV RIFF size overflows"))?;
     let mut out = Vec::with_capacity(44 + size as usize);
     out.extend(b"RIFF");
-    out.extend((36 + size).to_le_bytes());
+    out.extend(riff_size.to_le_bytes());
     out.extend(b"WAVEfmt ");
     out.extend(16u32.to_le_bytes());
     out.extend(1u16.to_le_bytes());
     out.extend(channels.to_le_bytes());
     out.extend(rate.to_le_bytes());
-    out.extend((rate * u32::from(channels) * 2).to_le_bytes());
-    out.extend((channels * 2).to_le_bytes());
+    out.extend(byte_rate.to_le_bytes());
+    out.extend(block_align.to_le_bytes());
     out.extend(16u16.to_le_bytes());
     out.extend(b"data");
     out.extend(size.to_le_bytes());
     for sample in pcm.samples() {
         out.extend(sample.to_le_bytes());
     }
-    out
+    Ok(out)
 }
 
 /// The arguments that write `output` from the stream at `video` and the optional WAV at `audio`.
@@ -175,7 +199,7 @@ pub fn encode_with(program: &OsStr, movie: &Movie) -> Result<Vec<u8>, EncodeErro
     std::fs::write(&video, &movie.stream).map_err(failed)?;
     let audio = scratch.0.join("audio.wav");
     if let Some(pcm) = &movie.audio {
-        std::fs::write(&audio, wav(pcm)).map_err(failed)?;
+        std::fs::write(&audio, wav(pcm)?).map_err(failed)?;
     }
     let output = scratch.0.join("output.mp4");
     let args = arguments(
@@ -254,9 +278,15 @@ mod tests {
 
     #[test]
     fn wav_has_the_header_of_its_samples() {
-        let bytes = wav(&Pcm::new(48000, 2, vec![1, -1]).unwrap());
+        let bytes = wav(&Pcm::new(48000, 2, vec![1, -1]).unwrap()).unwrap();
         assert_eq!(&bytes[..4], b"RIFF");
         assert_eq!(bytes.len(), 48);
         assert_eq!(&bytes[44..], [1, 0, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn wav_rejects_overflowing_byte_rate() {
+        let pcm = Pcm::new(u32::MAX, 2, vec![0, 0]).unwrap();
+        assert!(matches!(wav(&pcm), Err(EncodeError::Failed { .. })));
     }
 }

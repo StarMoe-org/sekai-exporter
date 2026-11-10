@@ -871,3 +871,11 @@ fn the_header_gives_the_stored_length() {
     }
     assert!(hca_info(b"not a stream").is_err());
 }
+
+#[test]
+fn a_usm_chunk_with_an_overflowing_size_is_rejected() {
+    let mut data = vec![0u8; 0x20];
+    data[..4].copy_from_slice(b"CRID");
+    data[4..8].copy_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
+    assert!(sekai_codec::cri::read_usm(&data).is_err());
+}

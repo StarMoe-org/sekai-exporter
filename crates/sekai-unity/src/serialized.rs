@@ -193,13 +193,17 @@ impl SerializedFile {
                 .ok()
                 .filter(|&i| i < types.len())
                 .ok_or_else(|| Error::malformed("object table", "type index out of range"))?;
-            let offset = header.data_offset + start;
-            if offset + u64::from(size) > source.len() {
+            let offset = header.data_offset.checked_add(start);
+            if offset
+                .and_then(|offset| offset.checked_add(u64::from(size)))
+                .is_none_or(|end| end > source.len())
+            {
                 return Err(Error::malformed(
                     "object table",
                     format!("object {path_id} lies outside the file"),
                 ));
             }
+            let offset = offset.expect("checked above");
             objects.push(ObjectInfo {
                 path_id,
                 offset,
@@ -323,4 +327,54 @@ fn read_type(
         referenced: name,
         dependencies,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_object_offset_that_overflows_is_malformed() {
+        let mut meta = Vec::new();
+        meta.extend_from_slice(b"2022.3.0f1\0");
+        meta.extend_from_slice(&19i32.to_le_bytes());
+        meta.push(0);
+        meta.extend_from_slice(&1i32.to_le_bytes());
+        meta.extend_from_slice(&49i32.to_le_bytes());
+        meta.push(0);
+        meta.extend_from_slice(&(-1i16).to_le_bytes());
+        meta.extend_from_slice(&[0u8; 16]);
+        meta.extend_from_slice(&1i32.to_le_bytes());
+        while !(48 + meta.len()).is_multiple_of(4) {
+            meta.push(0);
+        }
+        meta.extend_from_slice(&1i64.to_le_bytes());
+        meta.extend_from_slice(&u64::MAX.to_le_bytes());
+        meta.extend_from_slice(&4u32.to_le_bytes());
+        meta.extend_from_slice(&0i32.to_le_bytes());
+        meta.extend_from_slice(&0i32.to_le_bytes());
+        meta.extend_from_slice(&0i32.to_le_bytes());
+        meta.extend_from_slice(&0i32.to_le_bytes());
+        meta.push(0);
+
+        let data_offset = (48 + meta.len()) as u64;
+        let file_size = data_offset + 8;
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&22u32.to_be_bytes());
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        bytes.extend_from_slice(&(meta.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&file_size.to_be_bytes());
+        bytes.extend_from_slice(&data_offset.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 8]);
+        bytes.extend_from_slice(&meta);
+        bytes.extend_from_slice(&[0u8; 8]);
+
+        assert!(matches!(
+            SerializedFile::parse(&bytes),
+            Err(Error::Malformed { .. })
+        ));
+    }
 }

@@ -2,9 +2,10 @@
 //!
 //! [`FixtureModel`] produces the `fixture-model` form: one piece of furniture as the model file of
 //! its prefab, with the source identity, renderer state and collision of every node and, on the
-//! root, the collision document of the piece. The form is specified in
-//! `docs/spec/fixture-model.md`.
+//! root, the collision document of the piece, and with the attach points of the piece as a
+//! document beside it. The form is specified in `docs/spec/fixture-model.md`.
 
+mod attach;
 mod collision;
 mod materials;
 mod nodes;
@@ -35,7 +36,7 @@ impl Converter for FixtureModel {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn is_root(
@@ -61,8 +62,11 @@ impl Converter for FixtureModel {
             material_keys: Some(&ShaderKeys),
         };
         let model = model_file(&prefab, &config, cx)?;
+        let attach_points = serde_json::to_vec(&attach::document(&prefab, cx)?)
+            .map_err(|e| ConvertError::new("malformed", e.to_string()))?;
         let mut members = vec![file("model", "glb", model.glb)];
         members.extend(model.images);
+        members.push(file("attach-points", "json", attach_points));
         Ok(Some(Asset { members }))
     }
 

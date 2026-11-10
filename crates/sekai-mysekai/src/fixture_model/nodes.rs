@@ -116,7 +116,7 @@ pub(super) fn check_placement(prefab: &Prefab) -> Result<(), ConvertError> {
 
 /// The source identity of `node`: the serialized file of its game object, and the ids of the game
 /// object and its transform.
-fn source_object(node: &Node, cx: &dyn Context) -> Result<Json, ConvertError> {
+pub(super) fn source_object(node: &Node, cx: &dyn Context) -> Result<Json, ConvertError> {
     Ok(json!({
         "file": cx.file_name(node.object())?,
         "gameObjectId": node.object().path_id.to_string(),

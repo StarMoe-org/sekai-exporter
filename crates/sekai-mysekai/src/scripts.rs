@@ -208,7 +208,7 @@ pub(crate) mod testing {
     pub(crate) struct FakeVersion {
         tables: HashMap<&'static str, Json>,
         packages: Vec<(&'static str, Vec<AssetEntry>)>,
-        documents: HashMap<&'static str, Json>,
+        documents: HashMap<&'static str, Vec<u8>>,
     }
 
     impl FakeVersion {
@@ -232,7 +232,26 @@ pub(crate) mod testing {
                     form,
                 }],
             ));
-            self.documents.insert(name, value);
+            self.documents.insert(name, value.to_string().into_bytes());
+            self
+        }
+
+        /// Adds the asset `name` of the form `form` to `package`, whose members hold `bytes`.
+        pub(crate) fn with_raw_asset(
+            mut self,
+            package: &'static str,
+            name: &'static str,
+            form: &'static str,
+            bytes: Vec<u8>,
+        ) -> Self {
+            self.packages.push((
+                package,
+                vec![AssetEntry {
+                    name: name.to_owned(),
+                    form,
+                }],
+            ));
+            self.documents.insert(name, bytes);
             self
         }
     }
@@ -262,11 +281,10 @@ pub(crate) mod testing {
         }
 
         fn member(&self, name: &str, _role: &str) -> Result<Vec<u8>, ConvertError> {
-            let value = self
-                .documents
+            self.documents
                 .get(name)
-                .ok_or_else(|| ConvertError::new("missing_asset", name))?;
-            Ok(value.to_string().into_bytes())
+                .cloned()
+                .ok_or_else(|| ConvertError::new("missing_asset", name))
         }
     }
 

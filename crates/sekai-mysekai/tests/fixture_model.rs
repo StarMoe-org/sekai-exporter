@@ -508,7 +508,12 @@ fn piece() -> File {
     File(vec![
         game_object(ROOT, "fixture", true, &[ROOT_TRANSFORM, VIEW, 30]),
         transform(ROOT_TRANSFORM, ROOT, [0.0, 0.0, 0.0], &[BODY_TRANSFORM]),
-        behaviour(VIEW, ROOT, "FixtureView", Vec::new()),
+        behaviour(
+            VIEW,
+            ROOT,
+            "FixtureView",
+            vec![("_attachPoints", list(Vec::new())), ("_collider", r(0))],
+        ),
         obstacle(30, ROOT),
         game_object(BODY, "body", true, &[BODY_TRANSFORM, 12, 13, 14, 15]),
         transform(BODY_TRANSFORM, BODY, [1.0, 0.0, 0.0], &[]),
@@ -845,7 +850,7 @@ fn a_material_without_a_shader_has_no_shader_keys() {
 fn the_model_keeps_its_texture_coordinates_and_names_its_images() {
     let asset = piece().convert().expect("the piece converts");
     let roles: Vec<&str> = asset.members.iter().map(|m| m.role.as_str()).collect();
-    assert_eq!(roles, ["model", "texture/0"]);
+    assert_eq!(roles, ["model", "texture/0", "attach-points"]);
     let Content::Image(image) = &asset.members[1].content else {
         panic!("the texture is an image")
     };
@@ -862,4 +867,224 @@ fn the_model_keeps_its_texture_coordinates_and_names_its_images() {
         .as_u64()
         .expect("the mesh has texture coordinates") as usize;
     assert_eq!(float_values(&glb, uv), [0.25, 0.75, 0.0, 1.0, 1.5, -0.25]);
+}
+
+/// The `attach-points` member of `asset`.
+fn attach_points(asset: &Asset) -> Json {
+    let member = asset
+        .members
+        .iter()
+        .find(|member| member.role == "attach-points")
+        .expect("the asset has attach points");
+    let Content::File { bytes, extension } = &member.content else {
+        panic!("the attach points are a file")
+    };
+    assert_eq!(extension, "json");
+    serde_json::from_slice(bytes).unwrap()
+}
+
+const START: i64 = 40;
+const START_TRANSFORM: i64 = 41;
+const END: i64 = 42;
+const END_TRANSFORM: i64 = 43;
+const LONE_START: i64 = 44;
+const LONE_START_TRANSFORM: i64 = 45;
+
+fn point(start: i64, end: i64) -> Value {
+    s(vec![
+        ("StartLoc", r(start)),
+        ("EndLoc", r(end)),
+        ("IsUsing", Value::Bool(false)),
+        ("CharacterId", i(0)),
+    ])
+}
+
+/// The piece with two attach points under its root, the first with an end locator and the second
+/// without, and with the body's mesh collider as the collider of its `FixtureView`.
+fn piece_with_points() -> File {
+    let mut file = piece();
+    file.0.extend([
+        game_object(START, "loc_start001", true, &[START_TRANSFORM]),
+        transform(START_TRANSFORM, START, [1.0, 0.0, 2.0], &[]),
+        game_object(END, "loc_end001", true, &[END_TRANSFORM]),
+        transform(END_TRANSFORM, END, [0.5, 0.0, -0.25], &[]),
+        game_object(LONE_START, "loc_start002_1", true, &[LONE_START_TRANSFORM]),
+        transform(LONE_START_TRANSFORM, LONE_START, [0.0, 0.0, 0.0], &[]),
+    ]);
+    for locator in [START_TRANSFORM, END_TRANSFORM, LONE_START_TRANSFORM] {
+        set(file.object_mut(locator), "m_Father", r(ROOT_TRANSFORM));
+    }
+    // A quarter turn about y, so that the reflection of the rotation shows.
+    let half = std::f32::consts::FRAC_1_SQRT_2;
+    set(
+        file.object_mut(START_TRANSFORM),
+        "m_LocalRotation",
+        s(vec![
+            ("x", f(0.0)),
+            ("y", f(half)),
+            ("z", f(0.0)),
+            ("w", f(half)),
+        ]),
+    );
+    set(
+        file.object_mut(ROOT_TRANSFORM),
+        "m_Children",
+        list(vec![
+            r(BODY_TRANSFORM),
+            r(START_TRANSFORM),
+            r(END_TRANSFORM),
+            r(LONE_START_TRANSFORM),
+        ]),
+    );
+    set(
+        file.object_mut(VIEW),
+        "_attachPoints",
+        list(vec![point(START, END), point(LONE_START, 0)]),
+    );
+    set(file.object_mut(VIEW), "_collider", r(15));
+    file
+}
+
+/// Replaces the field `name` of `object`.
+fn set(object: &mut Object, name: &str, value: Value) {
+    let Value::Struct(fields) = &mut object.fields else {
+        panic!("the fields are a structure")
+    };
+    fields
+        .iter_mut()
+        .find(|(field, _)| field == name)
+        .unwrap_or_else(|| panic!("the field {name} exists"))
+        .1 = value;
+}
+
+#[test]
+fn a_piece_without_attach_points_lists_none() {
+    let asset = piece().convert().expect("the piece converts");
+    assert_eq!(
+        attach_points(&asset),
+        json!({
+            "root": {
+                "sourceObject": { "file": "CAB-test", "gameObjectId": "1", "transformId": "2" },
+                "scale": [1.0, 1.0, 1.0],
+            },
+            "collider": null,
+            "points": [],
+        })
+    );
+}
+
+#[test]
+fn the_attach_points_are_the_stored_locators_in_the_frame_of_the_file() {
+    let half = std::f32::consts::FRAC_1_SQRT_2
+        .to_string()
+        .parse::<f64>()
+        .unwrap();
+    let asset = piece_with_points().convert().expect("the piece converts");
+    let source = |game_object: i64, transform: i64| {
+        json!({
+            "file": "CAB-test",
+            "gameObjectId": game_object.to_string(),
+            "transformId": transform.to_string(),
+        })
+    };
+    assert_eq!(
+        attach_points(&asset),
+        json!({
+            "root": { "sourceObject": source(ROOT, ROOT_TRANSFORM), "scale": [1.0, 1.0, 1.0] },
+            "collider": { "sourceObject": source(BODY, BODY_TRANSFORM), "componentId": "15" },
+            "points": [
+                {
+                    "start": {
+                        "name": "loc_start001",
+                        "sourceObject": source(START, START_TRANSFORM),
+                        "position": [-1.0, 0.0, 2.0],
+                        "rotation": [0.0, -half, 0.0, half],
+                    },
+                    "end": {
+                        "name": "loc_end001",
+                        "sourceObject": source(END, END_TRANSFORM),
+                        "position": [-0.5, 0.0, -0.25],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                    },
+                },
+                {
+                    "start": {
+                        "name": "loc_start002_1",
+                        "sourceObject": source(LONE_START, LONE_START_TRANSFORM),
+                        "position": [-0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0, 1.0],
+                    },
+                    "end": null,
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn each_locator_has_the_pose_of_its_node() {
+    let asset = piece_with_points().convert().expect("the piece converts");
+    let glb = read_glb(&asset).json;
+    let points = attach_points(&asset);
+    for (name, locator) in [
+        ("loc_start001", &points["points"][0]["start"]),
+        ("loc_end001", &points["points"][0]["end"]),
+        ("loc_start002_1", &points["points"][1]["start"]),
+    ] {
+        let node = glb["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|node| node["name"] == name)
+            .expect("the locator is a node");
+        assert_eq!(node["extras"]["sourceObject"], locator["sourceObject"]);
+        assert_eq!(node["translation"], locator["position"]);
+        assert_eq!(node["rotation"], locator["rotation"]);
+    }
+}
+
+#[test]
+fn a_locator_below_another_node_is_unsupported() {
+    let mut file = piece_with_points();
+    set(
+        file.object_mut(ROOT_TRANSFORM),
+        "m_Children",
+        list(vec![
+            r(BODY_TRANSFORM),
+            r(END_TRANSFORM),
+            r(LONE_START_TRANSFORM),
+        ]),
+    );
+    set(
+        file.object_mut(BODY_TRANSFORM),
+        "m_Children",
+        list(vec![r(START_TRANSFORM)]),
+    );
+    set(
+        file.object_mut(START_TRANSFORM),
+        "m_Father",
+        r(BODY_TRANSFORM),
+    );
+    let error = file.convert().expect_err("the locator is below the body");
+    assert_eq!(error.code, "unsupported");
+}
+
+#[test]
+fn a_point_without_a_start_is_malformed() {
+    let mut file = piece_with_points();
+    set(
+        file.object_mut(VIEW),
+        "_attachPoints",
+        list(vec![point(0, END)]),
+    );
+    let error = file.convert().expect_err("the point has no start");
+    assert_eq!(error.code, "malformed");
+}
+
+#[test]
+fn a_collider_that_is_not_a_mesh_collider_is_malformed() {
+    let mut file = piece_with_points();
+    set(file.object_mut(VIEW), "_collider", r(14));
+    let error = file.convert().expect_err("the collider is a box");
+    assert_eq!(error.code, "malformed");
 }

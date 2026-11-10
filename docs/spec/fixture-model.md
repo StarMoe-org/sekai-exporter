@@ -12,7 +12,7 @@ A runtime that reproduces MySekai housing sites, and an editor of its furniture,
 - read each material's `extras` to build the material the source author assigned, and load each texture outside the file by its relative URI;
 - read the collision document on the scene root, and resolve every collider, navigation modifier and navigation obstacle from it.
 
-It reads nothing else outside the file through this form: the collision document and all renderer state travel inside the GLB, and the only files beside it are its images. Which pieces have a model, and which file each uses, it learns from the asset list of the published set.
+It also reads where characters stand to use the piece, its attach points (2.6). It reads them for every piece of a version at once, from the joined [fixture attach points](fixture-attach-points.md) document, so that it can plan where characters go before it loads any model. Apart from that document, it reads nothing outside the file through this form: the collision document and all renderer state travel inside the GLB, and the only files beside it are its images. Which pieces have a model, and which file each uses, it learns from the asset list of the published set.
 
 ## 2. Contents
 
@@ -22,6 +22,7 @@ Members:
 |---|---|
 | `model` | The piece as a [model file](model.md), with the differences below |
 | `texture/<n>` | The `n`th image of the model file, counted from 0, in the form of the `image` member of the [texture form](texture.md). Roles appear in order of `n` |
+| `attach-points` | The attach points of the piece (2.6), a UTF-8 JSON document with the extension `json` |
 
 A piece has a `fixture-model` asset only when its prefab has a `FixtureView` (3.1).
 
@@ -137,6 +138,31 @@ Materials whose program is the character program draw with the character's textu
 
 This version of the form writes no animations: the GLB has no `animations` array, and the file holds the geometry, the materials and the collision of the piece only. The animation clips a piece's gimmicks and timelines play are to be carried by a later form; this page does not define them yet.
 
+### 2.6 Attach points
+
+An attach point is a place where a character stands to use the piece: it walks to the start of the point, and when the point has an end, it moves from there to the end. The game stores the points of a piece as a list on its `FixtureView`, and finds a point by its position in that list. Each point has a start locator and an end locator, which are game objects of the prefab, and the game reads the world position and rotation of each.
+
+The `attach-points` member is a JSON object:
+
+| Key | Value |
+|---|---|
+| `root` | `{ "sourceObject", "scale": [x, y, z] }`: the `sourceObject` of the root node (2.2), and the root's local scale as the model file writes it |
+| `collider` | The mesh collider the `FixtureView` names as its own: `{ "sourceObject", "componentId" }`, the `sourceObject` of the node whose game object carries it and the decimal string of its component id, as its record in `sourceCollision` gives it (2.3). `null` when the `FixtureView` names none |
+| `points` | The attach points, in the order the `FixtureView` stores them. A piece without points has an empty list |
+
+A point is `{ "start", "end" }`. `start` is a locator, and `end` is a locator or `null` when the point has no end locator. A locator is:
+
+| Key | Value |
+|---|---|
+| `name` | The `m_Name` of the locator's game object |
+| `sourceObject` | The `sourceObject` of the locator's node |
+| `position` | `[x, y, z]`, the `translation` of the locator's node in the model file |
+| `rotation` | `[x, y, z, w]`, the `rotation` of the locator's node in the model file |
+
+A locator is a child of the root (3.3), so its position and rotation are in the frame of the root before the root's scale applies, with the change of basis of section 4. A placed piece puts a locator at the placement pose × `scale` of `root` × the locator's `position` and `rotation`. The locator's own scale does not move it, and is not written.
+
+The member records the points as the game stores them, and nothing derived from them. The game takes the slot of a point from the name of its start locator (the part after `loc_start`, split at `_`, whose second part is the slot number, and 0 when there is none or it is not a number); that law is the runtime's, applied to `name`, and a name it does not match is not an error of this form. The `IsUsing` and `CharacterId` fields of a stored point are the game's state while it runs, and are not written.
+
 ## 3. Sources
 
 ### 3.1 The input
@@ -166,7 +192,7 @@ The model file holds the root's `Transform` subtree, the components of its game 
 | `Material` | `m_Name`, `m_Shader`, `m_CustomRenderQueue`, `m_SavedProperties`, `m_ValidKeywords`, `m_InvalidKeywords` |
 | `Shader` | `m_ParsedForm` (name, texture property defaults, passes and their render state) |
 | `Texture2D` | Image, sampling settings |
-| `MonoBehaviour` with script `FixtureView` | The placement root (`fixtureViewRoot`) |
+| `MonoBehaviour` with script `FixtureView` | The placement root (`fixtureViewRoot`); `_attachPoints`, whose entries hold `StartLoc` and `EndLoc`, and `_collider` for the attach points (2.6) |
 | `MonoBehaviour` with script `RoadView` | Road cell types (`roadCellType`) |
 | `MeshCollider`, `BoxCollider`, `SphereCollider`, `CapsuleCollider`, `NavMeshModifier`, `NavMeshAgent`, `NavMeshObstacle` | `sourceCollision` and the collision geometry |
 
@@ -184,6 +210,8 @@ A component can name an object in another bundle of the same package set (a mate
 | A collision triangle index lies outside its positions, or a collider's mesh has no triangles | Error `malformed` |
 | A material's shader does not resolve | The error of the missing object |
 | A collider's mesh does not resolve, or is not a `Mesh` | Error `malformed` |
+| A point's `StartLoc` is null, or a locator or `_collider` does not resolve to an object of the prefab of the class it names | Error `malformed` |
+| A locator's game object is not a child of the root | Error `unsupported`: its pose would have to be composed through the transforms between them |
 | The root's prefab has no `FixtureView` GameObject | Error `malformed` (the form has no asset for such a package) |
 | A node's mesh data uses a format, a component count, a topology or a vertex channel that [model files](model.md) does not list | The model file's `unsupported` |
 | A texture cannot be decoded | The error of the [texture form](texture.md) |
@@ -213,6 +241,7 @@ A file is correct for the runtime when each of these holds:
 3. The root carries `fixtureCollision`; every `geometryId` a collider names is a geometry of that document; every node that the navigation build reads has `sourceCollision` with the keys of 2.3.
 4. Every material has `shader`, `renderQueue`, `keywords`, `floats`, `ints`, `colors` and `textures`, with every texture property in `textures`; every material whose program 2.4.4 gives a runtime material holds every key that program's material code reads from the extras; every texture index in `textures` names a texture, and every texture names an image that is a member of the asset; every image is WebP and decodes.
 5. The file has no `animations`; no object of the file carries a version field, a coordinate contract, or a unit or UV convention string.
+6. The `attach-points` member lists every entry of `_attachPoints` in stored order; every `sourceObject` in it is the `sourceObject` of a node of the file; each locator's `position` and `rotation` equal its node's `translation` and `rotation`; `root.scale` equals the root node's `scale`; and `collider`, when set, names a collider in the `sourceCollision` of that node.
 
 **Checks.**
 
@@ -220,11 +249,12 @@ A file is correct for the runtime when each of these holds:
 - Node identities, transforms, extras keys, the material table (extras against the source properties), the collision document and the node records are compared value by value with an independent export of the same bundle, and every difference is explained.
 - The WebP images are compared by decoded pixels with the source textures.
 - For a sample of pieces, each node and collider the game's own navigation build reads from the source is found again from this file by `sourceObject`, and its shape agrees.
+- The attach points of every piece of a version are compared with the `_attachPoints` of its `FixtureView`, read independently from the object documents of the same bundles: the count, the order, the locator names and identities, and the poses.
 - The same bundle gives the same bytes with one thread and with many, and on native and on the web target.
 
 ## 6. Version
 
-Form version: 1. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table), changes the version of every asset of the form.
+Form version: 2. Version 2 adds the `attach-points` member. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
 
 ## 7. Naming nodes
 

@@ -23,7 +23,7 @@ use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
 use crate::budget;
 use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
-use crate::monitor::Monitor;
+use crate::monitor::{self, Monitor};
 
 const INPUT_EXTENSION: &str = "bundle";
 /// How many fetched bundles are recorded together.
@@ -529,7 +529,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
                 },
             )?;
         }
-        for (subject, cost) in monitor.costs() {
+        for (subject, cost) in monitor::costs(monitor) {
             batch.put_cost(&CostRow {
                 kind: cost.kind,
                 subject,

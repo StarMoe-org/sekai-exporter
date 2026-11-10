@@ -1,5 +1,7 @@
 # Virtual live script
 
+[中文](virtual-live-script.zh-CN.md)
+
 The `virtual-live-script` form is what happens in one part of a virtual live — who appears, moves and speaks, the lights, sound and audience — as a JSON document. Converter: `virtual-live-script` in `sekai-moesekai` (feature `virtual-live`). Form version: 1.
 
 ## 1. Runtime

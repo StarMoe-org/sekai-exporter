@@ -1,5 +1,7 @@
 # Action set
 
+[中文](action-set.zh-CN.md)
+
 The `action-set` form is the area actors of an action set and the group of 2D costumes each of them wears, as a JSON document. Converter: `action-set` in `sekai-moesekai` (feature `episode`). Form version: 1.
 
 ## 1. Runtime

@@ -1,5 +1,7 @@
 # Characters
 
+[中文](characters.zh-CN.md)
+
 The `characters` form is the roster of the characters of MySekai, as one JSON document. Converter: `characters`.
 
 ## 1. Runtime

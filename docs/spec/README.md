@@ -1,5 +1,7 @@
 # Specifications
 
+[中文](README.zh-CN.md)
+
 Each asset form and each published document format has a specification in this directory. A specification is written before the converter or writer that implements it, and states:
 
 1. **Runtime**: the consumer the form is for.

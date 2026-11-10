@@ -1,5 +1,7 @@
 # Fixture reactions
 
+[中文](fixture-reactions.zh-CN.md)
+
 The `fixture-reactions` form is the list of the characters who react to each piece of furniture in MySekai, as one JSON document per data set. Converter: `fixture-reactions`.
 
 ## 1. Runtime

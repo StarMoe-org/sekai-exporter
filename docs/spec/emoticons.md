@@ -1,5 +1,7 @@
 # Emoticons
 
+[中文](emoticons.zh-CN.md)
+
 An overhead item is a small effect shown above a character: a tree of nodes that draw sprites through three clips, or a set of particle emitters. The `emoticon` form is one item as a JSON document. The `emoticons` form joins every item of a version into one document. Converters: `emoticon` and `emoticons`.
 
 ## 1. Runtime

@@ -1,5 +1,7 @@
 # Font
 
+[中文](font.zh-CN.md)
+
 The `font` form is the font file a `Font` object stores. Converter: `font` in `sekai-convert` (feature `text`). Form version: 1.
 
 ## 1. Runtime

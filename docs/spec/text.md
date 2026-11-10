@@ -1,5 +1,7 @@
 # Text
 
+[中文](text.zh-CN.md)
+
 The `text` form is the file a `TextAsset` stores, byte for byte. Converter: `text` in `sekai-convert` (feature `text`). Form version: 1.
 
 ## 1. Runtime

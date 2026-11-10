@@ -1,5 +1,7 @@
 # Episode
 
+[中文](episode.zh-CN.md)
+
 The `episode` form is everything one story episode needs, as a JSON document that names the assets it uses. Converter: `episode` in `sekai-moesekai` (feature `episode`). Form version: 2.
 
 ## 1. Runtime

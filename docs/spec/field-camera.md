@@ -1,5 +1,7 @@
 # Field camera
 
+[中文](field-camera.zh-CN.md)
+
 The `field-camera` form is the camera that follows the player in MySekai, as one JSON document. Converter: `field-camera`.
 
 ## 1. Runtime

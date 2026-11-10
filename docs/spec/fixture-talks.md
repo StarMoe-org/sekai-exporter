@@ -1,5 +1,7 @@
 # Fixture talks
 
+[中文](fixture-talks.zh-CN.md)
+
 The `fixture-talks` form is what characters say at a piece of furniture in MySekai, as one JSON document. Converter: `fixture-talks`.
 
 ## 1. Runtime

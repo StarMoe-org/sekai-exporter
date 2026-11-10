@@ -1,5 +1,7 @@
 # Fixture areas
 
+[中文](fixture-areas.zh-CN.md)
+
 The placement grids of the furniture in MySekai. The `fixture-meta` form is the grids of one piece of furniture and the `fixture-areas` form joins them into one JSON document. Converters: `fixture-meta` and `fixture-areas`.
 
 ## 1. Runtime

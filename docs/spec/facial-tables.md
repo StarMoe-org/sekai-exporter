@@ -1,5 +1,7 @@
 # Facial tables
 
+[中文](facial-tables.zh-CN.md)
+
 The facial tables say which cells of a character's eye and mouth textures show each expression. The `facial-table` form is one such table as the game stores it. The `facial-tables` form joins the three tables of a version into one document. Converters: `facial-table` and `facial-tables`.
 
 ## 1. Runtime

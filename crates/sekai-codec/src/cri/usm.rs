@@ -104,8 +104,8 @@ fn next_chunk<'a>(data: &'a [u8], position: &mut usize) -> Result<Chunk<'a>, Dec
             available: data.len(),
         })?;
     let be32 = |at: usize| u32::from_be_bytes([head[at], head[at + 1], head[at + 2], head[at + 3]]);
-    let size = usize::try_from(be32(4))
-        .map_err(|_| malformed("chunk size exceeds address space"))?;
+    let size =
+        usize::try_from(be32(4)).map_err(|_| malformed("chunk size exceeds address space"))?;
     let body_start = position
         .checked_add(CHUNK_HEADER)
         .ok_or_else(|| malformed("chunk offset overflows"))?;

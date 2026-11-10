@@ -1,5 +1,7 @@
 # Talks
 
+[中文](talks.zh-CN.md)
+
 The `talks` form is what characters say in MySekai: the talks of each character, the talks several characters have together, the party scripts and the tutorial scripts, as one JSON document. Converter: `talks`.
 
 ## 1. Runtime

@@ -1,5 +1,7 @@
 # Client config
 
+[中文](client-config.zh-CN.md)
+
 The `client-config` form is the configuration a client reads by numeric ID, as one JSON document. Converter: `client-config`.
 
 ## 1. Runtime

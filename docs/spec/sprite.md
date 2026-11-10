@@ -1,5 +1,7 @@
 # Sprite
 
+[中文](sprite.zh-CN.md)
+
 The `sprite` form is the region of a texture a `Sprite` shows, with the layout that places it. Converter: `sprite` in `sekai-convert` (feature `image`). Form version: 2.
 
 ## 1. Runtime

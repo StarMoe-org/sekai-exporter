@@ -1,5 +1,7 @@
 # Alone actions
 
+[中文](alone-actions.zh-CN.md)
+
 The `alone-actions` form is what each MySekai character does while it is on its own, as one JSON document. Converter: `alone-actions`.
 
 ## 1. Runtime

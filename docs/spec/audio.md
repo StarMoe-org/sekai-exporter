@@ -1,5 +1,7 @@
 # Audio
 
+[中文](audio.zh-CN.md)
+
 The `audio` form is the sound of each cue of a CRI cue sheet (ACB), as PCM. Converter: `audio` in `sekai-convert` (feature `audio`). Form version: 3.
 
 ## 1. Runtime

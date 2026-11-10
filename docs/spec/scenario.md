@@ -1,5 +1,7 @@
 # Scenario
 
+[中文](scenario.zh-CN.md)
+
 The `scenario` form is the scene data of a story — its lines, layouts, effects, sounds and the resources it names — as a JSON document. Converter: `scenario` in `sekai-moesekai` (feature `scenario`). Form version: 1.
 
 ## 1. Runtime

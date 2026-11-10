@@ -1,5 +1,7 @@
 # Scenario background
 
+[中文](scenario-background.zh-CN.md)
+
 The `scenario-background` form is the movies a scenario background plays, as a JSON document. Converter: `scenario-background` in `sekai-moesekai` (feature `episode`). Form version: 1.
 
 ## 1. Runtime

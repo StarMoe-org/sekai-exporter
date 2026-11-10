@@ -1,5 +1,7 @@
 # Communication actions
 
+[中文](communication-actions.zh-CN.md)
+
 The `communication-actions` form is what each MySekai character does while it is together with others, as one JSON document. Converter: `communication-actions`.
 
 ## 1. Runtime

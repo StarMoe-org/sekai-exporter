@@ -1,5 +1,7 @@
 # Fixtures
 
+[中文](mysekai-fixtures.zh-CN.md)
+
 The `mysekai-fixtures` form is the furniture of MySekai, as one JSON document. Converter: `mysekai-fixtures`.
 
 ## 1. Runtime

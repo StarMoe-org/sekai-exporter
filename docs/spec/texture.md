@@ -1,5 +1,7 @@
 # Texture
 
+[中文](texture.zh-CN.md)
+
 The `texture` form is the image a texture object stores, as a plain picture. Converter: `texture` in `sekai-convert` (feature `image`). Form version: 2.
 
 ## 1. Runtime

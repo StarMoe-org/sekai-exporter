@@ -48,7 +48,7 @@ pub(super) fn slices(
         }
         None => inline,
     };
-    if depth == 0 || size % u64::from(depth) != 0 || data.len() as u64 != size {
+    if size == 0 || depth == 0 || size % u64::from(depth) != 0 || data.len() as u64 != size {
         return Err(malformed(format!(
             "{} bytes of image data, {size} declared, for {depth} slices",
             data.len()
@@ -81,8 +81,9 @@ pub(super) fn slices(
 
 /// RGBA binary16 texels, rows from bottom to top, as an HDR surface.
 fn half(width: u32, height: u32, bytes: &[u8]) -> Result<HdrSurface, ConvertError> {
-    let row = width as usize * 8;
-    let needed = row * height as usize;
+    let too_large = || ConvertError::new("malformed", format!("{width} x {height} is too large"));
+    let row = (width as usize).checked_mul(8).ok_or_else(too_large)?;
+    let needed = row.checked_mul(height as usize).ok_or_else(too_large)?;
     if bytes.len() < needed {
         return Err(ConvertError::new(
             "truncated",

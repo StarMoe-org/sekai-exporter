@@ -66,7 +66,7 @@
 | crunch 文件损坏，或尺寸与该贴图不同 | 错误 `malformed` 或 `truncated` |
 | 流路径未指明资源包中的任何条目 | 错误 `missing_resource` |
 | 贴图数组或 3D 贴图使用的图形格式不在第 2 节的表中 | 错误 `unsupported` |
-| 贴图数组或 3D 贴图的图像数据不是 `m_DataSize` 字节，或不能分成 `m_Depth` 个等大的切片 | 错误 `malformed` |
+| 贴图数组或 3D 贴图的图像数据为空、不是 `m_DataSize` 字节，或不能分成 `m_Depth` 个等大的切片 | 错误 `malformed` |
 
 ## 4. 容器
 

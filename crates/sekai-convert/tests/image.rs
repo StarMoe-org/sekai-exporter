@@ -378,6 +378,8 @@ fn texture_arrays_of_other_formats_or_sizes_are_errors() {
     );
     let file = File(vec![array(117, 48, 1, 1, 3, vec![0; 16])]);
     assert_eq!(Texture.convert(id(5), &file).unwrap_err().code, "malformed");
+    let file = File(vec![array(117, 8, 1, 1, 1, Vec::new())]);
+    assert_eq!(Texture.convert(id(5), &file).unwrap_err().code, "malformed");
 }
 
 fn index(path_id: i64, class_id: i32, size: u32) -> ObjectIndex {

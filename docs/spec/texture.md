@@ -66,7 +66,7 @@ Texture arrays and 3D textures name their format with `m_Format`, a graphics for
 | A crunch file is damaged, or has other dimensions than the texture | Error `malformed` or `truncated` |
 | The stream path names no entry of the bundle | Error `missing_resource` |
 | A texture array or 3D texture uses a graphics format not in the table in section 2 | Error `unsupported` |
-| The image data of a texture array or 3D texture is not `m_DataSize` bytes, or does not split into `m_Depth` equal slices | Error `malformed` |
+| The image data of a texture array or 3D texture is empty, is not `m_DataSize` bytes, or does not split into `m_Depth` equal slices | Error `malformed` |
 
 ## 4. Container
 

@@ -20,7 +20,7 @@
 | Feature | 转换的内容 |
 |---|---|
 | `image` | `Texture2D`、`Sprite` 与精灵图集，转换为图片 |
-| `audio` | `AudioClip` 与 CRI ACB/AWB 的 cue，转换为音频文件与 cue 表 |
+| `audio` | CRI ACB/AWB 的 cue，转换为音频文件与 cue 表 |
 | `video` | 通过 `ffmpeg` 程序（需带 `libx264`，不随导出器分发）把 CRI USM 文件转换为 H.264 与 AAC 的 MP4 |
 | `model` | 预制体层级、网格、蒙皮与材质，转换为 glTF |
 | `animation` | `AnimationClip`，转换为曲线文档；绑定关系允许时同时转换为 glTF 动画 |

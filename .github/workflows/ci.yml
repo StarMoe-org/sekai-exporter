@@ -63,6 +63,12 @@ jobs:
       - run: node tools/wasm-runner/run.mjs wasm-package crates/sekai-unity/tests/fixtures/lz4 wasm
       - run: python3 tools/compare-storage/determinism.py native/store wasm/store --skip-publication
       - run: diff native/assets.tsv wasm/assets.tsv
+      - run: |
+          for variant in uncompressed lz4 lzma; do
+            cargo run --release -p sekai-exporter -- objects crates/sekai-unity/tests/fixtures/$variant native-objects/$variant
+            node tools/wasm-runner/objects.mjs wasm-package crates/sekai-unity/tests/fixtures/$variant wasm-objects/$variant
+          done
+          diff -r native-objects wasm-objects
 
   unitypy:
     runs-on: ubuntu-latest

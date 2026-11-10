@@ -3,7 +3,8 @@
 //!
 //! [`run`] evaluates bundles given as bytes, in memory, one bundle after another, and hands the
 //! files of each bundle's assets over once they are written. On `wasm32` it is exported to
-//! JavaScript as `evaluate`.
+//! JavaScript as `evaluate`. [`objects`] writes the object document of every bundle, as the
+//! `objects` command of the native program does; it is exported as `objects`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -14,8 +15,10 @@ use sekai_catalog::{Key, MemoryDerivations, MemoryStore, NoBundleIndexes};
 use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::NoRecorder;
+use sekai_pipeline::objects::{self as documents, Source};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, Options, Output};
+use sekai_unity::document::Payloads;
 use sekai_unity::{BoundedBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
@@ -84,17 +87,12 @@ impl Inputs for Memory {
     }
 }
 
-/// Evaluates every asset of `bundles`, given as (name, bytes), with the dependencies their files
-/// name. `on_file` receives the files of the assets of each bundle, which are then released, and
-/// `on_asset` each asset at the end, in name order.
-pub fn run(
-    bundles: Vec<(String, Vec<u8>)>,
-    on_file: &mut dyn FnMut(&Key, &[u8]) -> io::Result<()>,
-    on_asset: &mut dyn FnMut(&Output) -> io::Result<()>,
-) -> io::Result<Report> {
+/// Deobfuscates `bundles`, given as (name, bytes), into the inputs of a run. A bundle that cannot
+/// be deobfuscated is left out and returned as (name, `"obfuscation"`).
+fn memory(bundles: Vec<(String, Vec<u8>)>) -> (Memory, Vec<Entry>, Vec<(String, String)>) {
     let mut manifest = Vec::with_capacity(bundles.len());
     let mut memory = BTreeMap::new();
-    let mut report = Report::default();
+    let mut failed = Vec::new();
     for (name, mut bytes) in bundles {
         match deobfuscate(&mut bytes) {
             Ok(()) => {
@@ -106,10 +104,25 @@ pub fn run(
                 let sha256 = Sha256::digest(&bytes).into();
                 memory.insert(name, (Arc::<[u8]>::from(bytes), sha256));
             }
-            Err(_) => report.bundle_errors.push((name, "obfuscation".to_owned())),
+            Err(_) => failed.push((name, "obfuscation".to_owned())),
         }
     }
-    let inputs = Memory(memory);
+    (Memory(memory), manifest, failed)
+}
+
+/// Evaluates every asset of `bundles`, given as (name, bytes), with the dependencies their files
+/// name. `on_file` receives the files of the assets of each bundle, which are then released, and
+/// `on_asset` each asset at the end, in name order.
+pub fn run(
+    bundles: Vec<(String, Vec<u8>)>,
+    on_file: &mut dyn FnMut(&Key, &[u8]) -> io::Result<()>,
+    on_asset: &mut dyn FnMut(&Output) -> io::Result<()>,
+) -> io::Result<Report> {
+    let (inputs, mut manifest, bundle_errors) = memory(bundles);
+    let mut report = Report {
+        bundle_errors,
+        ..Report::default()
+    };
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     stream::with_dependencies(&mut manifest, &inputs, &cache, &NoBundleIndexes, 1)?;
     let converters = converters();
@@ -153,6 +166,51 @@ pub fn run(
         }
     }
     Ok(report)
+}
+
+/// Payloads too large to inline, by their SHA-256.
+#[derive(Default)]
+struct MemoryPayloads(BTreeMap<[u8; 32], Vec<u8>>);
+
+impl Payloads for MemoryPayloads {
+    fn store(&mut self, sha256: &[u8; 32], bytes: &[u8]) -> sekai_unity::Result<()> {
+        self.0.entry(*sha256).or_insert_with(|| bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// Writes the object document of every bundle of `bundles`, given as (name, bytes), with the
+/// files and paths of the native `objects` command: `on_file` receives `<bundle>/_objects.json`
+/// for each bundle in name order, then `_payloads/<aa>/<sha256>.bin` for each payload too large
+/// to inline, in hash order. Returns the bundles that could not be read or written, as (name,
+/// reason).
+pub fn objects(
+    bundles: Vec<(String, Vec<u8>)>,
+    on_file: &mut dyn FnMut(&str, &[u8]) -> io::Result<()>,
+) -> io::Result<Vec<(String, String)>> {
+    let (inputs, manifest, mut failed) = memory(bundles);
+    let names: Vec<String> = manifest.into_iter().map(|entry| entry.name).collect();
+    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+    let source = Source {
+        inputs: &inputs,
+        classes: &NoClasses,
+        cache: &cache,
+    };
+    let indexed = documents::index(&source, &names, 1);
+    failed.extend(indexed.failed.iter().cloned());
+    let mut payloads = MemoryPayloads::default();
+    for (b, bundle) in indexed.version.bundles().iter().enumerate() {
+        match documents::document(&source, &indexed.version, b, &mut payloads) {
+            Ok(document) => on_file(&format!("{}/_objects.json", bundle.name), &document)?,
+            Err(e) => failed.push((bundle.name.clone(), e)),
+        }
+    }
+    for (sha256, bytes) in &payloads.0 {
+        let hex: String = sha256.iter().map(|b| format!("{b:02x}")).collect();
+        on_file(&format!("_payloads/{}/{hex}.bin", &hex[..2]), bytes)?;
+    }
+    failed.sort();
+    Ok(failed)
 }
 
 /// One row of the list of assets: name, form, document and error code, separated by tabs.
@@ -210,5 +268,32 @@ pub mod javascript {
             },
         )?;
         Ok(report.to_string())
+    }
+
+    /// Writes the object documents of bundles given as parallel lists of names and bytes.
+    /// `on_file(path, bytes)` receives each file, at the path the native `objects` command
+    /// writes it to. Returns the bundles that failed, one `<name>\t<reason>` line each.
+    #[wasm_bindgen]
+    pub fn objects(
+        names: Vec<String>,
+        bundles: Vec<Uint8Array>,
+        on_file: &Function,
+    ) -> Result<String, JsError> {
+        let bundles = names
+            .into_iter()
+            .zip(bundles.iter().map(Uint8Array::to_vec))
+            .collect();
+        let errors = super::objects(bundles, &mut |path, bytes| {
+            let path = JsValue::from(path);
+            let bytes = JsValue::from(Uint8Array::from(bytes));
+            on_file
+                .call2(&JsValue::NULL, &path, &bytes)
+                .map(drop)
+                .map_err(failed)
+        })?;
+        Ok(errors
+            .iter()
+            .map(|(name, reason)| format!("{name}\t{reason}\n"))
+            .collect())
     }
 }

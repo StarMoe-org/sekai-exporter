@@ -19,3 +19,15 @@ node tools/wasm-runner/run.mjs wasm-package <输入目录> <输出目录>
 sekai-exporter export <输入目录> <原生输出>
 python tools/compare-storage/determinism.py <原生输出>/store <输出目录>/store
 ```
+
+## 对象文档
+
+`objects.mjs` 用同一个核心写出目录中每个资源包的对象文档，路径与 `sekai-exporter objects` 相同：`<资源包>/_objects.json`，以及每个超出内联上限的载荷 `_payloads/<aa>/<sha256>.bin`。两者的输出逐字节相同。
+
+```bash
+sekai-exporter objects <输入目录> <原生输出>
+node tools/wasm-runner/objects.mjs wasm-package <输入目录> <输出目录>
+diff -r <原生输出> <输出目录>
+```
+
+程序列出无法读取或写出的资源包，此时以状态 1 退出。

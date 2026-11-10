@@ -35,6 +35,8 @@ pub fn path_in_bundle<'a>(bundle: &str, logical: &'a str) -> Cow<'a, str> {
 pub struct Candidate<'a> {
     /// The logical path of the root.
     pub logical: &'a str,
+    /// The asset form.
+    pub form: &'a str,
     /// The class ID of the root.
     pub class_id: i32,
     /// The class name of the root.
@@ -56,7 +58,7 @@ impl Candidate<'_> {
 }
 
 /// The name of each candidate, in the order of `candidates`. `None` marks a candidate that
-/// cannot be told apart from another one: same logical path, class and path ID.
+/// cannot be told apart from another one: same logical path, class, path ID and form.
 pub fn assign(candidates: &[Candidate<'_>]) -> Vec<Option<String>> {
     let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, candidate) in candidates.iter().enumerate() {
@@ -66,7 +68,7 @@ pub fn assign(candidates: &[Candidate<'_>]) -> Vec<Option<String>> {
     for (logical, mut members) in groups {
         members.sort_by_key(|&i| {
             let c = &candidates[i];
-            (c.rank(), c.bundle, c.path_id)
+            (c.rank(), c.bundle, c.path_id, c.form)
         });
         let classes = members.chunk_by(|&a, &b| candidates[a].rank() == candidates[b].rank());
         for (position, class) in classes.enumerate() {
@@ -75,20 +77,34 @@ pub fn assign(candidates: &[Candidate<'_>]) -> Vec<Option<String>> {
             } else {
                 format!("{logical}@{}", candidates[class[0]].class)
             };
-            let mut uses: HashMap<i64, u32> = HashMap::new();
+            let mut uses: HashMap<(i64, &str), u32> = HashMap::new();
             for &i in class {
-                *uses.entry(candidates[i].path_id).or_default() += 1;
+                *uses
+                    .entry((candidates[i].path_id, candidates[i].form))
+                    .or_default() += 1;
             }
-            for (order, &i) in class.iter().enumerate() {
-                let path_id = candidates[i].path_id;
-                if uses[&path_id] > 1 {
-                    continue;
-                }
-                names[i] = Some(if order == 0 {
+            let objects = class.chunk_by(|&a, &b| {
+                let (ca, cb) = (&candidates[a], &candidates[b]);
+                (ca.bundle, ca.path_id) == (cb.bundle, cb.path_id)
+            });
+            for (order, object) in objects.enumerate() {
+                let path_id = candidates[object[0]].path_id;
+                let with_id = if order == 0 {
                     base.clone()
                 } else {
                     format!("{base}@{path_id}")
-                });
+                };
+                for (form_order, &i) in object.iter().enumerate() {
+                    let form = candidates[i].form;
+                    if uses[&(path_id, form)] > 1 {
+                        continue;
+                    }
+                    names[i] = Some(if form_order == 0 {
+                        with_id.clone()
+                    } else {
+                        format!("{with_id}@{form}")
+                    });
+                }
             }
         }
     }
@@ -107,6 +123,7 @@ mod tests {
         };
         Candidate {
             logical,
+            form: "form",
             class_id,
             class,
             bundle: "b",
@@ -186,5 +203,14 @@ mod tests {
         let b = candidate("x", "Sprite", 2);
         assert_eq!(names(&[a, b]), [Some("x"), Some("x@2")]);
         assert_eq!(names(&[b, a]), [Some("x@2"), Some("x")]);
+    }
+
+    #[test]
+    fn distinct_forms_on_one_root_take_the_form_name() {
+        let mut beta = candidate("a", "GameObject", 5);
+        beta.form = "beta";
+        let mut alpha = candidate("a", "GameObject", 5);
+        alpha.form = "alpha";
+        assert_eq!(names(&[beta, alpha]), [Some("a@beta"), Some("a")]);
     }
 }

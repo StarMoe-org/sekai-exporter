@@ -569,8 +569,22 @@ fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Err
 /// The converters that build assets from game data tables.
 fn table_converters() -> Vec<Box<dyn TableConverter>> {
     let mut converters = episode_converters();
+    converters.extend(costume_converters());
     converters.extend(mysekai_converters());
     converters
+}
+
+#[cfg(feature = "costume")]
+fn costume_converters() -> Vec<Box<dyn TableConverter>> {
+    vec![
+        Box::new(sekai_moesekai::costume::CostumeRoles),
+        Box::new(sekai_moesekai::costume::Costumes),
+    ]
+}
+
+#[cfg(not(feature = "costume"))]
+fn costume_converters() -> Vec<Box<dyn TableConverter>> {
+    Vec::new()
 }
 
 #[cfg(feature = "episode")]

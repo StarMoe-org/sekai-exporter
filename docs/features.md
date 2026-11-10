@@ -41,7 +41,7 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 | `virtual-live` | The [scripts](spec/virtual-live-script.md) of virtual lives |
 | `costume` | Costume parts, motions and combinations for 3D viewing, in the [costume forms](spec/costume.md) |
 
-`costume` produces the `costume-model` and `costume-motion` forms; the combination of parts and motions that makes up each costume is not produced yet.
+`costume` produces the `costume-model` and `costume-motion` forms, and from the game data tables the `costume-role` form, one per character and unit with every part it can wear, and the `costume` form, the looks of each costume.
 
 The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
 

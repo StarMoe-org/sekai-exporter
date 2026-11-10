@@ -7,6 +7,7 @@ pub mod asset;
 pub mod audio;
 pub mod clip;
 pub mod components;
+pub mod costume;
 pub mod episode;
 pub mod gltf;
 pub mod identity;

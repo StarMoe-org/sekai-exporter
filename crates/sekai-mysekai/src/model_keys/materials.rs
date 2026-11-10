@@ -1,4 +1,4 @@
-//! The keys a material of a piece adds to its extras: the default texture of each property its
+//! The keys a MySekai model adds to the extras of a material: the default texture of each property its
 //! shader declares, and the passes of that shader with their render state.
 
 use std::collections::BTreeMap;
@@ -10,8 +10,8 @@ use serde_json::Value as Json;
 use crate::scripts::malformed;
 use crate::stored::field;
 
-/// The keys of the materials of a piece.
-pub(super) struct ShaderKeys;
+/// The keys of the materials of a MySekai model.
+pub(crate) struct ShaderKeys;
 
 impl MaterialKeys for ShaderKeys {
     fn keys(

@@ -5,8 +5,8 @@ use sekai_convert::model::{Node, Prefab};
 use sekai_convert::{Context, ConvertError, Object, ObjectId, Value};
 use serde_json::{Value as Json, json};
 
-use super::nodes::{FIXTURE_VIEW, source_object};
-use super::scripts::is_script;
+use super::nodes::FIXTURE_VIEW;
+use crate::model_keys::{is_script, source_object};
 use crate::scripts::malformed;
 use crate::stored::{array, field};
 

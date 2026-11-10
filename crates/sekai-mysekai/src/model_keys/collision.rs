@@ -1,5 +1,5 @@
-//! The collision of a piece: the collision meshes its colliders use, and the record of each game
-//! object that carries a collider or a navigation component.
+//! The collision of the game objects of one or more prefabs: the collision meshes their colliders
+//! use, and the record of each game object that carries a collider or a navigation component.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -37,33 +37,59 @@ const SHAPE_KEYS: [&str; 9] = [
     "direction",
 ];
 
-/// The collision of a piece.
+/// What the mesh of a mesh collider must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ColliderMeshes {
+    /// A mesh of a bundle: a collider without a mesh is `malformed`, and one with a mesh of the
+    /// engine's own resources is the error of the missing object.
+    Required,
+    /// Whatever the collider stores. A collider without a mesh, or with a mesh of the engine's
+    /// own resources, has a record whose `mesh` and `geometryId` are `null`, and every mesh
+    /// collider has the key `engineMesh`: the engine's mesh, or `null`.
+    AsAuthored,
+}
+
+/// The collision of the game objects of one or more prefabs.
 #[derive(Debug)]
-pub(super) struct Collision {
+pub(crate) struct Collision {
     /// The geometry of each collision mesh, by geometry id.
     geometry: BTreeMap<String, Json>,
     /// The record of each game object that has one.
     records: BTreeMap<ObjectId, Json>,
+    meshes: ColliderMeshes,
 }
 
 impl Collision {
-    /// Reads the collision of every game object of `prefab`.
-    pub(super) fn read(prefab: &Prefab, cx: &dyn Context) -> Result<Self, ConvertError> {
-        let mut collision = Self {
+    /// No collision yet, with the meshes of mesh colliders taken as `meshes` says.
+    pub(crate) fn new(meshes: ColliderMeshes) -> Self {
+        Self {
             geometry: BTreeMap::new(),
             records: BTreeMap::new(),
-        };
-        collision.walk(prefab.nodes(), 0, true, cx)?;
+            meshes,
+        }
+    }
+
+    /// Reads the collision of every game object of `prefab`, in which every mesh collider has a
+    /// mesh.
+    pub(crate) fn read(prefab: &Prefab, cx: &dyn Context) -> Result<Self, ConvertError> {
+        let mut collision = Self::new(ColliderMeshes::Required);
+        collision.add(prefab, cx)?;
         Ok(collision)
     }
 
+    /// Adds the collision of every game object of `prefab`. A collision mesh that a game object
+    /// read before already uses is not added again.
+    pub(crate) fn add(&mut self, prefab: &Prefab, cx: &dyn Context) -> Result<(), ConvertError> {
+        self.walk(prefab.nodes(), 0, true, cx)
+    }
+
     /// The record of the game object `game_object`, when it has one.
-    pub(super) fn record(&self, game_object: ObjectId) -> Option<&Json> {
+    pub(crate) fn record(&self, game_object: ObjectId) -> Option<&Json> {
         self.records.get(&game_object)
     }
 
     /// The collision document: the geometry of every collision mesh, in order of geometry id.
-    pub(super) fn document(&self) -> Json {
+    pub(crate) fn document(&self) -> Json {
         json!({ "geometry": self.geometry.values().collect::<Vec<_>>() })
     }
 
@@ -124,7 +150,6 @@ impl Collision {
             "activeSelf": node.active(),
             "activeInHierarchy": active_in_hierarchy,
             "authoredLayer": stored_code(field(&game_object.fields, "m_Layer")?, "m_Layer")?,
-            "fixtureNavLayer": true,
             "colliders": found.colliders,
             "geometryIds": geometry_ids,
             "modifiers": found.modifiers,
@@ -194,9 +219,36 @@ impl Collision {
         let stored = field(fields, "m_Mesh")?
             .as_pptr()
             .ok_or_else(|| malformed("m_Mesh is not a reference"))?;
-        let mesh = cx
-            .resolve(component.id, stored)?
-            .ok_or_else(|| malformed("a mesh collider has no mesh"))?;
+        let cooking = (
+            "cookingOptions".to_owned(),
+            json!(stored_code(
+                field(fields, "m_CookingOptions")?,
+                "m_CookingOptions"
+            )?),
+        );
+        let convex = ("convex".to_owned(), json!(is_set(fields, "m_Convex")?));
+        let as_authored = self.meshes == ColliderMeshes::AsAuthored;
+        let unresolved = |engine_mesh: Json| {
+            Map::from_iter([
+                convex.clone(),
+                cooking.clone(),
+                ("mesh".to_owned(), Json::Null),
+                ("geometryId".to_owned(), Json::Null),
+                ("engineMesh".to_owned(), engine_mesh),
+            ])
+        };
+        if as_authored && let Some(engine) = cx.engine_object(component.id, stored)? {
+            let file = engine.file;
+            let path_id = engine.path_id.to_string();
+            return Ok(unresolved(json!({ "file": file, "pathId": path_id })));
+        }
+        let Some(mesh) = cx.resolve(component.id, stored)? else {
+            return if as_authored {
+                Ok(unresolved(Json::Null))
+            } else {
+                Err(malformed("a mesh collider has no mesh"))
+            };
+        };
         if cx.object(mesh)?.class_id != MESH {
             return Err(malformed("the mesh of a mesh collider is not a Mesh"));
         }
@@ -205,21 +257,19 @@ impl Collision {
             let geometry = geometry(&geometry_id, mesh, cx)?;
             self.geometry.insert(geometry_id.clone(), geometry);
         }
-        Ok(Map::from_iter([
-            ("convex".to_owned(), json!(is_set(fields, "m_Convex")?)),
-            (
-                "cookingOptions".to_owned(),
-                json!(stored_code(
-                    field(fields, "m_CookingOptions")?,
-                    "m_CookingOptions"
-                )?),
-            ),
+        let mut keys = Map::from_iter([
+            convex,
+            cooking,
             (
                 "mesh".to_owned(),
                 json!({ "fileId": stored.file_id, "pathId": stored.path_id.to_string() }),
             ),
             ("geometryId".to_owned(), json!(geometry_id)),
-        ]))
+        ]);
+        if as_authored {
+            keys.insert("engineMesh".to_owned(), Json::Null);
+        }
+        Ok(keys)
     }
 }
 

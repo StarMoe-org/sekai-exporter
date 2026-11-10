@@ -101,6 +101,7 @@ fn mysekai_objects() -> Vec<Box<dyn Converter>> {
         Box::new(sekai_mysekai::fixture_areas::FixtureMeta),
         Box::new(sekai_mysekai::fixture_model::FixtureModel),
         Box::new(sekai_mysekai::fixture_reactions::FixtureReactions),
+        Box::new(sekai_mysekai::site_model::SiteModel),
     ]
 }
 
@@ -108,7 +109,7 @@ fn mysekai_objects() -> Vec<Box<dyn Converter>> {
 fn mysekai_objects() -> Vec<Box<dyn Converter>> {
     use sekai_convert::roots::{
         Absent, emoticon, facial_table, field_camera, fixture_meta, fixture_model,
-        fixture_reactions,
+        fixture_reactions, site_model,
     };
     vec![
         Absent::boxed("emoticon", emoticon),
@@ -117,6 +118,7 @@ fn mysekai_objects() -> Vec<Box<dyn Converter>> {
         Absent::boxed("fixture-meta", fixture_meta),
         Absent::boxed("fixture-model", fixture_model),
         Absent::boxed("fixture-reactions", fixture_reactions),
+        Absent::boxed("site-model", site_model),
     ]
 }
 

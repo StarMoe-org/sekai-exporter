@@ -6,10 +6,7 @@
 //! document beside it. The form is specified in `docs/spec/fixture-model.md`.
 
 mod attach;
-mod collision;
-mod materials;
 mod nodes;
-mod scripts;
 
 use sekai_convert::Converter;
 use sekai_convert::model::{ModelConfig, Prefab, model_file};
@@ -18,8 +15,7 @@ use sekai_convert::{
     Asset, Content, Context, ConvertError, Cost, CostClass, Member, ObjectId, ObjectIndex,
 };
 
-use collision::Collision;
-use materials::ShaderKeys;
+use crate::model_keys::{Collision, ShaderKeys};
 use nodes::PieceNodes;
 
 /// The converting of a piece, estimated from its textures: a few images of up to 2048 × 2048 with

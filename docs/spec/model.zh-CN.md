@@ -21,7 +21,7 @@ Moesekai 的 3D 服装查看器，通过 three.js 及其 glTF 加载器实现。
 
 资产形式可以把多个预制体写进同一个文件，例如一个地点的各个场景。这时每个预制体是一个独立的场景，以其根游戏对象的名称命名，按资产形式给出的顺序排列；先显示哪个场景（`scene`）由资产形式选定。每个预制体的节点排在之前各预制体的节点之后，其渲染器只绑定同一预制体的骨骼。网格、材质、贴图与图像在各场景之间共用。只有一个预制体的文件只有一个场景，场景没有名称。
 
-游戏对象未激活的节点，其 `extras.active` 设为 `false`。渲染器被禁用的节点，其 `extras.enabled` 设为 `false`。`m_RootBone` 为模型节点的蒙皮，把该节点放入 `extras.rootBone`。
+游戏对象未激活的节点，其 `extras.active` 设为 `false`。渲染器被禁用的节点，其 `extras.enabled` 设为 `false`。`m_RootBone` 为模型节点的蒙皮，把该节点放入 `extras.rootBone`。渲染器的网格若是引擎自带资源（`Library/unity default resources` 或 `Resources/unity_builtin_extra`）中的对象，例如引擎的四边形，任何资源包都不含它，则文件中不绘制网格，其节点带 `extras.engineMesh`：`{ "file": <该文件>, "pathId": "<十进制 path id>" }`。
 
 网格为每个骨骼槽位保存一个绑定姿势，顶点的权重作用于各槽位。当网格为每个槽位保存骨骼名称哈希（`m_BoneNameHashes`）时，该哈希为骨骼在预制体根之下的路径的 CRC-32，写法与[组件文档](component-documents.zh-CN.md)书写节点路径的方式相同。每个槽位绑定到模型的一个节点：
 

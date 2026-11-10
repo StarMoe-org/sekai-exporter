@@ -45,7 +45,7 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 
 The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
 
-In `sekai-mysekai`: `mysekai`, which produces MySekai forms in the full form a game-reproducing runtime needs: [furniture models](spec/fixture-model.md), furniture and site documents, character actions and talks, and the field camera, each with a page among the [specifications](spec/README.md). A build without it reports the roots of its object forms with `not_compiled`.
+In `sekai-mysekai`: `mysekai`, which produces MySekai forms in the full form a game-reproducing runtime needs: [furniture models](spec/fixture-model.md) and [site models](spec/site-model.md), furniture and site documents, character actions and talks, and the field camera, each with a page among the [specifications](spec/README.md). A build without it reports the roots of its object forms with `not_compiled`.
 
 ## Backends
 

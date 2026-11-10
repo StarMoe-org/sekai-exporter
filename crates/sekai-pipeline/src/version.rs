@@ -5,7 +5,7 @@ use std::io;
 use std::sync::{Arc, Mutex};
 
 use sekai_catalog::{BundleIndexes, NoBundleIndexes};
-use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr};
+use sekai_convert::{Chunk, Context, ConvertError, EngineObject, Object, ObjectId, PPtr};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
@@ -525,7 +525,33 @@ impl Context for Version<'_> {
             .map(|file| file.path.as_str())
             .ok_or_else(|| self.missing(from))
     }
+
+    fn engine_object(
+        &self,
+        from: ObjectId,
+        reference: PPtr,
+    ) -> Result<Option<EngineObject>, ConvertError> {
+        Ok(match self.index.resolve(from, reference)? {
+            Resolved::Missing { external, path_id }
+                if ENGINE_FILES
+                    .iter()
+                    .any(|file| file.eq_ignore_ascii_case(external)) =>
+            {
+                Some(EngineObject {
+                    file: external.to_owned(),
+                    path_id,
+                })
+            }
+            _ => None,
+        })
+    }
 }
+
+/// The files of the engine's own resources, which the player holds and no bundle does.
+const ENGINE_FILES: &[&str] = &[
+    "Library/unity default resources",
+    "Resources/unity_builtin_extra",
+];
 
 #[cfg(test)]
 mod tests {

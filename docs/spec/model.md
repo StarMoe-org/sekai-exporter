@@ -21,7 +21,7 @@ The file holds:
 
 A form may write several prefabs into one file, such as the scenes of a place. Each prefab is then a scene of its own, named after its root's game object, in the order the form gives, and the form chooses the scene shown first (`scene`). The nodes of each prefab follow those of the prefabs before it, and its renderers bind to bones of the same prefab only. Meshes, materials, textures and images are shared between the scenes. A file of one prefab has one scene without a name.
 
-A node whose game object is inactive has `extras.active` set to `false`. A node whose renderer is disabled has `extras.enabled` set to `false`. A skin whose `m_RootBone` is a node of the model has that node in `extras.rootBone`.
+A node whose game object is inactive has `extras.active` set to `false`. A node whose renderer is disabled has `extras.enabled` set to `false`. A skin whose `m_RootBone` is a node of the model has that node in `extras.rootBone`. A renderer whose mesh is an object of the engine's own resources (`Library/unity default resources` or `Resources/unity_builtin_extra`), such as its quad, which no bundle holds, draws no mesh in the file, and its node has `extras.engineMesh`: `{ "file": <that file>, "pathId": "<decimal path id>" }`.
 
 A mesh has one bind pose for each bone slot, and its vertices weigh on slots. When the mesh stores a bone name hash for each slot (`m_BoneNameHashes`), the hash is the CRC-32 of the bone's path below the prefab root, written as [component documents](component-documents.md) write node paths. Each slot binds to a node of the model:
 

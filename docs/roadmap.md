@@ -110,7 +110,8 @@ This page lists every part of the exporter with its state, so that anyone can se
 | Furniture gimmicks | Planned | The moving and interactive parts of furniture |
 | Character models | Planned | Built on the model file writer shared with costumes and furniture |
 | Motion library | Planned | The character motions a runtime plays, with an index |
-| Site models | Planned | The housing site and its time constants |
+| `site-model`: the packages of the places, every prefab a scene, with materials and colliders | Done | [Site models](spec/site-model.md) |
+| Site placement and settings: where each field stands, its levels and layouts, from the game data tables | Planned | Joins the `mysekaiSite*` tables |
 | Weather and effects | Planned | Builds on the particle decoding of `emoticons` |
 | Timelines and actor animations | Planned | Needs character models and furniture |
 | UI layouts | Open | Needs `MonoBehaviour` fields from the client package; the form is not decided |

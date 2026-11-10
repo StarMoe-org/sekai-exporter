@@ -143,6 +143,10 @@ pub trait Context {
     /// in container order. Converters use it to find objects that belong together only by name,
     /// such as the wave bank of a cue sheet or the later segments of a video.
     fn container(&self, from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError>;
+
+    /// The name of the serialized file that holds object `from`, such as `CAB-0123456789abcdef`,
+    /// as the directory of its bundle stores it.
+    fn file_name(&self, from: ObjectId) -> Result<&str, ConvertError>;
 }
 
 /// An object as a converter sees it.

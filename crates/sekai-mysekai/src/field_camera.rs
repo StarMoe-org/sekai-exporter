@@ -184,6 +184,10 @@ mod tests {
         fn container(&self, _from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
             Ok(Vec::new())
         }
+
+        fn file_name(&self, _from: ObjectId) -> Result<&str, ConvertError> {
+            Ok("CAB-test")
+        }
     }
 
     fn key() -> Value {

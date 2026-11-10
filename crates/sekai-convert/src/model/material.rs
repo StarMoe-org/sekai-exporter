@@ -7,7 +7,9 @@ use sekai_format::gltf::{
     TextureInfo, TextureInfoExtensions, TextureProperty, TextureTransform, UnityMaterial,
 };
 use sekai_format::number::Number;
+use serde_json::Value as Json;
 
+use super::config::{MaterialKeys, ModelConfig};
 use super::read::{
     array, components, count, field, integer, malformed, pairs, reference, string, unsupported,
 };
@@ -87,6 +89,7 @@ impl Materials {
     pub(super) fn material(
         &mut self,
         id: ObjectId,
+        config: &ModelConfig<'_>,
         cx: &dyn Context,
     ) -> Result<usize, ConvertError> {
         if let Some(&known) = self.by_object.get(&id) {
@@ -142,7 +145,7 @@ impl Materials {
             colors: properties(saved, "m_Colors", |v| {
                 Ok(components(v, ["r", "g", "b", "a"])?.map(Number))
             })?,
-            further: BTreeMap::new(),
+            further: further_keys(id, config.material_keys, cx)?,
         };
         self.materials.push(gltf::Material {
             name: string(fields, "m_Name")?.to_owned(),
@@ -247,6 +250,36 @@ impl Materials {
             });
         }
         members
+    }
+}
+
+/// The keys of a material's extras that say what the material stores.
+const STORED_KEYS: [&str; 7] = [
+    "shader",
+    "renderQueue",
+    "keywords",
+    "textures",
+    "floats",
+    "ints",
+    "colors",
+];
+
+/// The keys the form adds to the extras of the material `id`, which may not reuse the name of a
+/// key that says what the material stores.
+fn further_keys(
+    id: ObjectId,
+    keys: Option<&dyn MaterialKeys>,
+    cx: &dyn Context,
+) -> Result<BTreeMap<String, Json>, ConvertError> {
+    let Some(keys) = keys else {
+        return Ok(BTreeMap::new());
+    };
+    let keys = keys.keys(id, cx)?;
+    match keys.keys().find(|key| STORED_KEYS.contains(&key.as_str())) {
+        Some(key) => Err(malformed(format!(
+            "a form's material key reuses the name {key}"
+        ))),
+        None => Ok(keys),
     }
 }
 

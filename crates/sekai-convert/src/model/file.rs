@@ -301,7 +301,7 @@ impl Builder<'_> {
                 .as_pptr()
                 .ok_or_else(|| malformed("a material is not a reference"))?;
             materials.push(match self.cx.resolve(renderer.object.id, material)? {
-                Some(material) => Some(self.materials.material(material, self.cx)?),
+                Some(material) => Some(self.materials.material(material, self.config, self.cx)?),
                 None => None,
             });
         }

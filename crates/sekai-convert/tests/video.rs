@@ -47,6 +47,10 @@ impl Context for Bundle {
             .map(|(i, (path, _))| (path.clone(), id(i as i64)))
             .collect())
     }
+
+    fn file_name(&self, _: ObjectId) -> Result<&str, ConvertError> {
+        Ok("CAB-test")
+    }
 }
 
 /// An `@UTF` table with one row of 32-bit columns.

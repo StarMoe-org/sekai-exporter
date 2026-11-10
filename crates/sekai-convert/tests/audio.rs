@@ -59,6 +59,10 @@ impl Context for Bundle {
     fn container(&self, _: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         Ok(vec![("assets/se.acb.bytes".into(), ROOT)])
     }
+
+    fn file_name(&self, _: ObjectId) -> Result<&str, ConvertError> {
+        Ok("CAB-test")
+    }
 }
 
 enum Cell {

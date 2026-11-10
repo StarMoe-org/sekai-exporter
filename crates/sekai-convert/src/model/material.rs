@@ -142,6 +142,7 @@ impl Materials {
             colors: properties(saved, "m_Colors", |v| {
                 Ok(components(v, ["r", "g", "b", "a"])?.map(Number))
             })?,
+            further: BTreeMap::new(),
         };
         self.materials.push(gltf::Material {
             name: string(fields, "m_Name")?.to_owned(),
@@ -217,12 +218,13 @@ impl Materials {
         Ok(Some(name))
     }
 
-    /// Moves the materials, textures, samplers and images into `document`, and returns the
-    /// images as members `texture/<n>`.
-    pub(super) fn finish(self, document: &mut gltf::Document) -> Vec<Member> {
+    /// Moves the materials, textures, samplers and images into `document`, writing the image of
+    /// each texture through [`EXT_TEXTURE_WEBP`](gltf::EXT_TEXTURE_WEBP) when `declare_webp` is
+    /// set, and returns the images as members `texture/<n>`.
+    pub(super) fn finish(self, declare_webp: bool, document: &mut gltf::Document) -> Vec<Member> {
         document.materials = self.materials;
         document.samplers = self.samplers;
-        if !self.textures.is_empty() {
+        if declare_webp && !self.textures.is_empty() {
             document.extensions_used.push(gltf::EXT_TEXTURE_WEBP);
             document.extensions_required.push(gltf::EXT_TEXTURE_WEBP);
         }
@@ -232,12 +234,9 @@ impl Materials {
         let mut members = Vec::with_capacity(self.textures.len());
         for (index, image) in self.textures.into_iter().enumerate() {
             let role = format!("texture/{index}");
-            document.textures.push(gltf::Texture {
-                sampler: image.sampler,
-                extensions: TextureExtensions {
-                    webp: ImageSource { source: index },
-                },
-            });
+            document
+                .textures
+                .push(texture(index, image.sampler, declare_webp));
             document.images.push(gltf::Image {
                 name: image.name,
                 uri: format!("{role}.webp"),
@@ -248,6 +247,24 @@ impl Materials {
             });
         }
         members
+    }
+}
+
+/// The texture of the image `index` of a file: through [`EXT_TEXTURE_WEBP`](gltf::EXT_TEXTURE_WEBP)
+/// when `declare_webp` is set, and naming the image directly otherwise.
+fn texture(index: usize, sampler: usize, declare_webp: bool) -> gltf::Texture {
+    if declare_webp {
+        let webp = ImageSource { source: index };
+        return gltf::Texture {
+            sampler,
+            extensions: Some(TextureExtensions { webp }),
+            source: None,
+        };
+    }
+    gltf::Texture {
+        sampler,
+        extensions: None,
+        source: Some(index),
     }
 }
 

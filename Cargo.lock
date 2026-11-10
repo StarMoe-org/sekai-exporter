@@ -841,6 +841,7 @@ dependencies = [
  "sekai-codec",
  "sekai-format",
  "sekai-unity",
+ "serde_json",
 ]
 
 [[package]]

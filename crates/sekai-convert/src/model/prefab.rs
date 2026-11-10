@@ -26,6 +26,8 @@ pub struct Prefab {
 /// A game object.
 #[derive(Debug, Clone)]
 pub(super) struct Node {
+    /// The game object.
+    pub(super) object: ObjectId,
     pub(super) name: String,
     /// The names from below the root down to it, joined by `/`.
     pub(super) path: String,
@@ -116,6 +118,7 @@ impl Prefab {
             self.by_component.insert(component.id, (node, position));
         }
         self.nodes.push(Node {
+            object: id,
             name,
             path: path.clone(),
             active: flag(fields, "m_IsActive")?,

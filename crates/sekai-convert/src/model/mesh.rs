@@ -309,7 +309,7 @@ fn colors(vertices: &Vertices<'_>) -> Result<Option<Colors>, ConvertError> {
     }
 }
 
-/// The texture coordinate sets, with `v` flipped because images are stored top row first.
+/// The texture coordinate sets, as stored.
 fn uvs(vertices: &Vertices<'_>) -> Result<Vec<Vec<[f32; 2]>>, ConvertError> {
     let mut sets = Vec::new();
     let mut ended = false;
@@ -321,7 +321,7 @@ fn uvs(vertices: &Vertices<'_>) -> Result<Vec<Vec<[f32; 2]>>, ConvertError> {
                     "a set of texture coordinates follows a missing set",
                 ));
             }
-            Some(set) => sets.push(set.into_iter().map(|[u, v]| [u, 1.0 - v]).collect()),
+            Some(set) => sets.push(set),
         }
     }
     Ok(sets)

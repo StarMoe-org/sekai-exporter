@@ -7,6 +7,7 @@
 //! components are listed.
 
 mod components;
+mod config;
 mod file;
 mod glb;
 mod material;
@@ -15,5 +16,6 @@ mod prefab;
 mod read;
 
 pub use components::component_document;
+pub use config::{ModelConfig, NodeKeys};
 pub use file::{ModelFile, model_file};
 pub use prefab::Prefab;

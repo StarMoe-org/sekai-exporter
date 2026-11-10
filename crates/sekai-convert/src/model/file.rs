@@ -8,6 +8,9 @@ use sekai_format::gltf::{
     TRIANGLES,
 };
 
+use serde_json::Value as Json;
+
+use super::config::ModelConfig;
 use super::glb::{self, Buffers};
 use super::material::Materials;
 use super::mesh::{self, Colors, Mesh};
@@ -29,8 +32,13 @@ pub struct ModelFile {
 }
 
 /// The model file of `prefab`, specified in `docs/spec/model.md`.
-pub fn model_file(prefab: &Prefab, cx: &dyn Context) -> Result<ModelFile, ConvertError> {
+pub fn model_file(
+    prefab: &Prefab,
+    config: &ModelConfig<'_>,
+    cx: &dyn Context,
+) -> Result<ModelFile, ConvertError> {
     let mut builder = Builder {
+        config,
         cx,
         buffers: Buffers::default(),
         materials: Materials::default(),
@@ -39,7 +47,11 @@ pub fn model_file(prefab: &Prefab, cx: &dyn Context) -> Result<ModelFile, Conver
         mesh_index: BTreeMap::new(),
         skins: Vec::new(),
     };
-    let mut nodes = prefab.nodes.iter().map(node).collect::<Vec<_>>();
+    let mut nodes = prefab
+        .nodes
+        .iter()
+        .map(|prefab_node| node(prefab_node, config, cx))
+        .collect::<Result<Vec<_>, _>>()?;
     for (index, prefab_node) in prefab.nodes.iter().enumerate() {
         if let Some(renderer) = Renderer::find(prefab_node, cx)? {
             builder.attach(&renderer, &mut nodes[index], prefab)?;
@@ -49,11 +61,22 @@ pub fn model_file(prefab: &Prefab, cx: &dyn Context) -> Result<ModelFile, Conver
 }
 
 /// The node of a game object, without its mesh.
-fn node(prefab_node: &Node) -> gltf::Node {
+fn node(
+    prefab_node: &Node,
+    config: &ModelConfig<'_>,
+    cx: &dyn Context,
+) -> Result<gltf::Node, ConvertError> {
     let t = prefab_node.transform;
     let [x, y, z] = t.position;
     let [qx, qy, qz, qw] = t.rotation;
-    gltf::Node {
+    let mut extras = match config.node_keys {
+        Some(source) => source.keys(prefab_node.object, cx)?,
+        None => BTreeMap::new(),
+    };
+    if !prefab_node.active {
+        extras.insert("active".to_owned(), Json::Bool(false));
+    }
+    Ok(gltf::Node {
         name: prefab_node.name.clone(),
         children: prefab_node.children.clone(),
         translation: [-x, y, z],
@@ -62,11 +85,8 @@ fn node(prefab_node: &Node) -> gltf::Node {
         mesh: None,
         skin: None,
         weights: Vec::new(),
-        extras: NodeExtras {
-            active: prefab_node.active,
-            enabled: true,
-        },
-    }
+        extras: NodeExtras(extras),
+    })
 }
 
 /// The renderer of a game object.
@@ -122,16 +142,18 @@ struct Geometry {
 /// skinned, the joint of each bone slot.
 type MeshKey = (ObjectId, Vec<Option<usize>>, Option<Vec<u16>>);
 
-/// The mesh `mesh` with its accessors, read when first used.
+/// The mesh `mesh` with its accessors, read when first used. `flip_uv` says whether its texture
+/// coordinates are written with `v` flipped.
 fn load<'g>(
     geometry: &'g mut BTreeMap<ObjectId, Geometry>,
     mesh: ObjectId,
+    flip_uv: bool,
     cx: &dyn Context,
     buffers: &mut Buffers,
 ) -> Result<&'g mut Geometry, ConvertError> {
     Ok(match geometry.entry(mesh) {
         Entry::Occupied(known) => known.into_mut(),
-        Entry::Vacant(slot) => slot.insert(Geometry::new(mesh::read(mesh, cx)?, buffers)?),
+        Entry::Vacant(slot) => slot.insert(Geometry::new(mesh::read(mesh, cx)?, flip_uv, buffers)?),
     })
 }
 
@@ -248,6 +270,7 @@ fn bone_node(
 }
 
 struct Builder<'a> {
+    config: &'a ModelConfig<'a>,
     cx: &'a dyn Context,
     buffers: Buffers,
     materials: Materials,
@@ -266,7 +289,9 @@ impl Builder<'_> {
         prefab: &Prefab,
     ) -> Result<(), ConvertError> {
         let fields = &renderer.object.fields;
-        node.extras.enabled = flag(fields, "m_Enabled")?;
+        if !flag(fields, "m_Enabled")? {
+            node.extras.insert("enabled", Json::Bool(false));
+        }
         let Some(mesh) = renderer.mesh else {
             return Ok(());
         };
@@ -280,7 +305,13 @@ impl Builder<'_> {
                 None => None,
             });
         }
-        let geometry = load(&mut self.geometry, mesh, self.cx, &mut self.buffers)?;
+        let geometry = load(
+            &mut self.geometry,
+            mesh,
+            self.config.flip_uv,
+            self.cx,
+            &mut self.buffers,
+        )?;
         let binding = if renderer.skinned {
             Some(Binding::new(
                 renderer.object,
@@ -317,7 +348,13 @@ impl Builder<'_> {
         if let Some(&known) = self.mesh_index.get(&key) {
             return Ok(known);
         }
-        let geometry = load(&mut self.geometry, mesh, self.cx, &mut self.buffers)?;
+        let geometry = load(
+            &mut self.geometry,
+            mesh,
+            self.config.flip_uv,
+            self.cx,
+            &mut self.buffers,
+        )?;
         let (_, materials, slot_joints) = &key;
         let mut attributes = geometry.attributes.clone();
         if let Some(slot_joints) = slot_joints {
@@ -401,7 +438,9 @@ impl Builder<'_> {
             buffer_views: Vec::new(),
             buffers: Vec::new(),
         };
-        let images = self.materials.finish(&mut document);
+        let images = self
+            .materials
+            .finish(self.config.declare_webp, &mut document);
         let bin = self.buffers.finish(&mut document);
         let json = document
             .to_bytes()
@@ -415,7 +454,7 @@ impl Builder<'_> {
 
 impl Geometry {
     /// Adds the vertex attributes, indices and morph targets of `mesh`.
-    fn new(mesh: Mesh, buffers: &mut Buffers) -> Result<Self, ConvertError> {
+    fn new(mesh: Mesh, flip_uv: bool, buffers: &mut Buffers) -> Result<Self, ConvertError> {
         if mesh.positions.is_empty() {
             return Err(unsupported("the mesh has no vertices"));
         }
@@ -441,9 +480,10 @@ impl Geometry {
             None => {}
         }
         for (set, uvs) in mesh.uvs.iter().enumerate() {
+            let uvs = written_uvs(uvs, flip_uv);
             attributes.insert(
                 format!("TEXCOORD_{set}"),
-                buffers.floats(uvs, vertex, false),
+                buffers.floats(&uvs, vertex, false),
             );
         }
         let indices = mesh
@@ -522,6 +562,16 @@ impl Geometry {
         let accessor = buffers.joints(&joints);
         self.joints.insert(slot_joints.to_vec(), accessor);
         Ok((accessor, weights))
+    }
+}
+
+/// Texture coordinates as written: with `v` flipped, for images stored top row first, when
+/// `flip_uv` is set, and as stored otherwise.
+fn written_uvs(uvs: &[[f32; 2]], flip_uv: bool) -> Vec<[f32; 2]> {
+    if flip_uv {
+        uvs.iter().map(|&[u, v]| [u, 1.0 - v]).collect()
+    } else {
+        uvs.to_vec()
     }
 }
 

@@ -4,7 +4,7 @@
 //! form, both specified in `docs/spec/costume.md`.
 
 use sekai_convert::animation::clip_document;
-use sekai_convert::model::{Prefab, component_document, model_file};
+use sekai_convert::model::{ModelConfig, Prefab, component_document, model_file};
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, Object, ObjectId,
     ObjectIndex,
@@ -54,7 +54,7 @@ impl Converter for CostumeModel {
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
         let prefab = Prefab::read(root, cx)?;
-        let model = model_file(&prefab, cx)?;
+        let model = model_file(&prefab, &PART, cx)?;
         let components = component_document(&prefab, is_listed, cx)?
             .map(|document| {
                 document.to_bytes().map_err(|e| {
@@ -78,6 +78,13 @@ impl Converter for CostumeModel {
         }
     }
 }
+
+/// How a part's model file is written.
+const PART: ModelConfig<'static> = ModelConfig {
+    flip_uv: true,
+    declare_webp: true,
+    node_keys: None,
+};
 
 /// Whether the component document of a part lists `component`.
 fn is_listed(component: &Object) -> bool {

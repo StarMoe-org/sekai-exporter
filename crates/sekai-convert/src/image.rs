@@ -32,7 +32,7 @@ impl Converter for Texture {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn is_root(

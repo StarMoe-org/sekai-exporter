@@ -2,7 +2,7 @@
 
 [English](texture.md)
 
-`texture` 形式是贴图对象所存储的图像，写成普通图片。转换器：`sekai-convert` 中的 `texture`（feature `image`）。形式版本：2。
+`texture` 形式是贴图对象所存储的图像，写成普通图片。转换器：`sekai-convert` 中的 `texture`（feature `image`）。形式版本：3。
 
 ## 1. 运行时
 
@@ -41,6 +41,7 @@
 
 | 图形格式（`m_Format`） | 展开 |
 |---|---|
+| 8 R8G8B8A8_UNorm | 同贴图格式 4，RGBA32 |
 | 48 R16G16B16A16_SFloat | binary16 线性 RGBA，所存的值不变 |
 | 134 RGBA_ASTC6X6_UNorm | 同贴图格式 50，ASTC 6×6 |
 
@@ -65,7 +66,7 @@
 | crunch 文件损坏，或尺寸与该贴图不同 | 错误 `malformed` 或 `truncated` |
 | 流路径未指明资源包中的任何条目 | 错误 `missing_resource` |
 | 贴图数组或 3D 贴图使用的图形格式不在第 2 节的表中 | 错误 `unsupported` |
-| 贴图数组或 3D 贴图的图像数据不是 `m_DataSize` 字节，或不能分成 `m_Depth` 个等大的切片 | 错误 `malformed` |
+| 贴图数组或 3D 贴图的图像数据为空、不是 `m_DataSize` 字节，或不能分成 `m_Depth` 个等大的切片 | 错误 `malformed` |
 
 ## 4. 容器
 
@@ -83,3 +84,4 @@ Unity 自下而上存储贴图的行；形式把它们变为自上而下，即 P
 |---|---|
 | 1 | 第一版 |
 | 2 | 贴图数组与 3D 贴图，每个切片一个成员 |
+| 3 | 图形格式 8（R8G8B8A8_UNorm）的贴图数组与 3D 贴图 |

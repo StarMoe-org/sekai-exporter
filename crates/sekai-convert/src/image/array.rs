@@ -6,6 +6,10 @@ use sekai_unity::Value;
 use super::{StreamData, dimension, field, malformed};
 use crate::{Content, Context, ConvertError, Member, ObjectId};
 
+/// `GraphicsFormat.R8G8B8A8_UNorm`.
+const RGBA8: i64 = 8;
+/// `TextureFormat.RGBA32`, which stores the same texels.
+const TEXTURE_RGBA32: i32 = 4;
 /// `GraphicsFormat.R16G16B16A16_SFloat`.
 pub(super) const RGBA_HALF: i64 = 48;
 /// `GraphicsFormat.RGBA_ASTC6X6_UNorm`.
@@ -44,7 +48,7 @@ pub(super) fn slices(
         }
         None => inline,
     };
-    if depth == 0 || size % u64::from(depth) != 0 || data.len() as u64 != size {
+    if size == 0 || depth == 0 || size % u64::from(depth) != 0 || data.len() as u64 != size {
         return Err(malformed(format!(
             "{} bytes of image data, {size} declared, for {depth} slices",
             data.len()
@@ -55,6 +59,7 @@ pub(super) fn slices(
         .enumerate()
         .map(|(i, bytes)| {
             let content = match format {
+                RGBA8 => Content::Image(texture::decode(TEXTURE_RGBA32, width, height, bytes)?),
                 ASTC_6X6 => {
                     Content::Image(texture::decode(TEXTURE_ASTC_6X6, width, height, bytes)?)
                 }
@@ -76,8 +81,9 @@ pub(super) fn slices(
 
 /// RGBA binary16 texels, rows from bottom to top, as an HDR surface.
 fn half(width: u32, height: u32, bytes: &[u8]) -> Result<HdrSurface, ConvertError> {
-    let row = width as usize * 8;
-    let needed = row * height as usize;
+    let too_large = || ConvertError::new("malformed", format!("{width} x {height} is too large"));
+    let row = (width as usize).checked_mul(8).ok_or_else(too_large)?;
+    let needed = row.checked_mul(height as usize).ok_or_else(too_large)?;
     if bytes.len() < needed {
         return Err(ConvertError::new(
             "truncated",

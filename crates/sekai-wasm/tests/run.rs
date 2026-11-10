@@ -116,3 +116,48 @@ fn the_in_memory_run_writes_what_a_native_run_writes() {
     drop(store);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn the_in_memory_object_documents_are_those_of_a_native_run() {
+    use sekai_pipeline::objects::{Source, document, index};
+    use sekai_unity::document::Payloads;
+
+    struct Collect(BTreeMap<String, Vec<u8>>);
+    impl Payloads for Collect {
+        fn store(&mut self, sha256: &[u8; 32], bytes: &[u8]) -> sekai_unity::Result<()> {
+            let hex: String = sha256.iter().map(|b| format!("{b:02x}")).collect();
+            let path = format!("_payloads/{}/{hex}.bin", &hex[..2]);
+            self.0.insert(path, bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    let source = Source {
+        inputs: &Fixtures,
+        classes: &NoClasses,
+        cache: &NoBlockCache,
+    };
+    let names: Vec<String> = FIXTURES.iter().rev().map(|n| (*n).to_owned()).collect();
+    let indexed = index(&source, &names, 2);
+    assert!(indexed.failed.is_empty(), "{:?}", indexed.failed);
+    let mut payloads = Collect(BTreeMap::new());
+    let mut expected = BTreeMap::new();
+    for (b, bundle) in indexed.version.bundles().iter().enumerate() {
+        let bytes = document(&source, &indexed.version, b, &mut payloads).unwrap();
+        expected.insert(format!("{}/_objects.json", bundle.name), bytes);
+    }
+    assert!(!payloads.0.is_empty());
+    expected.extend(payloads.0);
+
+    let mut bundles = bundles();
+    bundles.push(("not_a_bundle".to_owned(), b"not a bundle".to_vec()));
+    let mut files = BTreeMap::new();
+    let failed = sekai_wasm::objects(bundles, &mut |path, bytes| {
+        assert!(files.insert(path.to_owned(), bytes.to_vec()).is_none());
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].0, "not_a_bundle");
+    assert_eq!(files, expected);
+}

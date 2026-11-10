@@ -8,6 +8,7 @@ pub mod lazy;
 pub mod ledger;
 pub mod metrics;
 pub mod naming;
+pub mod objects;
 mod reads;
 pub mod sched;
 pub mod stream;

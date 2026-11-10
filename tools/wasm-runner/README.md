@@ -19,3 +19,15 @@ The program prints the number of assets, and the number of assets with each erro
 sekai-exporter export <input> <native>
 python tools/compare-storage/determinism.py <native>/store <output>/store
 ```
+
+## Object documents
+
+`objects.mjs` writes the object document of every bundle of a directory with the same core, to the same paths as `sekai-exporter objects`: `<bundle>/_objects.json`, and `_payloads/<aa>/<sha256>.bin` for each payload too large to inline. The two outputs are equal byte for byte.
+
+```bash
+sekai-exporter objects <input> <native>
+node tools/wasm-runner/objects.mjs wasm-package <input> <output>
+diff -r <native> <output>
+```
+
+The program prints each bundle it could not read or write, and then exits with status 1.

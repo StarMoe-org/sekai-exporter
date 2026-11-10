@@ -7,8 +7,8 @@ use sekai_convert::roots::fixture_reactions;
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex, Value};
 use serde::Serialize;
 
-use crate::particle::{array, field};
 use crate::scripts::{document, malformed};
+use crate::stored::{array, field};
 
 const ROWS: &str = "FixturerRactions";
 const FIXTURE: &str = "FixtureId";

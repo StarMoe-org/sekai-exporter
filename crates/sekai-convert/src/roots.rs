@@ -26,6 +26,9 @@ const FACIAL_TABLES: &[&str] = &[
     "Assembly-CSharp/Sekai.Mysekai.NPCAvatarDefaultFacialDataList",
 ];
 
+/// The container path ending of the prefab of the field camera.
+const FIELD_CAMERA: &str = "/mysekai/camera/fieldcamera.prefab";
+
 const FIXTURE_META: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureBundleMeta";
 const FIXTURE_REACTIONS: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureReactionDataSet";
 
@@ -97,6 +100,11 @@ pub fn font(object: &ObjectIndex, _script: Option<&str>, _paths: &[String]) -> b
 /// The roots of the `facial-table` form.
 pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == MONO_BEHAVIOUR && script.is_some_and(|name| FACIAL_TABLES.contains(&name))
+}
+
+/// The roots of the `field-camera` form.
+pub fn field_camera(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == GAME_OBJECT && paths.iter().any(|path| path.ends_with(FIELD_CAMERA))
 }
 
 /// The roots of the `fixture-meta` form.

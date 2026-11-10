@@ -15,8 +15,9 @@ use sekai_format::clip::{ClipDocument, Curve};
 use serde::Serialize;
 use serde_json::{Map, Value as Json, json};
 
-use crate::particle::{self, field};
+use crate::particle;
 use crate::scripts::{DOCUMENT, NoAssets, OneAsset, document, malformed};
+use crate::stored::field;
 
 const FORM: &str = "emoticon";
 const NAME: &str = "mysekai-runtime/emoticons/emoticons";

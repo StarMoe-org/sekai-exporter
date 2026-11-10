@@ -3,6 +3,7 @@
 #![allow(unsafe_code)]
 
 use std::ffi::{CStr, c_char, c_int, c_short, c_uchar, c_void};
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 use sekai_codec::Pcm;
@@ -127,9 +128,20 @@ fn configure(
     Ok(())
 }
 
+fn open_library(libraries: &[&str]) -> Result<Library, EncodeError> {
+    let library = load(libraries)?;
+    check_version(&library)?;
+    Ok(library)
+}
+
 /// Writes `pcm` as a constant-bitrate MP3 stream.
 pub fn encode(pcm: &Pcm, bitrate_kbps: u32) -> Result<Vec<u8>, EncodeError> {
-    encode_with(&LIBRARIES, pcm, bitrate_kbps)
+    static DEFAULT: OnceLock<Result<Library, EncodeError>> = OnceLock::new();
+    let library = DEFAULT
+        .get_or_init(|| open_library(&LIBRARIES))
+        .as_ref()
+        .map_err(Clone::clone)?;
+    run(library, pcm, bitrate_kbps)
 }
 
 /// Writes `pcm` as in [`encode`], loading LAME from the first of `libraries` that exists.
@@ -138,17 +150,20 @@ pub fn encode_with(
     pcm: &Pcm,
     bitrate_kbps: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    let library = load(libraries)?;
-    check_version(&library)?;
+    let library = open_library(libraries)?;
+    run(&library, pcm, bitrate_kbps)
+}
+
+fn run(library: &Library, pcm: &Pcm, bitrate_kbps: u32) -> Result<Vec<u8>, EncodeError> {
     let channels = usize::from(pcm.channels());
     if !(1..=2).contains(&channels) {
         return Err(failed(format!("LAME cannot write {channels} channels")));
     }
-    let init: Symbol<'_, Init> = symbol(&library, b"lame_init\0")?;
+    let init: Symbol<'_, Init> = symbol(library, b"lame_init\0")?;
     let state = State {
         // SAFETY: `lame_init` takes no arguments and returns an owned state.
         handle: unsafe { init() },
-        close: symbol(&library, b"lame_close\0")?,
+        close: symbol(library, b"lame_close\0")?,
     };
     let handle = state.handle;
     if handle.is_null() {
@@ -171,9 +186,9 @@ pub fn encode_with(
         (b"lame_set_bWriteVbrTag\0", 1),
         (b"lame_set_quality\0", QUALITY),
     ] {
-        configure(&library, handle, name, value)?;
+        configure(library, handle, name, value)?;
     }
-    let init_params: Symbol<'_, Finish> = symbol(&library, b"lame_init_params\0")?;
+    let init_params: Symbol<'_, Finish> = symbol(library, b"lame_init_params\0")?;
     // SAFETY: the handle is valid and fully configured.
     if unsafe { init_params(handle) } < 0 {
         return Err(failed(format!(
@@ -181,8 +196,8 @@ pub fn encode_with(
         )));
     }
 
-    let encode_buffer: Symbol<'_, EncodeBuffer> = symbol(&library, b"lame_encode_buffer\0")?;
-    let flush: Symbol<'_, Flush> = symbol(&library, b"lame_encode_flush\0")?;
+    let encode_buffer: Symbol<'_, EncodeBuffer> = symbol(library, b"lame_encode_buffer\0")?;
+    let flush: Symbol<'_, Flush> = symbol(library, b"lame_encode_flush\0")?;
     let left: Vec<i16> = pcm.samples().iter().step_by(channels).copied().collect();
     let right: Vec<i16> = pcm
         .samples()
@@ -218,7 +233,7 @@ pub fn encode_with(
 
     // The first frame of the stream is reserved for the tag that tells players how many samples
     // to skip at each end.
-    let tag: Symbol<'_, TagFrame> = symbol(&library, b"lame_get_lametag_frame\0")?;
+    let tag: Symbol<'_, TagFrame> = symbol(library, b"lame_get_lametag_frame\0")?;
     // SAFETY: the buffer is writable for the length passed with it.
     let written = unsafe { tag(handle, buffer.as_mut_ptr(), buffer.len()) };
     if written == 0 || written > out.len() {

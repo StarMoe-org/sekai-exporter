@@ -11,6 +11,7 @@
 
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::ptr;
+use std::sync::OnceLock;
 
 use libloading::{Library, Symbol};
 use sekai_codec::Pcm;
@@ -33,6 +34,8 @@ const END: c_int = -541_478_725;
 const LOG_QUIET: c_int = -8;
 /// The encoder delay libavcodec's AAC encoder reports, in samples per channel.
 const ENCODER_DELAY: u32 = 1024;
+/// The number of plane pointers held inline in `AVFrame::data`.
+const MAX_CHANNELS: usize = 8;
 
 /// Where fields live, for one pair of library major versions.
 #[derive(Clone, Copy)]
@@ -213,22 +216,13 @@ fn text(value: &str) -> CString {
     CString::new(value).expect("no NUL in the fixed option names")
 }
 
-/// Encodes `pcm` as a constant-bitrate AAC-LC track.
-pub fn encode(pcm: &Pcm, bitrate_kbps: u32) -> Result<AacTrack, EncodeError> {
-    let names: Vec<(String, String)> = LAYOUTS.iter().flat_map(library_names).collect();
-    let pairs: Vec<(&str, &str)> = names
-        .iter()
-        .map(|(codec, util)| (codec.as_str(), util.as_str()))
-        .collect();
-    encode_with(&pairs, pcm, bitrate_kbps)
+struct Loaded {
+    avcodec: Library,
+    avutil: Library,
+    layout: Layout,
 }
 
-/// Encodes as in [`encode`], loading libavcodec and libavutil from the first pair that exists.
-pub fn encode_with(
-    libraries: &[(&str, &str)],
-    pcm: &Pcm,
-    bitrate_kbps: u32,
-) -> Result<AacTrack, EncodeError> {
+fn open_libraries(libraries: &[(&str, &str)]) -> Result<Loaded, EncodeError> {
     let (avcodec, avutil) = libraries
         .iter()
         .find_map(|(codec, util)| {
@@ -251,7 +245,49 @@ pub fn encode_with(
         avutil: &avutil,
     };
     let layout = find_layout(&api)?;
-    run(&api, layout, pcm, bitrate_kbps)
+    let set_log_level: Symbol<'_, unsafe extern "C" fn(c_int)> = api.util(b"av_log_set_level\0")?;
+    // SAFETY: the function only stores the level once when the library is opened.
+    unsafe { set_log_level(LOG_QUIET) };
+    Ok(Loaded {
+        avcodec,
+        avutil,
+        layout,
+    })
+}
+
+/// Encodes `pcm` as a constant-bitrate AAC-LC track.
+pub fn encode(pcm: &Pcm, bitrate_kbps: u32) -> Result<AacTrack, EncodeError> {
+    static DEFAULT: OnceLock<Result<Loaded, EncodeError>> = OnceLock::new();
+    let loaded = DEFAULT
+        .get_or_init(|| {
+            let names: Vec<(String, String)> = LAYOUTS.iter().flat_map(library_names).collect();
+            let pairs: Vec<(&str, &str)> = names
+                .iter()
+                .map(|(codec, util)| (codec.as_str(), util.as_str()))
+                .collect();
+            open_libraries(&pairs)
+        })
+        .as_ref()
+        .map_err(Clone::clone)?;
+    let api = Api {
+        avcodec: &loaded.avcodec,
+        avutil: &loaded.avutil,
+    };
+    run(&api, loaded.layout, pcm, bitrate_kbps)
+}
+
+/// Encodes as in [`encode`], loading libavcodec and libavutil from the first pair that exists.
+pub fn encode_with(
+    libraries: &[(&str, &str)],
+    pcm: &Pcm,
+    bitrate_kbps: u32,
+) -> Result<AacTrack, EncodeError> {
+    let loaded = open_libraries(libraries)?;
+    let api = Api {
+        avcodec: &loaded.avcodec,
+        avutil: &loaded.avutil,
+    };
+    run(&api, loaded.layout, pcm, bitrate_kbps)
 }
 
 fn find_layout(api: &Api<'_>) -> Result<Layout, EncodeError> {
@@ -282,9 +318,9 @@ fn run(
     bitrate_kbps: u32,
 ) -> Result<AacTrack, EncodeError> {
     let channels = usize::from(pcm.channels());
-    let set_log_level: Symbol<'_, unsafe extern "C" fn(c_int)> = api.util(b"av_log_set_level\0")?;
-    // SAFETY: the function only stores the level.
-    unsafe { set_log_level(LOG_QUIET) };
+    if !(1..=MAX_CHANNELS).contains(&channels) {
+        return Err(failed(format!("AAC cannot write {channels} channels")));
+    }
     let find_encoder: Symbol<'_, unsafe extern "C" fn(*const c_char) -> Pointer> =
         api.codec(b"avcodec_find_encoder_by_name\0")?;
     let name = text("aac");

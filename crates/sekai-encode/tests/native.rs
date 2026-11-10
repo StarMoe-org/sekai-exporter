@@ -207,4 +207,13 @@ mod aac {
         check(&tone(1, 44100));
         check(&tone(2, 30000));
     }
+
+    #[test]
+    fn nine_channels_fail() {
+        let result = aac::encode(&tone(9, 1024), 128);
+        assert!(matches!(
+            result,
+            Err(EncodeError::Failed { .. } | EncodeError::Unavailable { .. })
+        ));
+    }
 }

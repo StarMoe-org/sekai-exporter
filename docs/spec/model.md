@@ -12,12 +12,14 @@ Moesekai's 3D costume viewer, through three.js and its glTF loader. It finds par
 
 The file holds:
 
-- one node for each game object below and including the root, in depth-first order with the root first. A node has the game object's name, the local position, rotation and scale of its `Transform`, and its children in the order the `Transform` stores them. The root is the only node of the scene;
+- one node for each game object below and including the root, in depth-first order with the root first. A node has the game object's name, the local position, rotation and scale of its `Transform`, and its children in the order the `Transform` stores them. The root is the only node of its scene;
 - one glTF mesh for each combination of a mesh, its materials and, when a skin uses it, the joint of each bone slot, drawn by the node of each renderer that draws that combination. The renderers are `MeshRenderer`, with the mesh of the `MeshFilter` of the same game object, and `SkinnedMeshRenderer`. A submesh with triangles is a primitive. A renderer with more materials than submeshes draws its last submesh again with each further material, so each one adds a primitive;
 - every vertex channel the mesh stores: `POSITION`, `NORMAL`, `TANGENT`, `COLOR_0`, `TEXCOORD_0` and up, and, for a skinned renderer, `JOINTS_0` and `WEIGHTS_0`;
 - one skin for each skinned renderer, as described below. A `SkinnedMeshRenderer` with no bones is not skinned;
 - one morph target for each blend shape channel, with the position offsets of the channel's frame and, when the mesh has normals and tangents, their offsets, as sparse accessors. An offset the frame does not store (`hasNormals` or `hasTangents` false) is zero;
 - one material for each material the renderers use, and one texture, one sampler and one image for each `Texture2D` the materials use.
+
+A form may write several prefabs into one file, such as the scenes of a place. Each prefab is then a scene of its own, named after its root's game object, in the order the form gives, and the form chooses the scene shown first (`scene`). The nodes of each prefab follow those of the prefabs before it, and its renderers bind to bones of the same prefab only. Meshes, materials, textures and images are shared between the scenes. A file of one prefab has one scene without a name.
 
 A node whose game object is inactive has `extras.active` set to `false`. A node whose renderer is disabled has `extras.enabled` set to `false`. A skin whose `m_RootBone` is a node of the model has that node in `extras.rootBone`.
 
@@ -71,7 +73,7 @@ Each image is outside the file. Its URI is `texture/<n>.webp`, where `n` counts 
 
 ## 3. Sources
 
-The root is a `GameObject` that the asset form selects. The model holds the root's `Transform` subtree, the components of its game objects, and everything the renderers reach: meshes, materials, shaders and textures, which may be in other bundles.
+The root, or each root, is a `GameObject` that the asset form selects. The model holds each root's `Transform` subtree, the components of its game objects, and everything the renderers reach: meshes, materials, shaders and textures, which may be in other bundles.
 
 | Case | Result |
 |---|---|
@@ -84,6 +86,7 @@ The root is a `GameObject` that the asset form selects. The model holds the root
 | The mesh of a skinned renderer has no bone indices, or a bone index with a weight does not fit in 16 bits | Error `unsupported` |
 | A texture has a wrap mode or a filter mode the table above does not list | Error `unsupported` |
 | A texture cannot be decoded | The error of the [texture form](texture.md) |
+| The roots of a file are not disjoint: a game object is below two of them, or the scene shown first is not one of the scenes | Error `malformed` |
 | A transform, a vertex position, a blend shape position offset or a bind pose is not finite | Error `malformed` |
 | The mesh does not store a bone name hash for each bind pose and the numbers of bones and bind poses differ, a vertex weighs on a bone slot beyond the bind poses, or a renderer has more blend shape weights than its mesh has channels | Error `malformed` |
 | A blend shape frame moves a vertex twice, a stored offset lies outside its data, or an index lies outside the vertices | Error `malformed` |

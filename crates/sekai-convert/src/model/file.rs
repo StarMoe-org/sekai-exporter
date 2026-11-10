@@ -31,12 +31,45 @@ pub struct ModelFile {
     pub images: Vec<Member>,
 }
 
-/// The model file of `prefab`, specified in `docs/spec/model.md`.
+/// The model file of `prefab`, specified in `docs/spec/model.md`: one scene, without a name,
+/// whose only node is the root.
 pub fn model_file(
     prefab: &Prefab,
     config: &ModelConfig<'_>,
     cx: &dyn Context,
 ) -> Result<ModelFile, ConvertError> {
+    write(&[prefab], None, config, cx)
+}
+
+/// The model file of several prefabs, specified in `docs/spec/model.md`: one scene for each,
+/// named after its root, in the order of `prefabs`, with the scene of `prefabs[shown]` shown
+/// first. The nodes of each prefab follow those of the prefabs before it.
+pub fn model_scenes(
+    prefabs: &[&Prefab],
+    shown: usize,
+    config: &ModelConfig<'_>,
+    cx: &dyn Context,
+) -> Result<ModelFile, ConvertError> {
+    if shown >= prefabs.len() {
+        return Err(malformed("the scene shown first is not one of the scenes"));
+    }
+    write(prefabs, Some(shown), config, cx)
+}
+
+/// The model file of `prefabs`, with named scenes and the scene shown first when `shown` is
+/// given, and otherwise with unnamed scenes and the first shown first.
+fn write(
+    prefabs: &[&Prefab],
+    shown: Option<usize>,
+    config: &ModelConfig<'_>,
+    cx: &dyn Context,
+) -> Result<ModelFile, ConvertError> {
+    let mut seen = BTreeSet::new();
+    for prefab in prefabs {
+        if prefab.nodes.iter().any(|node| !seen.insert(node.object)) {
+            return Err(malformed("a game object is in two scenes"));
+        }
+    }
     let mut builder = Builder {
         config,
         cx,
@@ -47,17 +80,26 @@ pub fn model_file(
         mesh_index: BTreeMap::new(),
         skins: Vec::new(),
     };
-    let mut nodes = prefab
-        .nodes
-        .iter()
-        .map(|prefab_node| node(prefab_node, config, cx))
-        .collect::<Result<Vec<_>, _>>()?;
-    for (index, prefab_node) in prefab.nodes.iter().enumerate() {
-        if let Some(renderer) = Renderer::find(prefab_node, cx)? {
-            builder.attach(&renderer, &mut nodes[index], prefab)?;
+    let mut nodes = Vec::new();
+    let mut scenes = Vec::new();
+    for prefab in prefabs {
+        let offset = nodes.len();
+        for prefab_node in &prefab.nodes {
+            let mut node = node(prefab_node, config, cx)?;
+            for child in &mut node.children {
+                *child += offset;
+            }
+            if let Some(renderer) = Renderer::find(prefab_node, cx)? {
+                builder.attach(&renderer, &mut node, prefab, offset)?;
+            }
+            nodes.push(node);
         }
+        scenes.push(Scene {
+            name: shown.map(|_| prefab.nodes[0].name.clone()),
+            nodes: vec![offset],
+        });
     }
-    builder.finish(nodes)
+    builder.finish(nodes, scenes, shown.unwrap_or(0))
 }
 
 /// The node of a game object, without its mesh.
@@ -279,12 +321,14 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
-    /// Gives `node` the mesh, skin and state of `renderer`.
+    /// Gives `node` the mesh, skin and state of `renderer`, a renderer of `prefab`, whose nodes
+    /// follow `offset` nodes of the file.
     fn attach(
         &mut self,
         renderer: &Renderer<'_>,
         node: &mut gltf::Node,
         prefab: &Prefab,
+        offset: usize,
     ) -> Result<(), ConvertError> {
         let fields = &renderer.object.fields;
         if !flag(fields, "m_Enabled")? {
@@ -325,7 +369,7 @@ impl Builder<'_> {
             .unzip();
         node.mesh = Some(self.mesh(mesh, materials, slot_joints)?);
         if let Some(joints) = joints {
-            node.skin = Some(self.skin(renderer.object, &joints, prefab)?);
+            node.skin = Some(self.skin(renderer.object, &joints, prefab, offset)?);
         }
         let geometry = &self.geometry[&mesh];
         if renderer.object.class_id == SKINNED_MESH_RENDERER && !geometry.mesh.targets.is_empty() {
@@ -400,6 +444,7 @@ impl Builder<'_> {
         renderer: &Object,
         joints: &[Joint],
         prefab: &Prefab,
+        offset: usize,
     ) -> Result<usize, ConvertError> {
         let poses: Vec<[f32; 16]> = joints.iter().map(|joint| joint.inverse_bind).collect();
         let inverse_bind_matrices = self.buffers.floats(&poses, None, false);
@@ -408,14 +453,21 @@ impl Builder<'_> {
             None => None,
         };
         self.skins.push(gltf::Skin {
-            joints: joints.iter().map(|joint| joint.node).collect(),
+            joints: joints.iter().map(|joint| offset + joint.node).collect(),
             inverse_bind_matrices,
-            extras: root_bone.map(|root_bone| SkinExtras { root_bone }),
+            extras: root_bone.map(|root_bone| SkinExtras {
+                root_bone: offset + root_bone,
+            }),
         });
         Ok(self.skins.len() - 1)
     }
 
-    fn finish(self, nodes: Vec<gltf::Node>) -> Result<ModelFile, ConvertError> {
+    fn finish(
+        self,
+        nodes: Vec<gltf::Node>,
+        scenes: Vec<Scene>,
+        shown: usize,
+    ) -> Result<ModelFile, ConvertError> {
         let mut document = Document {
             asset: AssetInfo {
                 version: "2.0",
@@ -423,8 +475,8 @@ impl Builder<'_> {
             },
             extensions_used: Vec::new(),
             extensions_required: Vec::new(),
-            scene: 0,
-            scenes: vec![Scene { nodes: vec![0] }],
+            scene: shown,
+            scenes,
             nodes,
             meshes: self.meshes,
             skins: self.skins,

@@ -1,5 +1,6 @@
-//! Model files on objects built in memory: the choices a form makes in `ModelConfig`, the shaders
-//! a material names and the triangles of a mesh that no renderer need draw.
+//! Model files on objects built in memory: the choices a form makes in `ModelConfig`, files of
+//! several scenes, the shaders a material names and the triangles of a mesh that no renderer need
+//! draw.
 
 #![cfg(feature = "model")]
 
@@ -7,7 +8,7 @@ use std::collections::BTreeMap;
 
 use sekai_convert::model::{
     MaterialKeys, MeshTriangles, ModelConfig, NodeKeys, ParsedShader, Prefab, StateValue,
-    mesh_triangles, model_file,
+    mesh_triangles, model_file, model_scenes,
 };
 use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr, Value};
 use serde_json::{Value as Json, json};
@@ -191,6 +192,12 @@ fn channel(offset: u64, format: u64, dimension: u64) -> Value {
 /// Three vertices at `(k, k + 1, k + 2)` with the normal `+y`, the tangent `+z` and the texture
 /// coordinates `uvs`, in one stream of 48 bytes each.
 fn vertex_data(uvs: [[f32; 2]; 3]) -> Value {
+    stored_vertices(uvs, false)
+}
+
+/// The vertices of [`vertex_data`], and when `skinned` is set, each bound to bone slot 0 with
+/// weight 1, which makes them 56 bytes each.
+fn stored_vertices(uvs: [[f32; 2]; 3], skinned: bool) -> Value {
     let mut channels = vec![
         channel(0, 0, 3),
         channel(12, 0, 3),
@@ -198,7 +205,10 @@ fn vertex_data(uvs: [[f32; 2]; 3]) -> Value {
         channel(0, 0, 0),
         channel(40, 0, 2),
     ];
-    channels.extend((6..12).map(|_| channel(0, 0, 0)));
+    channels.extend((5..12).map(|_| channel(0, 0, 0)));
+    if skinned {
+        channels.extend([channel(48, 0, 1), channel(52, 10, 1)]);
+    }
     let mut bytes = Vec::new();
     for (k, uv) in (0..3).zip(uvs) {
         let position = [k as f32, k as f32 + 1.0, k as f32 + 2.0];
@@ -207,6 +217,10 @@ fn vertex_data(uvs: [[f32; 2]; 3]) -> Value {
             .chain([0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0]);
         bytes.extend(floats.flat_map(f32::to_le_bytes));
         bytes.extend(uv.into_iter().flat_map(f32::to_le_bytes));
+        if skinned {
+            bytes.extend(1.0f32.to_le_bytes());
+            bytes.extend(0u32.to_le_bytes());
+        }
     }
     s(vec![
         ("m_VertexCount", u(3)),
@@ -1044,4 +1058,151 @@ fn a_position_that_is_not_finite_is_malformed() {
         triangles_of(mesh).expect_err("a vertex is NaN").code,
         "malformed"
     );
+}
+
+/// A transform with the children `children`.
+fn parent_transform(path_id: i64, owner: i64, position: [f32; 3], children: &[i64]) -> Object {
+    let mut transform = transform(path_id, owner, position);
+    *get_mut(&mut transform.fields, "m_Children") =
+        list(children.iter().map(|&child| r(child)).collect());
+    transform
+}
+
+/// A transform without children, below the transform `father`.
+fn child_transform(path_id: i64, owner: i64, position: [f32; 3], father: i64) -> Object {
+    let mut transform = transform(path_id, owner, position);
+    *get_mut(&mut transform.fields, "m_Father") = r(father);
+    transform
+}
+
+/// The mesh of `mesh` with each vertex bound to bone slot 0, and one bind pose that moves by
+/// `(2, 0, 0)`.
+fn skinned_mesh(path_id: i64) -> Object {
+    let mut skinned = mesh(path_id, "skinned_mesh", UVS);
+    let mut pose = Vec::new();
+    for row in 0..4 {
+        for column in 0..4 {
+            let value = match (row, column) {
+                (0, 3) => 2.0,
+                (r, c) if r == c => 1.0,
+                _ => 0.0,
+            };
+            pose.push((format!("e{row}{column}"), f(value)));
+        }
+    }
+    *get_mut(&mut skinned.fields, "m_BindPose") = list(vec![Value::Struct(pose)]);
+    *get_mut(&mut skinned.fields, "m_VertexData") = stored_vertices(UVS, true);
+    skinned
+}
+
+/// Two prefabs: `ground`, which draws the part's mesh and has the child `prop` that draws it too,
+/// and `rank1`, with a child `bone` and a skinned renderer bound to it.
+fn site() -> File {
+    File(vec![
+        game_object(1, "ground", &[2, 3, 4], true),
+        parent_transform(2, 1, [1.0, 0.0, 0.0], &[12]),
+        mesh_renderer(3, 1, &[6]),
+        mesh_filter(4, 1, 5),
+        mesh(5, "ground", UVS),
+        material(6, "ground_mat", &[("_MainTex", 7)]),
+        texture(7, "ground_C"),
+        game_object(11, "prop", &[12, 13, 14], true),
+        child_transform(12, 11, [0.0, 1.0, 0.0], 2),
+        mesh_renderer(13, 11, &[6]),
+        mesh_filter(14, 11, 5),
+        game_object(21, "rank1", &[22, 25], true),
+        parent_transform(22, 21, [0.0, 0.0, 3.0], &[24]),
+        game_object(23, "bone", &[24], true),
+        child_transform(24, 23, [0.0, 2.0, 0.0], 22),
+        object(
+            25,
+            137,
+            s(vec![
+                ("m_GameObject", r(21)),
+                ("m_Enabled", u(1)),
+                ("m_Materials", list(vec![r(6)])),
+                ("m_Mesh", r(26)),
+                ("m_Bones", list(vec![r(24)])),
+                ("m_BlendShapeWeights", list(Vec::new())),
+                ("m_RootBone", r(24)),
+            ]),
+        ),
+        skinned_mesh(26),
+    ])
+}
+
+fn site_glb(roots: &[i64], shown: usize) -> Result<Glb, ConvertError> {
+    let file = site();
+    let prefabs: Vec<Prefab> = roots
+        .iter()
+        .map(|&root| Prefab::read(id(root), &file).expect("a prefab"))
+        .collect();
+    let prefabs: Vec<&Prefab> = prefabs.iter().collect();
+    let model = model_scenes(&prefabs, shown, &base_config(), &file)?;
+    Ok(Glb::read(&model.glb))
+}
+
+#[test]
+fn each_prefab_is_a_scene_named_after_its_root() {
+    let glb = site_glb(&[1, 21], 1).expect("a model file");
+    assert_eq!(
+        glb.json["scenes"],
+        json!([
+            { "name": "ground", "nodes": [0] },
+            { "name": "rank1", "nodes": [2] },
+        ])
+    );
+    assert_eq!(glb.json["scene"], json!(1));
+    let names: Vec<&str> = glb.json["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["ground", "prop", "rank1", "bone"]);
+    assert_eq!(glb.json["nodes"][0]["children"], json!([1]));
+    assert_eq!(glb.json["nodes"][2]["children"], json!([3]));
+}
+
+#[test]
+fn scenes_share_meshes_materials_and_images() {
+    let glb = site_glb(&[1, 21], 0).expect("a model file");
+    assert_eq!(glb.json["nodes"][0]["mesh"], glb.json["nodes"][1]["mesh"]);
+    assert_eq!(glb.json["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(glb.json["images"].as_array().unwrap().len(), 1);
+    let skinned = glb.json["nodes"][2]["mesh"].as_u64().unwrap() as usize;
+    assert_eq!(
+        glb.json["meshes"][skinned]["primitives"][0]["material"],
+        json!(0)
+    );
+}
+
+#[test]
+fn the_joints_of_a_later_scene_are_its_own_nodes() {
+    let glb = site_glb(&[1, 21], 0).expect("a model file");
+    assert_eq!(glb.json["nodes"][2]["skin"], json!(0));
+    assert_eq!(glb.json["skins"][0]["joints"], json!([3]));
+    assert_eq!(glb.json["skins"][0]["extras"]["rootBone"], json!(3));
+}
+
+#[test]
+fn a_file_of_one_prefab_has_one_unnamed_scene() {
+    let file = site();
+    let prefab = Prefab::read(id(1), &file).expect("a prefab");
+    let single = model_file(&prefab, &base_config(), &file).expect("a model file");
+    let glb = Glb::read(&single.glb);
+    assert_eq!(glb.json["scenes"], json!([{ "nodes": [0] }]));
+    assert_eq!(glb.json["scene"], json!(0));
+}
+
+#[test]
+fn the_scene_shown_first_is_one_of_the_scenes() {
+    let error = site_glb(&[1, 21], 2).err().expect("an error");
+    assert_eq!(error.code, "malformed");
+}
+
+#[test]
+fn a_game_object_is_in_one_scene_only() {
+    let error = site_glb(&[1, 11], 0).err().expect("an error");
+    assert_eq!(error.code, "malformed");
 }

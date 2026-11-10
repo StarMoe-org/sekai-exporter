@@ -21,7 +21,7 @@ mod shader;
 
 pub use components::component_document;
 pub use config::{MaterialKeys, ModelConfig, NodeKeys};
-pub use file::{ModelFile, model_file};
+pub use file::{ModelFile, model_file, model_scenes};
 pub use mesh::{MeshTriangles, mesh_triangles};
 pub use prefab::{Node, Pose, Prefab};
 pub use shader::{Blend, ParsedShader, Pass, ShaderProperty, StateValue, SubShader};

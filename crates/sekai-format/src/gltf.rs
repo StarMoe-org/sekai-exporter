@@ -89,6 +89,9 @@ pub struct AssetInfo {
 /// A scene.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Scene {
+    /// The name, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Its root nodes.
     pub nodes: Vec<usize>,
 }

@@ -45,33 +45,36 @@ impl Sources {
     }
 
     /// Clip name to the name of the `costume-motion` asset that holds it, for the first motion
-    /// bundle of the version; empty when no bundle is in the version.
-    pub(super) fn motions(
-        &self,
-        cx: &dyn TableContext,
-        unit_ids: &[i64],
-        figure: &Figure,
-    ) -> Result<BTreeMap<String, String>, ConvertError> {
+    /// bundle of the version; empty when no bundle is in the version. Each asset of a motion bundle
+    /// holds one clip, named by the last segment of the asset's name.
+    pub(super) fn motions(&self, unit_ids: &[i64], figure: &Figure) -> BTreeMap<String, String> {
         let of_rows = unit_ids.iter().map(|id| format!("{MOTION_ROOT}{id:02}_00"));
         let of_figure = format!("{MOTION_ROOT}{}", figure_bundle(figure));
-        let bundle = match of_rows
+        let Some(bundle) = of_rows
             .chain([of_figure])
             .find(|bundle| !self.version.assets(bundle, MOTION).is_empty())
-        {
-            Some(bundle) => bundle,
-            None => return Ok(BTreeMap::new()),
+        else {
+            return BTreeMap::new();
         };
-        let mut motions = BTreeMap::new();
-        for asset in self.version.assets(&bundle, MOTION) {
-            for member in cx.document(asset)?.members {
-                let clip = member.role.to_lowercase();
-                if CLIPS.contains(&clip.as_str()) {
-                    motions.entry(clip).or_insert_with(|| asset.clone());
-                }
-            }
-        }
-        Ok(motions)
+        self.version
+            .assets(&bundle, MOTION)
+            .iter()
+            .filter_map(|asset| {
+                let clip = clip_of(asset);
+                CLIPS
+                    .contains(&clip.as_str())
+                    .then(|| (clip, asset.clone()))
+            })
+            .collect()
     }
+}
+
+/// The clip an asset of a motion bundle holds: the last segment of its name.
+fn clip_of(asset: &str) -> String {
+    asset
+        .rsplit_once('/')
+        .map_or(asset, |(_, clip)| clip)
+        .to_lowercase()
 }
 
 /// The motion bundle of a figure.

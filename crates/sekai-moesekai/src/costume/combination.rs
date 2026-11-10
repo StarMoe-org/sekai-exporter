@@ -39,7 +39,7 @@ impl TableConverter for CostumeRoles {
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
         let sources = Sources::read(cx)?;
-        let roles = RoleSource::read_all(&sources, cx)?;
+        let roles = RoleSource::read_all(&sources);
         let names = roles.iter().map(RoleSource::asset_name).collect();
         Ok(Box::new(RolePlan { names, roles }))
     }
@@ -60,7 +60,7 @@ impl TableConverter for Costumes {
 
     fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
         let sources = Sources::read(cx)?;
-        let roles = RoleSource::read_all(&sources, cx)?;
+        let roles = RoleSource::read_all(&sources);
         let numbers = CostumePlan::numbers(&roles);
         let names = numbers
             .iter()
@@ -247,20 +247,16 @@ struct RoleSource {
 
 impl RoleSource {
     /// The roles of `character3ds`, in the order of their pairs of a character and a unit.
-    fn read_all(sources: &Sources, cx: &dyn TableContext) -> Result<Vec<Self>, ConvertError> {
+    fn read_all(sources: &Sources) -> Vec<Self> {
         sources
             .tables
             .defaults
             .iter()
-            .map(|default| Self::read(default, sources, cx))
+            .map(|default| Self::read(default, sources))
             .collect()
     }
 
-    fn read(
-        default: &DefaultCostume,
-        sources: &Sources,
-        cx: &dyn TableContext,
-    ) -> Result<Self, ConvertError> {
+    fn read(default: &DefaultCostume, sources: &Sources) -> Self {
         let tables = &sources.tables;
         let rows = tables.parts_of(default.character_id, &default.unit);
         let figure = tables.characters.get(&default.character_id).cloned();
@@ -270,7 +266,7 @@ impl RoleSource {
             .collect();
         let figure = figure.unwrap_or_default();
         let unit_ids = tables.unit_ids(default.character_id, &default.unit);
-        Ok(Self {
+        Self {
             character_id: default.character_id,
             unit: default.unit.clone(),
             skin: tables
@@ -278,11 +274,11 @@ impl RoleSource {
                 .map(|row| row.skin.clone()),
             default_hairs: tables.default_hairs_of(&default.unit, &rows),
             not_available: tables.not_available_of(&default.unit),
-            motions: sources.motions(cx, &unit_ids, &figure)?,
+            motions: sources.motions(&unit_ids, &figure),
             figure,
             default: default.clone(),
             parts,
-        })
+        }
     }
 
     fn asset_name(&self) -> String {

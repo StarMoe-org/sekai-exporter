@@ -7,7 +7,6 @@ use std::collections::{BTreeMap, HashMap};
 use sekai_convert::tables::{AssetEntry, TableAsset, TableContext, TableConverter, TablePlan};
 use sekai_convert::{Content, ConvertError, Member};
 use sekai_format::AssetDocument;
-use sekai_format::asset::MemberFile;
 use sekai_format::costume::{CostumeDocument, RoleDocument, Slot};
 use sekai_moesekai::costume::{CostumeRoles, Costumes};
 use serde_json::{Value, json};
@@ -22,7 +21,6 @@ const NEW: &str = "live_pv/model/characterv2/";
 struct Version {
     tables: HashMap<String, Value>,
     bundles: BTreeMap<String, Vec<AssetEntry>>,
-    members: HashMap<String, Vec<String>>,
 }
 
 impl Version {
@@ -40,18 +38,11 @@ impl Version {
         self
     }
 
-    /// A bundle with one motion that holds the clips as members.
-    fn motion(mut self, bundle: &str, file: &str, clips: &[&str]) -> Self {
-        let name = format!("{bundle}/{file}");
-        let assets = self.bundles.entry(bundle.to_owned()).or_default();
-        assets.push(AssetEntry {
-            name: name.clone(),
-            form: MOTION,
-        });
-        assets.sort_by(|a, b| a.name.cmp(&b.name));
-        let members = clips.iter().map(|clip| (*clip).to_owned()).collect();
-        self.members.insert(name, members);
-        self
+    /// A motion bundle with one asset for each clip, named by the clip.
+    fn motions(self, bundle: &str, clips: &[&str]) -> Self {
+        clips
+            .iter()
+            .fold(self, |version, clip| version.asset(bundle, clip, MOTION))
     }
 
     /// A model bundle of the newer directory and its one model.
@@ -75,29 +66,7 @@ impl TableContext for Version {
     }
 
     fn document(&self, name: &str) -> Result<AssetDocument, ConvertError> {
-        let members = self.members.get(name).map_or(&[][..], Vec::as_slice);
-        Ok(AssetDocument {
-            format: String::new(),
-            version: 1,
-            name: name.to_owned(),
-            form: MOTION.to_owned(),
-            form_version: 1,
-            fingerprint: String::new(),
-            sources: Vec::new(),
-            resources: Vec::new(),
-            members: members
-                .iter()
-                .map(|role| MemberFile {
-                    role: role.clone(),
-                    sha256: String::new(),
-                    size: 0,
-                    extension: "json".to_owned(),
-                    media_type: String::new(),
-                })
-                .collect(),
-            references: Vec::new(),
-            error: None,
-        })
+        Err(ConvertError::new("store_failed", name.to_owned()))
     }
 
     fn member(&self, name: &str, role: &str) -> Result<Vec<u8>, ConvertError> {
@@ -911,31 +880,26 @@ fn motions_take_the_unit_row_then_the_character_then_the_figure() {
                 {"id": 4, "gameCharacterId": 1, "unit": "light"}
             ]),
         )
-        .motion(
+        .motions(
             "character/motion/costume_setting/04_00",
-            "set",
-            &["motion", "face", "motion_loop", "face_loop"],
+            &["motion", "face", "motion_loop", "face_loop", "extra"],
         )
-        .motion(
-            "character/motion/costume_setting/30_00",
-            "other",
-            &["motion"],
-        )
-        .motion(
-            "character/motion/costume_setting/ladies",
-            "ladies",
-            &["motion"],
-        );
+        .motions("character/motion/costume_setting/30_00", &["motion"])
+        .motions("character/motion/costume_setting/ladies", &["motion"]);
     let light = role(&moving);
     let motions = light.role.motions.as_ref().expect("the motions");
     assert_eq!(
         motions["motion"],
-        "character/motion/costume_setting/04_00/set"
+        "character/motion/costume_setting/04_00/motion"
     );
-    assert_eq!(motions.len(), 4);
+    assert_eq!(
+        motions.len(),
+        4,
+        "the clips of the costume screen, not others"
+    );
     assert_eq!(
         motions["face_loop"],
-        "character/motion/costume_setting/04_00/set"
+        "character/motion/costume_setting/04_00/face_loop"
     );
 
     let piapro = role_version()
@@ -943,16 +907,12 @@ fn motions_take_the_unit_row_then_the_character_then_the_figure() {
             "gameCharacterUnits",
             json!([{"id": 7, "gameCharacterId": 1, "unit": "piapro"}]),
         )
-        .motion(
-            "character/motion/costume_setting/ladies",
-            "ladies",
-            &["motion"],
-        );
+        .motions("character/motion/costume_setting/ladies", &["motion"]);
     let light = role(&piapro);
     let motions = light.role.motions.as_ref().expect("the motions");
     assert_eq!(motions.len(), 1);
     assert_eq!(
-        motions["motion"], "character/motion/costume_setting/ladies/ladies",
+        motions["motion"], "character/motion/costume_setting/ladies/motion",
         "the character's first row has no bundle, so the figure's motions are used"
     );
 }

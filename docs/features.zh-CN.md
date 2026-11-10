@@ -41,7 +41,7 @@
 | `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.md) |
 | `costume` | 供 3D 浏览的服装部件、动作与组合，见[服装形式](spec/costume.zh-CN.md) |
 
-`costume` 产出 `costume-model` 与 `costume-motion` 两种形式；每套服装由哪些部件与动作组成的组合，目前尚不产出。
+`costume` 产出 `costume-model` 与 `costume-motion` 两种形式，并由游戏数据表产出 `costume-role` 形式（每个角色在每个单元一份，含其可穿戴的全部部件）和 `costume` 形式（每套服装的各个造型）。
 
 [storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建会拒绝 `update --storage`，并且不会以 `not_compiled` 报告任何资产。
 

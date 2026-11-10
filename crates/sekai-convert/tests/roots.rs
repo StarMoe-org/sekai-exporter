@@ -84,8 +84,11 @@ fn text_assets_go_to_exactly_one_form() {
         ]
     };
     assert_eq!(claims("a/b.acb.bytes"), [true, false, false]);
+    assert_eq!(claims("a/b.ACB.BYTES"), [true, false, false]);
     assert_eq!(claims("a/b.usm.bytes"), [false, true, false]);
+    assert_eq!(claims("a/b.USM.BYTES"), [false, true, false]);
     assert_eq!(claims("a/b-001.usm.bytes"), [false, true, false]);
+    assert_eq!(claims("a/b-001.USM.BYTES"), [false, true, false]);
     assert_eq!(claims("a/b.txt"), [false, false, true]);
 }
 
@@ -93,4 +96,20 @@ fn text_assets_go_to_exactly_one_form() {
 fn a_later_segment_of_a_video_is_not_a_root() {
     let object = index(TEXT_ASSET);
     assert!(!roots::video(&object, None, &paths("a/b-002.usm.bytes")));
+    assert!(!roots::video(&object, None, &paths("a/b-002.USM.BYTES")));
+}
+
+#[test]
+fn prefab_root_paths_ignore_ascii_case() {
+    let object = index(1);
+    assert!(roots::field_camera(
+        &object,
+        None,
+        &paths("Assets/MySekai/Camera/FieldCamera.Prefab")
+    ));
+    assert!(roots::emoticon(
+        &object,
+        None,
+        &paths("Assets/MySekai/Effect/Emoticon/001/001.Prefab")
+    ));
 }

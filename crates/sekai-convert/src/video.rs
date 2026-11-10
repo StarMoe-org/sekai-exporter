@@ -51,7 +51,7 @@ fn parts(root: ObjectId, cx: &dyn Context) -> Result<Vec<ObjectId>, ConvertError
     let entries = cx.container(root)?;
     let own = entries
         .iter()
-        .find(|(path, id)| *id == root && path.ends_with(SUFFIX))
+        .find(|(path, id)| *id == root && path.to_ascii_lowercase().ends_with(SUFFIX))
         .ok_or_else(|| malformed("the object has no USM container path"))?;
     let Some((base, _)) = segment(&own.0) else {
         return Ok(vec![root]);
@@ -60,7 +60,7 @@ fn parts(root: ObjectId, cx: &dyn Context) -> Result<Vec<ObjectId>, ConvertError
         .iter()
         .filter_map(|(path, id)| {
             let (other, number) = segment(path)?;
-            (other == base).then_some((number, *id))
+            other.eq_ignore_ascii_case(base).then_some((number, *id))
         })
         .collect();
     parts.sort_by_key(|(number, _)| *number);

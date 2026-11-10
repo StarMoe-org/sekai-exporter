@@ -25,6 +25,8 @@ const PACKAGE_PREFIX: &str = "mysekai/effect/emoticon/";
 
 const TEXTURE_EXTENSION: &str = "webp";
 const LOOP_END_FLAG: &str = "LOOP_END_FLAG";
+/// The most frames an overhead item's resampled clip may hold.
+const MAX_FRAMES: u32 = 100_000;
 
 const TRANSFORM: i32 = 4;
 const ANIMATOR: i32 = 95;
@@ -174,7 +176,7 @@ struct Animator {
     loop_end_flag: &'static str,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq)]
 struct Texture {
     name: String,
     file: String,
@@ -182,7 +184,7 @@ struct Texture {
     height: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Sprite {
     texture: String,
@@ -260,7 +262,7 @@ struct Walk<'c> {
     node_of_game_object: HashMap<i64, String>,
     view: Option<View>,
     animator: Option<AnimatorPart>,
-    emitters: BTreeMap<String, EmitterParts>,
+    emitters: BTreeMap<(String, usize), EmitterParts>,
     textures: BTreeMap<String, Texture>,
     sprites: BTreeMap<String, Sprite>,
     unsupported: Vec<Json>,
@@ -383,13 +385,14 @@ impl<'c> Walk<'c> {
             Some(parent) => format!("{parent}/{name}"),
         };
         self.node_of_game_object.insert(owner.path_id, path.clone());
+        let index = self.nodes.len();
         let mut drawing = None;
         for component in self.components(&game_object)? {
             let component = self.cx.object(component)?;
             if component.class_id == SPRITE_RENDERER {
                 drawing = Some(self.drawing(&component)?);
             } else {
-                self.component(component, &path)?;
+                self.component(component, &path, index)?;
             }
         }
         self.nodes.push(Node {
@@ -406,16 +409,21 @@ impl<'c> Walk<'c> {
     }
 
     /// Records a component other than a sprite renderer, by what it is.
-    fn component(&mut self, component: Object, node: &str) -> Result<(), ConvertError> {
+    fn component(
+        &mut self,
+        component: Object,
+        node: &str,
+        index: usize,
+    ) -> Result<(), ConvertError> {
         match component.class_id {
             TRANSFORM | RECT_TRANSFORM => {}
             MONO_BEHAVIOUR => self.view_component(&component)?,
             ANIMATOR => self.animator_component(&component, node)?,
             PARTICLE_SYSTEM => {
-                self.emitter_parts(node).system = Some(component);
+                self.emitter_parts(node, index).system = Some(component);
             }
             PARTICLE_RENDERER => {
-                self.emitter_parts(node).renderer = Some(component);
+                self.emitter_parts(node, index).renderer = Some(component);
             }
             _ => self.unsupported.push(json!({
                 "type": component.class,
@@ -425,9 +433,9 @@ impl<'c> Walk<'c> {
         Ok(())
     }
 
-    fn emitter_parts(&mut self, node: &str) -> &mut EmitterParts {
+    fn emitter_parts(&mut self, node: &str, index: usize) -> &mut EmitterParts {
         self.emitters
-            .entry(node.to_owned())
+            .entry((node.to_owned(), index))
             .or_insert(EmitterParts {
                 system: None,
                 renderer: None,
@@ -487,15 +495,18 @@ impl<'c> Walk<'c> {
         let texture_pointer = required_reference(field(fields, "m_RD")?, "texture")?;
         let texture = self.texture(self.resolved(sprite.id, texture_pointer)?)?;
         let texture = texture.ok_or_else(|| malformed(format!("sprite {name} has no texture")))?;
-        self.sprites.insert(
-            name.clone(),
-            Sprite {
-                texture: texture.name,
-                rect: numbers(fields, "m_Rect", &["x", "y", "width", "height"])?,
-                pivot: numbers(fields, "m_Pivot", &["x", "y"])?,
-                pixels_to_units: number(fields, "m_PixelsToUnits")?,
-            },
-        );
+        let entry = Sprite {
+            texture: texture.name,
+            rect: numbers(fields, "m_Rect", &["x", "y", "width", "height"])?,
+            pivot: numbers(fields, "m_Pivot", &["x", "y"])?,
+            pixels_to_units: number(fields, "m_PixelsToUnits")?,
+        };
+        if let Some(existing) = self.sprites.get(&name)
+            && existing != &entry
+        {
+            return Err(malformed(format!("two sprites are named {name}")));
+        }
+        self.sprites.insert(name.clone(), entry);
         Ok(name)
     }
 
@@ -523,6 +534,11 @@ impl<'c> Walk<'c> {
             width: count(&texture.fields, "m_Width")?,
             height: count(&texture.fields, "m_Height")?,
         };
+        if let Some(existing) = self.textures.get(&name)
+            && existing != &entry
+        {
+            return Err(malformed(format!("two textures are named {name}")));
+        }
         self.textures.insert(name, entry.clone());
         Ok(Some(entry))
     }
@@ -541,7 +557,9 @@ impl<'c> Walk<'c> {
             .iter()
             .filter(|(_, object)| *object == id)
             .find_map(|(path, _)| {
-                let (_, relative) = path.split_once(PACKAGE_PREFIX)?;
+                let lower = path.to_ascii_lowercase();
+                let pos = lower.find(PACKAGE_PREFIX)?;
+                let relative = &path[pos + PACKAGE_PREFIX.len()..];
                 let (stem, _) = relative.rsplit_once('.')?;
                 Some(format!("{stem}.{TEXTURE_EXTENSION}"))
             }))
@@ -635,7 +653,7 @@ impl<'c> Walk<'c> {
             let clip = clip_document(id, self.cx)?;
             clips.insert(
                 phase(&clip.name).to_owned(),
-                resampled(&clip, animation_paths, &mut self.unsupported),
+                resampled(&clip, animation_paths, &mut self.unsupported)?,
             );
         }
         Ok(clips)
@@ -645,7 +663,7 @@ impl<'c> Walk<'c> {
         let parts = std::mem::take(&mut self.emitters);
         parts
             .into_iter()
-            .map(|(node, parts)| self.emitter(node, parts))
+            .map(|((node, _), parts)| self.emitter(node, parts))
             .collect()
     }
 
@@ -711,8 +729,8 @@ fn resampled(
     clip: &ClipDocument,
     animation_paths: &HashMap<u32, String>,
     unsupported: &mut Vec<Json>,
-) -> Clip {
-    let frames = frame_count(clip);
+) -> Result<Clip, ConvertError> {
+    let frames = frame_count(clip)?;
     let mut grouped: BTreeMap<(u32, u32), Vec<&Curve>> = BTreeMap::new();
     let mut other_attributes = Vec::new();
     for curve in &clip.curves {
@@ -760,18 +778,27 @@ fn resampled(
             })
         })
         .collect();
-    Clip {
+    Ok(Clip {
         rate: clip.sample_rate,
         duration: clip.stop_time,
         channels,
-    }
+    })
 }
 
 /// The number of frames that cover a clip at its own rate, at least two.
-fn frame_count(clip: &ClipDocument) -> u32 {
-    // A clip lasts seconds at tens of frames a second, so the rounded product fits.
-    let last_frame = (clip.stop_time * clip.sample_rate).round() as u32;
-    (last_frame + 1).max(2)
+fn frame_count(clip: &ClipDocument) -> Result<u32, ConvertError> {
+    if !clip.sample_rate.is_finite() || clip.sample_rate <= 0.0 {
+        return Err(malformed("the clip has a non-positive sample rate"));
+    }
+    if !clip.stop_time.is_finite() || clip.stop_time < 0.0 {
+        return Err(malformed("the clip has a negative duration"));
+    }
+    let product = f64::from(clip.stop_time) * f64::from(clip.sample_rate);
+    if !product.is_finite() || product.round() >= f64::from(MAX_FRAMES) {
+        return Err(malformed("the clip has too many frames"));
+    }
+    let last_frame = product.round() as u32;
+    Ok((last_frame + 1).max(2))
 }
 
 /// The `width` components of a property at `time`; a component without a curve is 0.
@@ -922,7 +949,7 @@ mod tests {
         ];
         let paths = HashMap::from([(7, "mark".to_owned())]);
         let mut unsupported = Vec::new();
-        let clip = resampled(&clip_with(curves), &paths, &mut unsupported);
+        let clip = resampled(&clip_with(curves), &paths, &mut unsupported).unwrap();
         assert_eq!(clip.channels.len(), 1);
         assert_eq!(clip.channels[0].path.as_deref(), Some("mark"));
         assert_eq!(clip.channels[0].property, "position");
@@ -940,7 +967,7 @@ mod tests {
         ];
         let paths = HashMap::from([(7, "mark".to_owned())]);
         let mut unsupported = Vec::new();
-        let clip = resampled(&clip_with(curves), &paths, &mut unsupported);
+        let clip = resampled(&clip_with(curves), &paths, &mut unsupported).unwrap();
         assert_eq!(clip.channels.len(), 1);
         assert_eq!(clip.channels[0].path, None);
         assert_eq!(
@@ -957,6 +984,17 @@ mod tests {
     fn a_clip_of_no_length_still_has_two_frames() {
         let mut clip = clip_with(Vec::new());
         clip.stop_time = 0.0;
-        assert_eq!(frame_count(&clip), 2);
+        assert_eq!(frame_count(&clip).unwrap(), 2);
+    }
+
+    #[test]
+    fn invalid_clip_rates_and_extreme_lengths_are_malformed() {
+        let mut zero_rate = clip_with(Vec::new());
+        zero_rate.sample_rate = 0.0;
+        assert_eq!(frame_count(&zero_rate).unwrap_err().code, "malformed");
+
+        let mut huge = clip_with(Vec::new());
+        huge.stop_time = 1.0e20;
+        assert_eq!(frame_count(&huge).unwrap_err().code, "malformed");
     }
 }

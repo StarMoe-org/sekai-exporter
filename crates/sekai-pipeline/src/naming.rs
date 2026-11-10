@@ -79,9 +79,8 @@ pub fn assign(candidates: &[Candidate<'_>]) -> Vec<Option<String>> {
             };
             let mut uses: HashMap<(i64, &str), u32> = HashMap::new();
             for &i in class {
-                *uses
-                    .entry((candidates[i].path_id, candidates[i].form))
-                    .or_default() += 1;
+                let key = (candidates[i].path_id, candidates[i].form);
+                *uses.entry(key).or_default() += 1;
             }
             let objects = class.chunk_by(|&a, &b| {
                 let (ca, cb) = (&candidates[a], &candidates[b]);

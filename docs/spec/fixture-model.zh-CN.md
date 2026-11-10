@@ -12,7 +12,7 @@
 - 读取每个材质的 `extras`，以构建源作者所指定的材质，并按相对 URI 从文件之外加载每种贴图；
 - 读取场景根上的碰撞文档，并从中解析每个碰撞体、导航修饰器与导航障碍。
 
-通过本形式，它不读取文件之外的任何其他内容：碰撞文档与全部渲染器状态都在 GLB 之内，其旁仅有它的图像。哪些家具有模型、每件使用哪个文件，它从已发布集合的资产列表中获知。
+它还读取角色使用该家具时所站的位置，即挂点（2.6）。它一次读取一个版本全部家具的挂点，来源是合并后的[家具挂点](fixture-attach-points.zh-CN.md)文档，这样在加载任何模型之前就能规划角色的去处。除该文档外，它通过本形式不读取文件之外的任何其他内容：碰撞文档与全部渲染器状态都在 GLB 之内，其旁仅有它的图像。哪些家具有模型、每件使用哪个文件，它从已发布集合的资产列表中获知。
 
 ## 2. 内容
 
@@ -22,6 +22,7 @@
 |---|---|
 | `model` | 该家具，作为一个[模型文件](model.zh-CN.md)，带有下文所述的差异 |
 | `texture/<n>` | 模型文件的第 `n` 个图像，从 0 开始计数，形式与[贴图形式](texture.zh-CN.md)的 `image` 成员相同。角色按 `n` 的顺序出现 |
+| `attach-points` | 该家具的挂点（2.6），UTF-8 JSON 文档，扩展名 `json` |
 
 只有预制体带有 `FixtureView` 的家具才有 `fixture-model` 资产（3.1）。
 
@@ -137,6 +138,31 @@
 
 本版本的形式不写任何动画：GLB 没有 `animations` 数组，文件只含有该家具的几何、材质与碰撞。家具的机关与时间轴所播放的动画 clip 将由以后的形式携带；本页尚未定义它们。
 
+### 2.6 挂点
+
+挂点是角色使用该家具时所站的位置：角色走到挂点的起点；挂点有终点时，再从起点移到终点。游戏把一件家具的挂点存为其 `FixtureView` 上的一个列表，并按列表中的位置找到挂点。每个挂点有一个起点定位器和一个终点定位器，都是预制体的 GameObject，游戏读取各自的世界位置与旋转。
+
+`attach-points` 成员是一个 JSON 对象：
+
+| 键 | 值 |
+|---|---|
+| `root` | `{ "sourceObject", "scale": [x, y, z] }`：根节点的 `sourceObject`（2.2），以及模型文件所写的根的局部缩放 |
+| `collider` | `FixtureView` 指定为自身碰撞体的网格碰撞体：`{ "sourceObject", "componentId" }`，即持有它的 GameObject 所对应节点的 `sourceObject`，以及其组件 id 的十进制字符串，与它在 `sourceCollision` 中的记录一致（2.3）。`FixtureView` 未指定时为 `null` |
+| `points` | 各挂点，按 `FixtureView` 的存储顺序。没有挂点的家具为空列表 |
+
+挂点为 `{ "start", "end" }`。`start` 是一个定位器；`end` 是一个定位器，挂点没有终点定位器时为 `null`。定位器为：
+
+| 键 | 值 |
+|---|---|
+| `name` | 定位器 GameObject 的 `m_Name` |
+| `sourceObject` | 定位器节点的 `sourceObject` |
+| `position` | `[x, y, z]`，定位器节点在模型文件中的 `translation` |
+| `rotation` | `[x, y, z, w]`，定位器节点在模型文件中的 `rotation` |
+
+定位器是根的子节点（3.3），因此其位置与旋转处于根的坐标系中、尚未施加根的缩放，并采用第 4 节的基变换。放置后的家具把定位器放在：放置姿态 × `root` 的 `scale` × 定位器的 `position` 与 `rotation`。定位器自身的缩放不影响其位置，不写出。
+
+本成员按游戏的存储如实记录挂点，不写由它们推出的任何值。游戏从起点定位器的名字取得挂点的槽位（去掉 `loc_start` 后按 `_` 切分，第二段为槽位号；没有第二段或不是数字时为 0）；这条规则属于运行时，作用于 `name`，名字不符合它不是本形式的错误。存储的挂点中 `IsUsing` 与 `CharacterId` 两个字段是游戏运行时的状态，不写出。
+
 ## 3. 来源
 
 ### 3.1 输入
@@ -166,7 +192,7 @@
 | `Material` | `m_Name`、`m_Shader`、`m_CustomRenderQueue`、`m_SavedProperties`、`m_ValidKeywords`、`m_InvalidKeywords` |
 | `Shader` | `m_ParsedForm`（名称、贴图属性的默认值、通道及其渲染状态） |
 | `Texture2D` | 图像、采样设置 |
-| 脚本为 `FixtureView` 的 `MonoBehaviour` | 放置根（`fixtureViewRoot`） |
+| 脚本为 `FixtureView` 的 `MonoBehaviour` | 放置根（`fixtureViewRoot`）；挂点所用的 `_attachPoints`（其各项带 `StartLoc` 与 `EndLoc`）与 `_collider`（2.6） |
 | 脚本为 `RoadView` 的 `MonoBehaviour` | 道路格类型（`roadCellType`） |
 | `MeshCollider`、`BoxCollider`、`SphereCollider`、`CapsuleCollider`、`NavMeshModifier`、`NavMeshAgent`、`NavMeshObstacle` | `sourceCollision` 与碰撞几何 |
 
@@ -184,6 +210,8 @@
 | 碰撞三角形的某个索引在其位置之外，或碰撞体的网格没有三角形 | 错误 `malformed` |
 | 材质的着色器无法解析 | 缺失对象的错误 |
 | 碰撞体的网格无法解析，或不是 `Mesh` | 错误 `malformed` |
+| 挂点的 `StartLoc` 为空，或定位器、`_collider` 未解析到预制体中所指类的对象 | 错误 `malformed` |
+| 定位器的 GameObject 不是根的子节点 | 错误 `unsupported`：其姿态需经二者之间的各变换合成 |
 | 根的预制体没有 `FixtureView` GameObject | 错误 `malformed`（本形式对这样的包没有资产） |
 | 节点的网格数据使用了[模型文件](model.zh-CN.md)未列出的格式、分量数、拓扑或顶点通道 | 模型文件的 `unsupported` |
 | 某个贴图无法解码 | [贴图形式](texture.zh-CN.md)的错误 |
@@ -213,6 +241,7 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 3. 根带有 `fixtureCollision`；碰撞体所命名的每个 `geometryId` 都是该文档中的一个几何；导航构建所读取的每个节点都具有带 2.3 所述键的 `sourceCollision`。
 4. 每个材质都有 `shader`、`renderQueue`、`keywords`、`floats`、`ints`、`colors` 与 `textures`，且每个贴图属性都在 `textures` 中；程序由 2.4.4 给出运行时材质的每个材质，都持有该程序的材质代码从 extras 读取的每个键；`textures` 中的每个贴图索引都命名一个贴图，每个贴图都命名一个作为该资产成员的图像；每个图像都是 WebP 且可解码。
 5. 文件没有 `animations`；文件中的任何对象都不带版本字段、坐标约定，或单位或 UV 约定字符串。
+6. `attach-points` 成员按存储顺序列出 `_attachPoints` 的每一项；其中每个 `sourceObject` 都是文件中某个节点的 `sourceObject`；每个定位器的 `position` 与 `rotation` 等于其节点的 `translation` 与 `rotation`；`root.scale` 等于根节点的 `scale`；`collider` 不为空时，指向该节点 `sourceCollision` 中的一个碰撞体。
 
 **检查。**
 
@@ -220,11 +249,12 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 - 节点身份、变换、extras 键、材质表（extras 与源属性的对照）、碰撞文档与节点记录，都与同一资源包的独立导出结果逐值比较，每处差异均予以说明。
 - WebP 图像按解码后的像素与源贴图比较。
 - 对抽取的家具有样本，游戏自身导航构建从源读取的每个节点与碰撞体，都通过 `sourceObject` 从本文件重新找到，其形状一致。
+- 一个版本每件家具的挂点，与从同一批资源包的对象文档独立读出的其 `FixtureView` 的 `_attachPoints` 比较：数量、顺序、定位器的名字与身份，以及姿态。
 - 同一资源包在单线程与多线程下，以及在原生与 Web 目标上，给出的字节都相同。
 
 ## 6. 版本
 
-形式版本：1。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表）的改动，都会改变本形式每种资产的版本。
+形式版本：2。版本 2 增加了 `attach-points` 成员。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表、挂点）的改动，都会改变本形式每种资产的版本。
 
 ## 7. 为节点命名
 

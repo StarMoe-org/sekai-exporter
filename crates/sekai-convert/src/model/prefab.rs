@@ -72,6 +72,34 @@ impl Node {
     pub fn components(&self) -> &[Object] {
         &self.components
     }
+
+    /// The game object's name (`m_Name`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The local transform of the game object, in the frame of the model file: the change of
+    /// basis of model files applied to its position and rotation.
+    pub fn pose(&self) -> Pose {
+        let [x, y, z] = self.transform.position;
+        let [qx, qy, qz, qw] = self.transform.rotation;
+        Pose {
+            translation: [-x, y, z],
+            rotation: [qx, -qy, -qz, qw],
+            scale: self.transform.scale,
+        }
+    }
+}
+
+/// A local transform in the frame of the model file, as a node of the file carries it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pose {
+    /// The translation.
+    pub translation: [f32; 3],
+    /// The rotation, as a quaternion `[x, y, z, w]`.
+    pub rotation: [f32; 4],
+    /// The scale.
+    pub scale: [f32; 3],
 }
 
 /// The local transform of a game object, in the engine's coordinates.

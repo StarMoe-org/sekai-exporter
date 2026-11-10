@@ -106,7 +106,7 @@
 | `facial-table` 与 `facial-tables` | 已完成 | [表情表](spec/facial-tables.zh-CN.md) |
 | `field-camera` | 已完成 | [场地相机](spec/field-camera.zh-CN.md) |
 | `fixture-model`：家具及其材质、碰撞体与导航数据 | 已完成 | [家具模型](spec/fixture-model.zh-CN.md) |
-| 家具挂点 | 计划中 | 角色和物品挂到家具上的位置 |
+| 家具挂点：`fixture-model` 的 `attach-points` 成员，以及合并它们的 `fixture-attach-points` | 已完成 | [家具模型](spec/fixture-model.zh-CN.md#26-挂点)、[家具挂点](spec/fixture-attach-points.zh-CN.md) |
 | 家具机关 | 计划中 | 家具中会动、可交互的部分 |
 | 角色模型 | 计划中 | 基于与服装、家具共用的模型文件写出层 |
 | 动作库 | 计划中 | 运行时播放的角色动作及其索引 |

@@ -607,6 +607,7 @@ fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
         Box::new(sekai_mysekai::emoticon::Emoticons),
         Box::new(sekai_mysekai::facial::FacialTables),
         Box::new(sekai_mysekai::fixture_areas::FixtureAreas),
+        Box::new(sekai_mysekai::fixture_attach_points::FixtureAttachPoints),
         Box::new(sekai_mysekai::fixtures::Fixtures),
         Box::new(sekai_mysekai::talks::FixtureTalks),
         Box::new(sekai_mysekai::talks::Talks),

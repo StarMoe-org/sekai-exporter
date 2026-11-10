@@ -66,9 +66,7 @@ fn node(
     config: &ModelConfig<'_>,
     cx: &dyn Context,
 ) -> Result<gltf::Node, ConvertError> {
-    let t = prefab_node.transform;
-    let [x, y, z] = t.position;
-    let [qx, qy, qz, qw] = t.rotation;
+    let pose = prefab_node.pose();
     let mut extras = match config.node_keys {
         Some(source) => source.keys(prefab_node.object, cx)?,
         None => BTreeMap::new(),
@@ -79,9 +77,9 @@ fn node(
     Ok(gltf::Node {
         name: prefab_node.name.clone(),
         children: prefab_node.children.clone(),
-        translation: [-x, y, z],
-        rotation: [qx, -qy, -qz, qw],
-        scale: t.scale,
+        translation: pose.translation,
+        rotation: pose.rotation,
+        scale: pose.scale,
         mesh: None,
         skin: None,
         weights: Vec::new(),

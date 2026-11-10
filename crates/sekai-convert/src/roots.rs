@@ -55,7 +55,10 @@ pub type Rule = fn(&ObjectIndex, Option<&str>, &[String]) -> bool;
 
 /// The `<base>` and number of a container path of the form `<base>-<NNN>.usm.bytes`.
 pub(crate) fn segment(path: &str) -> Option<(&str, u32)> {
-    let (base, number) = path.strip_suffix(USM)?.rsplit_once('-')?;
+    if path.len() < USM.len() || !path[path.len() - USM.len()..].eq_ignore_ascii_case(USM) {
+        return None;
+    }
+    let (base, number) = path[..path.len() - USM.len()].rsplit_once('-')?;
     if number.len() != 3 || !number.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
@@ -86,9 +89,10 @@ pub fn audio(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> b
 /// The roots of the `video` form. A video split into segments starts from its first one.
 pub fn video(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
     object.class_id == TEXT_ASSET
-        && paths
-            .iter()
-            .any(|path| path.ends_with(USM) && segment(path).is_none_or(|(_, number)| number == 1))
+        && paths.iter().any(|path| {
+            let lower = path.to_ascii_lowercase();
+            lower.ends_with(USM) && segment(&lower).is_none_or(|(_, number)| number == 1)
+        })
 }
 
 /// The roots of the `text` form: text assets that do not hold CRI audio or video.
@@ -112,7 +116,10 @@ pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String
 
 /// The roots of the `field-camera` form.
 pub fn field_camera(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
-    object.class_id == GAME_OBJECT && paths.iter().any(|path| path.ends_with(FIELD_CAMERA))
+    object.class_id == GAME_OBJECT
+        && paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().ends_with(FIELD_CAMERA))
 }
 
 /// The roots of the `fixture-model` form: the prefabs of the furniture pieces, which the container
@@ -165,7 +172,10 @@ pub fn fixture_reactions(object: &ObjectIndex, script: Option<&str>, _paths: &[S
 
 /// The roots of the `emoticon` form.
 pub fn emoticon(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
-    object.class_id == GAME_OBJECT && paths.iter().any(|path| path.contains(EMOTICONS))
+    object.class_id == GAME_OBJECT
+        && paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains(EMOTICONS))
 }
 
 /// The roots of the `live2d-model` form.

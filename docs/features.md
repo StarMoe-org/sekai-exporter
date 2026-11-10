@@ -30,7 +30,7 @@ In `sekai-convert`, general to Unity content:
 | `timeline` | Timeline assets into timeline documents |
 | `particles` | Particle systems into particle documents |
 
-The features `ugui`, `timeline` and `particles` are defined and do not convert anything yet. These three asset forms have no root rules, so a build without them reports nothing with `not_compiled`, as rule 4 describes. `model` reads a prefab into a [model file](spec/model.md) and a [component document](spec/component-documents.md), and `animation` decodes `AnimationClip` into [clip documents](spec/clip-documents.md). The Live2D and costume forms contain them; neither family produces assets of its own or glTF animation yet. `audio` does not convert `AudioClip` yet.
+The features `ugui`, `timeline` and `particles` are defined and do not convert anything yet. These three asset forms have no root rules, so a build without them reports nothing with `not_compiled`, as rule 4 describes. `model` reads a prefab into a [model file](spec/model.md) and a [component document](spec/component-documents.md), and `animation` decodes `AnimationClip` into [clip documents](spec/clip-documents.md). The Live2D, costume and MySekai forms contain them; neither family produces assets of its own or glTF animation yet. `audio` does not convert `AudioClip` yet.
 
 In `sekai-moesekai`, specific to this game, for the default consumer:
 

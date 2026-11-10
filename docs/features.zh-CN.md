@@ -30,7 +30,7 @@
 | `timeline` | Timeline 资产，转换为时间轴文档 |
 | `particles` | 粒子系统，转换为粒子文档 |
 
-`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。这三种资产形式没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容，如规则 4 所述。`model` 把预制体读成[模型文件](spec/model.zh-CN.md)与[组件文档](spec/component-documents.zh-CN.md)，`animation` 把 `AnimationClip` 解码为[剪辑文档](spec/clip-documents.zh-CN.md)。Live2D 形式与服装形式包含它们；这两个转换器族目前都不单独产出资产，也不产出 glTF 动画。`audio` 目前尚不转换 `AudioClip`。
+`ugui`、`timeline` 与 `particles` 这几个 feature 已定义，目前尚不转换任何内容。这三种资产形式没有根规则，因此不含它们的构建不会以 `not_compiled` 报告任何内容，如规则 4 所述。`model` 把预制体读成[模型文件](spec/model.zh-CN.md)与[组件文档](spec/component-documents.zh-CN.md)，`animation` 把 `AnimationClip` 解码为[剪辑文档](spec/clip-documents.zh-CN.md)。Live2D、服装与 MySekai 形式包含它们；这两个转换器族目前都不单独产出资产，也不产出 glTF 动画。`audio` 目前尚不转换 `AudioClip`。
 
 `sekai-moesekai` 中本游戏专有、服务于默认使用者的转换器族：
 
@@ -38,7 +38,7 @@
 |---|---|
 | `scenario` | 剧本对象，转换为剧本文档 |
 | `episode` | 剧情的一话：一条数据表记录，以及其所引用的全部已解析资产 |
-| `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.md) |
+| `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.zh-CN.md) |
 | `costume` | 供 3D 浏览的服装部件、动作与组合，见[服装形式](spec/costume.zh-CN.md) |
 
 `costume` 产出 `costume-model` 与 `costume-motion` 两种形式，并由游戏数据表产出 `costume-role` 形式（每个角色在每个单元一份，含其可穿戴的全部部件）和 `costume` 形式（每套服装的各个造型）。

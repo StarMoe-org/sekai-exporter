@@ -718,8 +718,9 @@ pub(crate) fn plan_unit<'a>(
     }
     let candidates: Vec<Candidate<'_>> = found
         .iter()
-        .map(|(_, id, object, logical)| Candidate {
+        .map(|(converter, id, object, logical)| Candidate {
             logical: logical.as_ref(),
+            form: converter.name(),
             class_id: object.class_id,
             class: &object.class,
             bundle: unit,

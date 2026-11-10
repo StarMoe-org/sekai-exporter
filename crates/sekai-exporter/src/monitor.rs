@@ -60,13 +60,13 @@ pub(crate) struct Monitor {
     wake: Condvar,
 }
 
-impl Monitor {
-    /// What each derivation of the run cost, by name.
-    #[cfg(feature = "cdn")]
-    pub(crate) fn costs(&self) -> BTreeMap<String, Cost> {
-        self.costs.lock().unwrap().clone()
-    }
+/// What each derivation of the run cost, by name.
+#[cfg(feature = "cdn")]
+pub(crate) fn costs(monitor: &Monitor) -> BTreeMap<String, Cost> {
+    monitor.costs.lock().unwrap().clone()
+}
 
+impl Monitor {
     /// Runs `body` while samples are taken, then writes the summary.
     pub(crate) fn watch<T>(path: &Path, body: impl FnOnce(&Monitor) -> T) -> io::Result<T> {
         let monitor = Monitor {

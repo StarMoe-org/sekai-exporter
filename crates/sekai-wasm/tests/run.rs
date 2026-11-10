@@ -161,3 +161,34 @@ fn the_in_memory_object_documents_are_those_of_a_native_run() {
     assert_eq!(failed[0].0, "not_a_bundle");
     assert_eq!(files, expected);
 }
+
+#[test]
+fn converters_cover_every_default_form_and_absent_rule() {
+    let forms: Vec<&str> = converters().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        forms,
+        [
+            "texture",
+            "sprite",
+            "audio",
+            "video",
+            "text",
+            "font",
+            "live2d-model",
+            "live2d-motions",
+            "emoticon",
+            "facial-table",
+            "field-camera",
+            "fixture-meta",
+            "fixture-model",
+            "fixture-reactions",
+            "site-model",
+            "scenario",
+            "virtual-live-script",
+            "action-set",
+            "scenario-background",
+            "costume-model",
+            "costume-motion",
+        ]
+    );
+}

@@ -58,7 +58,7 @@
 | `texture` | 已完成 | [贴图](spec/texture.zh-CN.md) |
 | `sprite` | 部分完成 | [精灵](spec/sprite.zh-CN.md)；图集完整持有的精灵会导出，裁边或旋转的图集精灵报告为不支持 |
 | `audio`：CRI cue 表 | 已完成 | [音频](spec/audio.zh-CN.md) |
-| `AudioClip` | 计划中 | 含有它的资源包报告为不完整 |
+| `AudioClip` | 待定 | 没有转换器，含有它的资源包报告为不完整。当前各版本中尚无已知含有它的资源包，第一步是找到一个 |
 | `video` | 已完成 | [视频](spec/video.zh-CN.md) |
 | `text` 与 `font` | 已完成 | [文本](spec/text.zh-CN.md)、[字体](spec/font.zh-CN.md) |
 | `live2d` 模型与动作集 | 已完成 | [Live2D](spec/live2d.zh-CN.md)、[Live2D 动作](live2d-motion.zh-CN.md) |

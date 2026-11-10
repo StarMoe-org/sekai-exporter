@@ -58,7 +58,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 | `texture` | Done | [Texture](spec/texture.md) |
 | `sprite` | Partial | [Sprite](spec/sprite.md); sprites drawn from an atlas are exported when the atlas holds them whole, and trimmed or rotated atlas sprites are reported as unsupported |
 | `audio`: CRI cue sheets | Done | [Audio](spec/audio.md) |
-| `AudioClip` | Planned | Bundles that contain one are reported as incomplete |
+| `AudioClip` | Open | No converter; a bundle that contains one is reported as incomplete. No bundle of the current versions is known to hold one, so the first step is to find one |
 | `video` | Done | [Video](spec/video.md) |
 | `text` and `font` | Done | [Text](spec/text.md), [Font](spec/font.md) |
 | `live2d` model and motion set | Done | [Live2D](spec/live2d.md), [Live2D motions](live2d-motion.md) |

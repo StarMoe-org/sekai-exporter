@@ -10,8 +10,8 @@ use sekai_convert::tables::{TableContext, TableConverter, TablePlan};
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex, Value};
 use serde_json::{Map, Value as Json, json};
 
-use crate::particle::{array, field};
 use crate::scripts::{DOCUMENT, NoAssets, OneAsset, document, malformed};
+use crate::stored::{array, field};
 
 const FORM: &str = "fixture-meta";
 const NAME: &str = "mysekai-runtime/fixture-areas";

@@ -148,7 +148,7 @@ pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
                 add(at(format!("{file}.webp")), Transform::Copy);
                 add(at(format!("{file}.png")), Transform::Png);
             }
-            ("texture", _) => add(at(format!("{file}.{}", m.extension)), Transform::Copy),
+            ("texture", "image") => add(at(format!("{file}.{}", m.extension)), Transform::Copy),
             ("audio", role) => {
                 if let Some(cue) = role.strip_prefix("cue/")
                     && !is_alternative_mix(bundle, cue)
@@ -325,6 +325,20 @@ mod tests {
         );
         assert_eq!(files(&d).len(), 2);
         assert!(files(&d).iter().all(|f| f.member == 0));
+    }
+
+    #[test]
+    fn texture_slices_are_not_part_of_the_view() {
+        let slices = document(
+            "b/lut",
+            "texture",
+            "b",
+            &[("slice/0", "webp"), ("slice/1", "webp")],
+        );
+        assert!(files(&slices).is_empty());
+
+        let hdr = document("b/sky", "texture", "b", &[("image", "exr")]);
+        assert_eq!(paths(&hdr), [("b/sky.exr".to_owned(), Transform::Copy)]);
     }
 
     #[test]

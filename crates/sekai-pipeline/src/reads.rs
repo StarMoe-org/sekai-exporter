@@ -74,4 +74,8 @@ impl Context for Reads<'_> {
     fn container(&self, from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         self.inner.container(from)
     }
+
+    fn file_name(&self, from: ObjectId) -> Result<&str, ConvertError> {
+        self.inner.file_name(from)
+    }
 }

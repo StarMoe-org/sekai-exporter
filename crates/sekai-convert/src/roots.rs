@@ -32,6 +32,9 @@ const FIELD_CAMERA: &str = "/mysekai/camera/fieldcamera.prefab";
 const FIXTURE_META: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureBundleMeta";
 const FIXTURE_REACTIONS: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureReactionDataSet";
 
+/// The directory of the furniture pieces, each in a directory of its own.
+const FIXTURE_MODELS: &str = "/resources/ondemand/mysekai/fixture/";
+
 /// The package directory of the overhead items of the MySekai characters.
 const EMOTICONS: &str = "/mysekai/effect/emoticon/";
 const GAME_OBJECT: i32 = 1;
@@ -105,6 +108,27 @@ pub fn facial_table(object: &ObjectIndex, script: Option<&str>, _paths: &[String
 /// The roots of the `field-camera` form.
 pub fn field_camera(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
     object.class_id == GAME_OBJECT && paths.iter().any(|path| path.ends_with(FIELD_CAMERA))
+}
+
+/// The roots of the `fixture-model` form: the prefabs of the furniture pieces, which the container
+/// lists as `…/resources/ondemand/mysekai/fixture/<name>/<name>.prefab`.
+pub fn fixture_model(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == GAME_OBJECT && paths.iter().any(|path| is_fixture_model(path))
+}
+
+/// Whether `path`, compared without regard to case, is `…/<FIXTURE_MODELS><name>/<name>.prefab`.
+fn is_fixture_model(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    let Some((directory, name)) = path
+        .strip_suffix(".prefab")
+        .and_then(|stem| stem.rsplit_once('/'))
+    else {
+        return false;
+    };
+    !name.is_empty()
+        && directory
+            .strip_suffix(name)
+            .is_some_and(|parent| parent.ends_with(FIXTURE_MODELS))
 }
 
 /// The roots of the `fixture-meta` form.

@@ -34,6 +34,10 @@ impl Context for Bundle {
     fn container(&self, _from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         Ok(self.container.clone())
     }
+
+    fn file_name(&self, _from: ObjectId) -> Result<&str, ConvertError> {
+        Ok("CAB-test")
+    }
 }
 
 fn id(path_id: i64) -> ObjectId {

@@ -80,6 +80,34 @@ pub(super) struct Delta {
     pub(super) tangent: [f32; 3],
 }
 
+/// The triangles of a mesh that no renderer need draw, such as the mesh of a collider, in the
+/// coordinates and winding of model files.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeshTriangles {
+    /// The vertex positions.
+    pub positions: Vec<[f32; 3]>,
+    /// The triangles of every submesh, in submesh order, as indices of `positions`.
+    pub triangles: Vec<[u32; 3]>,
+}
+
+/// Reads the triangles of the mesh `id`. A mesh without triangles is malformed.
+pub fn mesh_triangles(id: ObjectId, cx: &dyn Context) -> Result<MeshTriangles, ConvertError> {
+    let mesh = read(id, cx)?;
+    let triangles: Vec<[u32; 3]> = mesh
+        .submeshes
+        .iter()
+        .flat_map(|indices| indices.as_chunks::<3>().0)
+        .copied()
+        .collect();
+    if triangles.is_empty() {
+        return Err(malformed("the mesh has no triangles"));
+    }
+    Ok(MeshTriangles {
+        positions: mesh.positions,
+        triangles,
+    })
+}
+
 /// Reads the mesh `id`.
 pub(super) fn read(id: ObjectId, cx: &dyn Context) -> Result<Mesh, ConvertError> {
     let object = cx.object(id)?;

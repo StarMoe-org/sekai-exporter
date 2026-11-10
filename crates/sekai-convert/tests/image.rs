@@ -40,6 +40,10 @@ impl Context for File {
     fn container(&self, _: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         Ok(Vec::new())
     }
+
+    fn file_name(&self, _: ObjectId) -> Result<&str, ConvertError> {
+        Ok("CAB-test")
+    }
 }
 
 fn s(fields: Vec<(&str, Value)>) -> Value {

@@ -1,10 +1,14 @@
-//! Model files on objects built in memory: the choices a form makes in `ModelConfig`.
+//! Model files on objects built in memory: the choices a form makes in `ModelConfig`, the shaders
+//! a material names and the triangles of a mesh that no renderer need draw.
 
 #![cfg(feature = "model")]
 
 use std::collections::BTreeMap;
 
-use sekai_convert::model::{ModelConfig, NodeKeys, Prefab, model_file};
+use sekai_convert::model::{
+    MaterialKeys, MeshTriangles, ModelConfig, NodeKeys, ParsedShader, Prefab, StateValue,
+    mesh_triangles, model_file,
+};
 use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr, Value};
 use serde_json::{Value as Json, json};
 
@@ -40,6 +44,10 @@ impl Context for File {
     fn container(&self, _: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         Ok(Vec::new())
     }
+
+    fn file_name(&self, _: ObjectId) -> Result<&str, ConvertError> {
+        Ok("CAB-test")
+    }
 }
 
 fn s(fields: Vec<(&str, Value)>) -> Value {
@@ -68,6 +76,15 @@ fn list(items: Vec<Value>) -> Value {
 
 fn map(entries: Vec<(Value, Value)>) -> Value {
     Value::Map(entries)
+}
+
+/// The map of the string keys `entries`.
+fn string_map(entries: &[(&str, &str)]) -> Value {
+    let entries = entries
+        .iter()
+        .map(|&(key, value)| (text(key), text(value)))
+        .collect();
+    map(entries)
 }
 
 /// A reference to the object with the path ID `path_id`, or a null reference for 0.
@@ -325,6 +342,7 @@ fn base_config() -> ModelConfig<'static> {
         flip_uv: true,
         declare_webp: true,
         node_keys: None,
+        material_keys: None,
     }
 }
 
@@ -480,7 +498,11 @@ impl NodeKeys for SourceObjects {
     ) -> Result<BTreeMap<String, Json>, ConvertError> {
         let game_object = cx.object(object)?;
         let name = game_object.fields.get("m_Name").and_then(Value::as_str);
-        let source = json!({ "pathId": object.path_id.to_string(), "name": name });
+        let source = json!({
+            "file": cx.file_name(object)?,
+            "pathId": object.path_id.to_string(),
+            "name": name,
+        });
         Ok(BTreeMap::from([("sourceObject".to_owned(), source)]))
     }
 }
@@ -500,6 +522,526 @@ fn every_node_has_the_keys_of_the_form_and_of_its_source() {
     let glb = Glb::read(&part_glb(&config));
     assert_eq!(
         glb.extras(0),
-        &json!({ "active": false, "sourceObject": { "name": "body", "pathId": "1" } })
+        &json!({
+            "active": false,
+            "sourceObject": { "file": "CAB-test", "pathId": "1", "name": "body" },
+        })
+    );
+}
+
+/// Material keys that add `usage`, and the key `clash` under the given name when it is given.
+struct MaterialUsage {
+    clash: Option<&'static str>,
+}
+
+impl MaterialKeys for MaterialUsage {
+    fn keys(
+        &self,
+        material: ObjectId,
+        cx: &dyn Context,
+    ) -> Result<BTreeMap<String, Json>, ConvertError> {
+        let material = cx.object(material)?;
+        let name = material.fields.get("m_Name").and_then(Value::as_str);
+        let mut keys = BTreeMap::from([
+            ("usage".to_owned(), json!(name)),
+            (
+                "furniture".to_owned(),
+                json!({ "tiers": ["base", "detail"] }),
+            ),
+        ]);
+        if let Some(clash) = self.clash {
+            keys.insert(clash.to_owned(), Json::Null);
+        }
+        Ok(keys)
+    }
+}
+
+/// The material extras of the part's material, written with `keys` as its material keys.
+fn part_material_keys(keys: &MaterialUsage) -> Json {
+    let config = ModelConfig {
+        material_keys: Some(keys),
+        ..base_config()
+    };
+    let glb = Glb::read(&part_glb(&config));
+    glb.json["materials"][0]["extras"]["unity"].clone()
+}
+
+#[test]
+fn the_material_keys_of_the_form_follow_the_keys_of_the_material() {
+    let unity = part_material_keys(&MaterialUsage { clash: None });
+    assert_eq!(
+        unity,
+        json!({
+            "shader": null,
+            "renderQueue": -1,
+            "keywords": { "valid": [], "invalid": [] },
+            "textures": {
+                "_MainTex": { "texture": 0, "scale": [1.0, 1.0], "offset": [0.0, 0.0] },
+                "_DetailTex": { "texture": null, "scale": [1.0, 1.0], "offset": [0.0, 0.0] }
+            },
+            "floats": {},
+            "ints": {},
+            "colors": {},
+            "furniture": { "tiers": ["base", "detail"] },
+            "usage": "body_mat"
+        })
+    );
+}
+
+#[test]
+fn a_material_key_may_not_take_the_name_of_a_key_of_the_material() {
+    let stored = [
+        "shader",
+        "renderQueue",
+        "keywords",
+        "textures",
+        "floats",
+        "ints",
+        "colors",
+    ];
+    for clash in stored {
+        let config = ModelConfig {
+            material_keys: Some(&MaterialUsage { clash: Some(clash) }),
+            ..base_config()
+        };
+        let file = part();
+        let prefab = Prefab::read(id(1), &file).expect("a prefab");
+        let error = model_file(&prefab, &config, &file).expect_err("a key of the form is taken");
+        assert_eq!(error.code, "malformed");
+        assert!(error.message.contains(clash), "{error}");
+    }
+}
+
+/// The structure `value` without its field `name`.
+fn remove(value: &mut Value, name: &str) {
+    let Value::Struct(fields) = value else {
+        panic!("the value is not a structure")
+    };
+    fields.retain(|(field, _)| field != name);
+}
+
+/// The value of the field `name` of a structure, to replace.
+fn get_mut<'v>(value: &'v mut Value, name: &str) -> &'v mut Value {
+    let Value::Struct(fields) = value else {
+        panic!("the value is not a structure")
+    };
+    fields
+        .iter_mut()
+        .find(|(field, _)| field == name)
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| panic!("{name} is missing"))
+}
+
+/// A `SerializedTagMap` of the tags `tags`.
+fn tag_map(tags: &[(&str, &str)]) -> Value {
+    s(vec![("tags", string_map(tags))])
+}
+
+/// A render state value (`SerializedShaderFloatValue`): the property `property` it binds, or
+/// `<noninit>` for a value that binds none, and the value compiled into the pass.
+fn state_value(property: &str, compiled: f32) -> Value {
+    s(vec![("val", f(compiled)), ("name", text(property))])
+}
+
+/// The blend state of render target 0 that binds `_ColorMask`, `_SrcBlend` and `_DstBlend`,
+/// draws with its blend operators as `fixed`, and blends the alpha channel with `<noninit>`.
+fn shader_blend(fixed: f32) -> Value {
+    s(vec![
+        ("colMask", state_value("_ColorMask", 15.0)),
+        ("srcBlend", state_value("_SrcBlend", 1.0)),
+        ("destBlend", state_value("_DstBlend", 10.0)),
+        ("srcBlendAlpha", state_value("<noninit>", 0.0)),
+        ("destBlendAlpha", state_value("<noninit>", 0.0)),
+        ("blendOp", state_value("<noninit>", fixed)),
+        ("blendOpAlpha", state_value("<noninit>", 0.0)),
+    ])
+}
+
+/// The state of a pass named `name` with the tags `tags`: it draws with `_Cull`, `_ZTest` and
+/// `_ZWrite` and the blend state of `shader_blend(0)`.
+fn shader_state(name: &str, tags: &[(&str, &str)]) -> Value {
+    s(vec![
+        ("m_Name", text(name)),
+        ("m_Tags", tag_map(tags)),
+        ("culling", state_value("_Cull", 2.0)),
+        ("zTest", state_value("_ZTest", 4.0)),
+        ("zWrite", state_value("_ZWrite", 0.0)),
+        ("rtBlend0", shader_blend(0.0)),
+    ])
+}
+
+/// A pass as its subshader stores it: its state only.
+fn shader_pass(state: Value) -> Value {
+    s(vec![("m_State", state)])
+}
+
+/// A shader property named `name` of type `kind` whose number default is `default`, and whose
+/// default texture, for a texture property, is `texture`.
+fn shader_property(name: &str, kind: i64, default: f32, texture: &str) -> Value {
+    s(vec![
+        ("m_Name", text(name)),
+        ("m_Type", i(kind)),
+        ("m_DefValue[0]", f(default)),
+        ("m_DefValue[1]", f(0.0)),
+        ("m_DefValue[2]", f(0.0)),
+        ("m_DefValue[3]", f(0.0)),
+        (
+            "m_DefTexture",
+            s(vec![("m_DefaultName", text(texture)), ("m_TexDim", i(2))]),
+        ),
+    ])
+}
+
+/// The properties `Test/Material` declares: two textures with defaults, then each render state
+/// property with a default of its own, distinct from the value its passes compile in.
+fn shader_properties() -> Vec<Value> {
+    vec![
+        shader_property("_MainTex", 4, 0.0, "white"),
+        shader_property("_Ramp", 4, 0.0, "grey"),
+        shader_property("_Cull", 5, 0.0, ""),
+        shader_property("_ZTest", 5, 8.0, ""),
+        shader_property("_ZWrite", 5, 9.0, ""),
+        shader_property("_ColorMask", 5, 7.0, ""),
+        shader_property("_SrcBlend", 5, 5.0, ""),
+        shader_property("_DstBlend", 5, 3.0, ""),
+    ]
+}
+
+/// Three subshaders: one of two passes, one whose LightMode only its subshader's tags give, and
+/// one without passes.
+fn test_sub_shaders() -> Vec<Value> {
+    vec![
+        s(vec![
+            (
+                "m_Passes",
+                list(vec![
+                    shader_pass(shader_state(
+                        "Main",
+                        &[("LightMode", "ForwardBase"), ("Queue", "Geometry")],
+                    )),
+                    shader_pass(shader_state("Overlay", &[])),
+                ]),
+            ),
+            ("m_Tags", tag_map(&[("RenderType", "Opaque")])),
+            ("m_LOD", i(200)),
+        ]),
+        s(vec![
+            (
+                "m_Passes",
+                list(vec![shader_pass(shader_state("Shadow", &[]))]),
+            ),
+            (
+                "m_Tags",
+                tag_map(&[("LightMode", "ShadowCaster"), ("RenderType", "Transparent")]),
+            ),
+            ("m_LOD", i(100)),
+        ]),
+        s(vec![
+            ("m_Passes", list(Vec::new())),
+            ("m_Tags", tag_map(&[])),
+            ("m_LOD", i(0)),
+        ]),
+    ]
+}
+
+/// A shader object named `Test/Material` with the properties `properties` and the subshaders
+/// `sub_shaders`.
+fn shader_object(properties: Vec<Value>, sub_shaders: Vec<Value>) -> Object {
+    object(
+        1,
+        48,
+        s(vec![
+            ("m_Name", text("Test/Material")),
+            (
+                "m_ParsedForm",
+                s(vec![
+                    ("m_PropInfo", s(vec![("m_Props", list(properties))])),
+                    ("m_SubShaders", list(sub_shaders)),
+                    ("m_Name", text("Test/Material")),
+                    ("m_FallbackName", text("")),
+                ]),
+            ),
+        ]),
+    )
+}
+
+/// The shader `Test/Material`.
+fn test_shader() -> Object {
+    shader_object(shader_properties(), test_sub_shaders())
+}
+
+fn parse(shader: Object) -> Result<ParsedShader, ConvertError> {
+    ParsedShader::read(id(1), &File(vec![shader]))
+}
+
+#[test]
+fn a_shader_is_read_with_its_name_texture_defaults_and_subshaders() {
+    let parsed = parse(test_shader()).expect("a shader");
+    assert_eq!(parsed.name, "Test/Material");
+    assert_eq!(
+        parsed.texture_defaults_json(),
+        json!({ "_MainTex": "white", "_Ramp": "grey" })
+    );
+    let tag = |name: &str, value: &str| (name.to_owned(), value.to_owned());
+    let opaque = [tag("RenderType", "Opaque")];
+    let transparent = [
+        tag("LightMode", "ShadowCaster"),
+        tag("RenderType", "Transparent"),
+    ];
+    let forward = [tag("LightMode", "ForwardBase"), tag("Queue", "Geometry")];
+    let sub_shaders: Vec<_> = parsed
+        .sub_shaders
+        .iter()
+        .map(|sub_shader| {
+            let passes: Vec<_> = sub_shader
+                .passes
+                .iter()
+                .map(|pass| (pass.name.as_str(), pass.tags.as_slice()))
+                .collect();
+            (sub_shader.tags.as_slice(), passes)
+        })
+        .collect();
+    assert_eq!(
+        sub_shaders,
+        [
+            (
+                &opaque[..],
+                vec![("Main", &forward[..]), ("Overlay", &[][..])]
+            ),
+            (&transparent[..], vec![("Shadow", &[][..])]),
+            (&[][..], Vec::new()),
+        ]
+    );
+}
+
+#[test]
+fn a_pass_reads_the_values_its_state_binds_and_the_values_it_carries() {
+    let parsed = parse(test_shader()).expect("a shader");
+    let main = &parsed.sub_shaders[0].passes[0];
+    assert_eq!(
+        main.culling,
+        StateValue::Property {
+            name: "_Cull".to_owned(),
+            default: Some(0.0),
+            compiled: 2.0,
+        }
+    );
+    assert_eq!(
+        main.z_test,
+        StateValue::Property {
+            name: "_ZTest".to_owned(),
+            default: Some(8.0),
+            compiled: 4.0,
+        }
+    );
+    assert_eq!(
+        main.z_write,
+        StateValue::Property {
+            name: "_ZWrite".to_owned(),
+            default: Some(9.0),
+            compiled: 0.0,
+        }
+    );
+    assert_eq!(
+        main.blend.dest_blend,
+        StateValue::Property {
+            name: "_DstBlend".to_owned(),
+            default: Some(3.0),
+            compiled: 10.0,
+        }
+    );
+    assert_eq!(main.blend.src_blend_alpha, StateValue::Fixed(0.0));
+    assert_eq!(main.blend.blend_op, StateValue::Fixed(0.0));
+}
+
+#[test]
+fn a_light_mode_tag_of_a_subshader_is_not_the_light_mode_of_its_passes() {
+    let parsed = parse(test_shader()).expect("a shader");
+    let light_modes: Vec<_> = parsed
+        .passes_json()
+        .iter()
+        .map(|row| row["lightMode"].clone())
+        .collect();
+    assert_eq!(
+        light_modes,
+        [json!("ForwardBase"), json!(null), json!(null)]
+    );
+}
+
+#[test]
+fn passes_json_names_each_pass_with_its_shader_defaults_and_fixed_values() {
+    let parsed = parse(test_shader()).expect("a shader");
+    let rows = parsed.passes_json();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0],
+        json!({
+            "name": "Main",
+            "lightMode": "ForwardBase",
+            "subShaderIndex": 0,
+            "passIndex": 0,
+            "subShaderTags": { "RenderType": "Opaque" },
+            "tags": { "LightMode": "ForwardBase", "Queue": "Geometry" },
+            "renderState": {
+                "culling": { "name": "_Cull", "default": 0.0, "val": 2.0 },
+                "zTest": { "name": "_ZTest", "default": 8.0, "val": 4.0 },
+                "zWrite": { "name": "_ZWrite", "default": 9.0, "val": 0.0 },
+                "blend": {
+                    "colMask": { "name": "_ColorMask", "default": 7.0, "val": 15.0 },
+                    "srcBlend": { "name": "_SrcBlend", "default": 5.0, "val": 1.0 },
+                    "destBlend": { "name": "_DstBlend", "default": 3.0, "val": 10.0 },
+                    "srcBlendAlpha": { "name": "<noninit>", "val": 0.0 },
+                    "destBlendAlpha": { "name": "<noninit>", "val": 0.0 },
+                    "blendOp": { "name": "<noninit>", "val": 0.0 },
+                    "blendOpAlpha": { "name": "<noninit>", "val": 0.0 }
+                }
+            }
+        })
+    );
+    assert_eq!(rows[1]["subShaderIndex"], json!(0));
+    assert_eq!(rows[1]["passIndex"], json!(1));
+    assert_eq!(rows[1]["tags"], json!({}));
+    assert_eq!(rows[2]["name"], json!("Shadow"));
+    assert_eq!(rows[2]["subShaderIndex"], json!(1));
+    assert_eq!(
+        rows[2]["subShaderTags"],
+        json!({ "LightMode": "ShadowCaster", "RenderType": "Transparent" })
+    );
+}
+
+/// A shader named `Test/Material` with a single subshader through the pass `pass`.
+fn shader_with_pass(pass: Value) -> Object {
+    let sub_shaders = vec![s(vec![
+        ("m_Passes", list(vec![pass])),
+        ("m_Tags", tag_map(&[])),
+        ("m_LOD", i(0)),
+    ])];
+    shader_object(shader_properties(), sub_shaders)
+}
+
+/// The error of reading the shader `shader`.
+fn malformed(shader: Object) -> ConvertError {
+    parse(shader).expect_err("the shader is malformed")
+}
+
+#[test]
+fn a_state_that_binds_a_property_the_shader_does_not_declare_has_no_default() {
+    let mut state = shader_state("Main", &[]);
+    *get_mut(&mut state, "culling") = state_value("_CullFront", 1.0);
+    let parsed = parse(shader_with_pass(shader_pass(state))).expect("a shader");
+    assert_eq!(
+        parsed.passes_json()[0]["renderState"]["culling"],
+        json!({ "name": "_CullFront", "val": 1.0 })
+    );
+}
+
+#[test]
+fn a_pass_without_a_z_test_is_malformed() {
+    let mut state = shader_state("Main", &[]);
+    remove(&mut state, "zTest");
+    assert_eq!(
+        malformed(shader_with_pass(shader_pass(state))).code,
+        "malformed"
+    );
+}
+
+#[test]
+fn a_pass_without_the_blend_state_of_render_target_0_is_malformed() {
+    let mut state = shader_state("Main", &[]);
+    remove(&mut state, "rtBlend0");
+    assert_eq!(
+        malformed(shader_with_pass(shader_pass(state))).code,
+        "malformed"
+    );
+}
+
+#[test]
+fn an_object_that_is_not_a_shader_is_malformed() {
+    let material = object(1, 21, s(vec![("m_Name", text("Test/Material"))]));
+    assert_eq!(malformed(material).code, "malformed");
+}
+
+/// One submesh of the index buffer: `count` 16-bit indices from `first`, drawn from the vertex
+/// `base_vertex` on.
+fn submesh(first: u64, count: u64, base_vertex: u64) -> Value {
+    s(vec![
+        ("firstByte", u(first)),
+        ("indexCount", u(count)),
+        ("topology", i(0)),
+        ("baseVertex", u(base_vertex)),
+    ])
+}
+
+/// The three-vertex mesh of the part with its submeshes `submeshes` and its 16-bit `indices`.
+fn mesh_with_submeshes(submeshes: Vec<Value>, indices: &[u16]) -> Object {
+    let mut mesh = mesh(5, "collider", UVS);
+    *get_mut(&mut mesh.fields, "m_SubMeshes") = list(submeshes);
+    *get_mut(&mut mesh.fields, "m_IndexBuffer") =
+        Value::Bytes(indices.iter().flat_map(|i| i.to_le_bytes()).collect());
+    mesh
+}
+
+/// The triangles of the mesh `mesh`.
+fn triangles_of(mesh: Object) -> Result<MeshTriangles, ConvertError> {
+    mesh_triangles(mesh.id, &File(vec![mesh]))
+}
+
+#[test]
+fn mesh_triangles_reflect_the_positions_and_reverse_the_triangles() {
+    let mesh = mesh_with_submeshes(
+        vec![submesh(0, 3, 0), submesh(6, 3, 0)],
+        &[0, 1, 2, 2, 1, 0],
+    );
+    assert_eq!(
+        triangles_of(mesh).expect("a collider mesh"),
+        MeshTriangles {
+            positions: vec![[0.0, 1.0, 2.0], [-1.0, 2.0, 3.0], [-2.0, 3.0, 4.0]],
+            triangles: vec![[0, 2, 1], [2, 0, 1]],
+        }
+    );
+}
+
+#[test]
+fn mesh_triangles_apply_the_base_vertex_of_each_submesh() {
+    let mesh = mesh_with_submeshes(
+        vec![submesh(0, 3, 0), submesh(6, 3, 1)],
+        &[0, 2, 1, 1, 0, 0],
+    );
+    let triangles = triangles_of(mesh).expect("a collider mesh");
+    assert_eq!(triangles.triangles, [[0, 1, 2], [2, 1, 1]]);
+}
+
+#[test]
+fn a_mesh_without_triangles_is_malformed() {
+    let mesh = mesh_with_submeshes(vec![submesh(0, 0, 0)], &[]);
+    assert_eq!(
+        triangles_of(mesh).expect_err("no triangles").code,
+        "malformed"
+    );
+}
+
+#[test]
+fn a_triangle_index_outside_the_positions_is_malformed() {
+    let mesh = mesh_with_submeshes(
+        vec![submesh(0, 3, 0), submesh(6, 3, 1)],
+        &[0, 1, 2, 0, 1, 2],
+    );
+    assert_eq!(
+        triangles_of(mesh).expect_err("the second submesh starts at vertex 3"),
+        ConvertError::new("malformed", "an index lies outside the vertices"),
+    );
+}
+
+#[test]
+fn a_position_that_is_not_finite_is_malformed() {
+    let mut mesh = mesh(5, "collider", UVS);
+    let vertex_data = get_mut(&mut mesh.fields, "m_VertexData");
+    let Value::Bytes(bytes) = get_mut(vertex_data, "m_DataSize") else {
+        panic!("vertex data holds bytes")
+    };
+    bytes[0..4].copy_from_slice(&f32::NAN.to_le_bytes());
+    assert_eq!(
+        triangles_of(mesh).expect_err("a vertex is NaN").code,
+        "malformed"
     );
 }

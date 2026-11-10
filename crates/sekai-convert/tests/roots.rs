@@ -27,6 +27,10 @@ impl Context for NoContext {
     fn container(&self, _from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
         unreachable!("an absent converter reads nothing")
     }
+
+    fn file_name(&self, _from: ObjectId) -> Result<&str, ConvertError> {
+        unreachable!("an absent converter reads nothing")
+    }
 }
 
 fn index(class_id: i32) -> ObjectIndex {

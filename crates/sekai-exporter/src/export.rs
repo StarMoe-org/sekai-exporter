@@ -99,6 +99,7 @@ fn mysekai_objects() -> Vec<Box<dyn Converter>> {
         Box::new(sekai_mysekai::facial::FacialTable),
         Box::new(sekai_mysekai::field_camera::FieldCamera),
         Box::new(sekai_mysekai::fixture_areas::FixtureMeta),
+        Box::new(sekai_mysekai::fixture_model::FixtureModel),
         Box::new(sekai_mysekai::fixture_reactions::FixtureReactions),
     ]
 }
@@ -106,13 +107,15 @@ fn mysekai_objects() -> Vec<Box<dyn Converter>> {
 #[cfg(not(feature = "mysekai"))]
 fn mysekai_objects() -> Vec<Box<dyn Converter>> {
     use sekai_convert::roots::{
-        Absent, emoticon, facial_table, field_camera, fixture_meta, fixture_reactions,
+        Absent, emoticon, facial_table, field_camera, fixture_meta, fixture_model,
+        fixture_reactions,
     };
     vec![
         Absent::boxed("emoticon", emoticon),
         Absent::boxed("facial-table", facial_table),
         Absent::boxed("field-camera", field_camera),
         Absent::boxed("fixture-meta", fixture_meta),
+        Absent::boxed("fixture-model", fixture_model),
         Absent::boxed("fixture-reactions", fixture_reactions),
     ]
 }

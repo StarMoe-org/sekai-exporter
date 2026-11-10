@@ -84,6 +84,7 @@ const PART: ModelConfig<'static> = ModelConfig {
     flip_uv: true,
     declare_webp: true,
     node_keys: None,
+    material_keys: None,
 };
 
 /// Whether the component document of a part lists `component`.

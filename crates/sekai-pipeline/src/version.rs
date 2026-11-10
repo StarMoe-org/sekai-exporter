@@ -516,6 +516,15 @@ impl Context for Version<'_> {
         }
         Ok(entries)
     }
+
+    fn file_name(&self, from: ObjectId) -> Result<&str, ConvertError> {
+        self.index
+            .bundles()
+            .get(from.bundle)
+            .and_then(|bundle| bundle.files.get(from.file))
+            .map(|file| file.path.as_str())
+            .ok_or_else(|| self.missing(from))
+    }
 }
 
 #[cfg(test)]

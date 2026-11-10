@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 
-use sekai_convert::{Chunk, Context, ConvertError, Object, ObjectId, PPtr};
+use sekai_convert::{Chunk, Context, ConvertError, EngineObject, Object, ObjectId, PPtr};
 
 /// A [`Context`] that records what a conversion reads and refuses anything outside the closure,
 /// so that everything an output depends on is in its fingerprint.
@@ -77,5 +77,13 @@ impl Context for Reads<'_> {
 
     fn file_name(&self, from: ObjectId) -> Result<&str, ConvertError> {
         self.inner.file_name(from)
+    }
+
+    fn engine_object(
+        &self,
+        from: ObjectId,
+        reference: PPtr,
+    ) -> Result<Option<EngineObject>, ConvertError> {
+        self.inner.engine_object(from, reference)
     }
 }

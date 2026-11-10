@@ -147,6 +147,28 @@ pub trait Context {
     /// The name of the serialized file that holds object `from`, such as `CAB-0123456789abcdef`,
     /// as the directory of its bundle stores it.
     fn file_name(&self, from: ObjectId) -> Result<&str, ConvertError>;
+
+    /// The object of the engine's own resources that a reference stored in object `from` points
+    /// to, or `None` when it points elsewhere. Such an object, a built-in mesh for instance, is
+    /// part of the player and in no bundle, so [`Context::resolve`] cannot give it. The default
+    /// is `None`.
+    fn engine_object(
+        &self,
+        from: ObjectId,
+        reference: PPtr,
+    ) -> Result<Option<EngineObject>, ConvertError> {
+        let _ = (from, reference);
+        Ok(None)
+    }
+}
+
+/// An object of a file of the engine's own resources.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EngineObject {
+    /// The file, such as `Library/unity default resources`.
+    pub file: String,
+    /// The path ID.
+    pub path_id: i64,
 }
 
 /// An object as a converter sees it.

@@ -35,6 +35,11 @@ const FIXTURE_REACTIONS: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureReactionDa
 /// The directory of the furniture pieces, each in a directory of its own.
 const FIXTURE_MODELS: &str = "/resources/ondemand/mysekai/fixture/";
 
+/// The directory of the packages of the MySekai places.
+const SITES: &str = "/resources/ondemand/mysekai/site/";
+/// The directory, below [`SITES`], of the map of the places, which is a screen of the interface.
+const SITE_MAP: &str = "sitemap/";
+
 /// The package directory of the overhead items of the MySekai characters.
 const EMOTICONS: &str = "/mysekai/effect/emoticon/";
 const GAME_OBJECT: i32 = 1;
@@ -129,6 +134,23 @@ fn is_fixture_model(path: &str) -> bool {
         && directory
             .strip_suffix(name)
             .is_some_and(|parent| parent.ends_with(FIXTURE_MODELS))
+}
+
+/// The roots of the `site-model` form: every prefab of a package of the MySekai places, the map
+/// aside. The form writes one asset for each package, from its principal prefab, and none for the
+/// other prefabs.
+pub fn site_model(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == GAME_OBJECT && paths.iter().any(|path| is_site_prefab(path))
+}
+
+/// Whether `path`, compared without regard to case, is `…<SITES><path>.prefab` outside
+/// [`SITE_MAP`].
+pub fn is_site_prefab(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.ends_with(".prefab")
+        && path
+            .split_once(SITES)
+            .is_some_and(|(_, rest)| !rest.starts_with(SITE_MAP))
 }
 
 /// The roots of the `fixture-meta` form.

@@ -1,4 +1,4 @@
-//! What the keys of nodes recognize in the components of a piece.
+//! What the keys of nodes recognize in the components of a game object.
 
 use sekai_convert::Object;
 
@@ -7,7 +7,7 @@ const MONO_BEHAVIOUR: i32 = 114;
 
 /// Whether `component` is a `MonoBehaviour` of the script whose class name `class` is, as
 /// `.FixtureView` names the `FixtureView` class of any namespace.
-pub(super) fn is_script(component: &Object, class: &str) -> bool {
+pub(crate) fn is_script(component: &Object, class: &str) -> bool {
     component.class_id == MONO_BEHAVIOUR
         && component
             .script

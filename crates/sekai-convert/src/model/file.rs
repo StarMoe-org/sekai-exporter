@@ -16,7 +16,7 @@ use super::material::Materials;
 use super::mesh::{self, Colors, Mesh};
 use super::prefab::{Node, Prefab};
 use super::read::{array, flag, malformed, reference, unsupported};
-use crate::{Context, ConvertError, Member, Object, ObjectId, Value};
+use crate::{Context, ConvertError, EngineObject, Member, Object, ObjectId, Value};
 
 const MESH_RENDERER: i32 = 23;
 const MESH_FILTER: i32 = 33;
@@ -133,6 +133,8 @@ fn node(
 struct Renderer<'a> {
     object: &'a Object,
     mesh: Option<ObjectId>,
+    /// The mesh, when it is an object of the engine's own resources rather than of a bundle.
+    engine_mesh: Option<EngineObject>,
     skinned: bool,
 }
 
@@ -151,15 +153,22 @@ impl<'a> Renderer<'a> {
         } else {
             node.components.iter().find(|c| c.class_id == MESH_FILTER)
         };
-        let mesh = match source {
-            Some(source) => cx.resolve(source.id, reference(&source.fields, "m_Mesh")?)?,
-            None => None,
+        let (mesh, engine_mesh) = match source {
+            Some(source) => {
+                let stored = reference(&source.fields, "m_Mesh")?;
+                match cx.engine_object(source.id, stored)? {
+                    Some(engine) => (None, Some(engine)),
+                    None => (cx.resolve(source.id, stored)?, None),
+                }
+            }
+            None => (None, None),
         };
         let skinned = object.class_id == SKINNED_MESH_RENDERER
             && !array(&object.fields, "m_Bones")?.is_empty();
         Ok(Some(Self {
             object,
             mesh,
+            engine_mesh,
             skinned,
         }))
     }
@@ -333,6 +342,12 @@ impl Builder<'_> {
         let fields = &renderer.object.fields;
         if !flag(fields, "m_Enabled")? {
             node.extras.insert("enabled", Json::Bool(false));
+        }
+        if let Some(engine) = &renderer.engine_mesh {
+            node.extras.insert(
+                "engineMesh",
+                serde_json::json!({ "file": engine.file, "pathId": engine.path_id.to_string() }),
+            );
         }
         let Some(mesh) = renderer.mesh else {
             return Ok(());

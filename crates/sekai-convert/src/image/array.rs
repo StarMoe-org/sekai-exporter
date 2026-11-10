@@ -6,6 +6,10 @@ use sekai_unity::Value;
 use super::{StreamData, dimension, field, malformed};
 use crate::{Content, Context, ConvertError, Member, ObjectId};
 
+/// `GraphicsFormat.R8G8B8A8_UNorm`.
+const RGBA8: i64 = 8;
+/// `TextureFormat.RGBA32`, which stores the same texels.
+const TEXTURE_RGBA32: i32 = 4;
 /// `GraphicsFormat.R16G16B16A16_SFloat`.
 pub(super) const RGBA_HALF: i64 = 48;
 /// `GraphicsFormat.RGBA_ASTC6X6_UNorm`.
@@ -55,6 +59,7 @@ pub(super) fn slices(
         .enumerate()
         .map(|(i, bytes)| {
             let content = match format {
+                RGBA8 => Content::Image(texture::decode(TEXTURE_RGBA32, width, height, bytes)?),
                 ASTC_6X6 => {
                     Content::Image(texture::decode(TEXTURE_ASTC_6X6, width, height, bytes)?)
                 }

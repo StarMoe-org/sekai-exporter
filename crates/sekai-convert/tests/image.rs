@@ -319,6 +319,28 @@ fn every_slice_of_a_half_float_3d_texture_is_a_member() {
 }
 
 #[test]
+fn every_slice_of_an_rgba8_3d_texture_is_an_image() {
+    // 1 x 2 x 2: slice z, row y (from the bottom) holds the value z * 2 + y in every channel.
+    let data = (0..4u8).flat_map(|v| [v; 4]).collect();
+    let file = File(vec![array(117, 8, 1, 2, 2, data)]);
+    let got = members(Texture.convert(id(5), &file).unwrap().unwrap());
+    let slices: Vec<(&str, Vec<u8>)> = got
+        .iter()
+        .map(|(role, content)| match content {
+            Content::Image(image) => (role.as_str(), image.pixels().to_vec()),
+            other => panic!("not an image: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        slices,
+        [
+            ("slice/0", [[1u8; 4], [0; 4]].concat()),
+            ("slice/1", [[3u8; 4], [2; 4]].concat()),
+        ]
+    );
+}
+
+#[test]
 fn an_astc_texture_array_decodes_each_slice() {
     // One 6 x 6 block per slice: a void-extent block of one LDR colour.
     let block = |r: u16| {
@@ -349,7 +371,7 @@ fn an_astc_texture_array_decodes_each_slice() {
 
 #[test]
 fn texture_arrays_of_other_formats_or_sizes_are_errors() {
-    let file = File(vec![array(187, 8, 1, 1, 1, vec![0; 4])]);
+    let file = File(vec![array(187, 4, 1, 1, 1, vec![0; 4])]);
     assert_eq!(
         Texture.convert(id(5), &file).unwrap_err().code,
         "unsupported"

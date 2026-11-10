@@ -2,7 +2,7 @@
 
 [中文](texture.zh-CN.md)
 
-The `texture` form is the image a texture object stores, as a plain picture. Converter: `texture` in `sekai-convert` (feature `image`). Form version: 2.
+The `texture` form is the image a texture object stores, as a plain picture. Converter: `texture` in `sekai-convert` (feature `image`). Form version: 3.
 
 ## 1. Runtime
 
@@ -41,6 +41,7 @@ Texture arrays and 3D textures name their format with `m_Format`, a graphics for
 
 | Graphics format (`m_Format`) | Expansion |
 |---|---|
+| 8 R8G8B8A8_UNorm | As texture format 4, RGBA32 |
 | 48 R16G16B16A16_SFloat | Linear RGBA in binary16, the stored values unchanged |
 | 134 RGBA_ASTC6X6_UNorm | As texture format 50, ASTC 6×6 |
 
@@ -83,3 +84,4 @@ The decoders are checked byte for byte against independent reference decoders: A
 |---|---|
 | 1 | First version |
 | 2 | Texture arrays and 3D textures, one member per slice |
+| 3 | Texture arrays and 3D textures in graphics format 8, R8G8B8A8_UNorm |

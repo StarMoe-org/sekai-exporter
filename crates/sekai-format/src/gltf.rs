@@ -1,11 +1,13 @@
 //! The JSON part of the glTF 2.0 files that model files are, specified in `docs/spec/model.md`.
 //!
 //! Only what model files use is modelled. Numbers stored as 32-bit values are `f32`, so they are
-//! written as the shortest decimal that reads back to them.
+//! written as the shortest decimal that reads back to them. Extras that a form defines itself are
+//! JSON values, which a form that replaces them can write in the shape it defines.
 
 use std::collections::BTreeMap;
 
 use serde::{Serialize, Serializer};
+use serde_json::Value as Json;
 
 use crate::number::Number;
 
@@ -114,31 +116,37 @@ pub struct Node {
     /// The weights of the morph targets of its mesh.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub weights: Vec<f32>,
-    /// Its state.
+    /// Its state: the keys model files define, such as `active` and `enabled`, and the keys of the
+    /// form that writes the file, by key.
     #[serde(skip_serializing_if = "NodeExtras::is_empty")]
     pub extras: NodeExtras,
 }
 
-/// The `extras` of a node: each key is present only when it is `false`.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct NodeExtras {
-    /// Whether the game object is active.
-    #[serde(skip_serializing_if = "is_true")]
-    pub active: bool,
-    /// Whether its renderer is enabled.
-    #[serde(skip_serializing_if = "is_true")]
-    pub enabled: bool,
-}
+/// The `extras` of a node, written in key order.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct NodeExtras(pub BTreeMap<String, Json>);
 
 impl NodeExtras {
+    /// The keys of a node, written in name order whatever order they are given in.
+    pub fn new(keys: impl IntoIterator<Item = (String, Json)>) -> Self {
+        Self(keys.into_iter().collect())
+    }
+
     /// Whether no key is written.
     pub fn is_empty(&self) -> bool {
-        self.active && self.enabled
+        self.0.is_empty()
     }
-}
 
-fn is_true(value: &bool) -> bool {
-    *value
+    /// The value of the key `key`, when the node writes it.
+    pub fn get(&self, key: &str) -> Option<&Json> {
+        self.0.get(key)
+    }
+
+    /// Writes `value` under `key`, replacing any value the key had.
+    pub fn insert(&mut self, key: &str, value: Json) {
+        self.0.insert(key.to_owned(), value);
+    }
 }
 
 /// A mesh.
@@ -256,7 +264,7 @@ pub struct TextureTransform {
 /// The `extras` of a material.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MaterialExtras {
-    /// The material as stored.
+    /// The material as stored, and the keys the form that writes the file adds.
     pub unity: UnityMaterial,
 }
 
@@ -278,6 +286,9 @@ pub struct UnityMaterial {
     pub ints: Named<i64>,
     /// Each colour property, as `[r, g, b, a]`.
     pub colors: Named<[Number; 4]>,
+    /// Further keys by name, as the form that writes the file defines them.
+    #[serde(flatten)]
+    pub further: BTreeMap<String, Json>,
 }
 
 /// The keywords of a material.
@@ -315,8 +326,12 @@ impl<T: Serialize> Serialize for Named<T> {
 pub struct Texture {
     /// The sampler.
     pub sampler: usize,
-    /// The image, through [`EXT_TEXTURE_WEBP`].
-    pub extensions: TextureExtensions,
+    /// The image, through [`EXT_TEXTURE_WEBP`] or named directly.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<TextureExtensions>,
+    /// The image, when the file does not use [`EXT_TEXTURE_WEBP`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<usize>,
 }
 
 /// The extensions of a texture.
@@ -449,8 +464,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_node_writes_only_the_state_that_differs_from_the_default() {
-        let node = |extras| Node {
+    fn a_node_without_extras_writes_none() {
+        let node = Node {
             name: "Hip".into(),
             children: vec![1],
             translation: [0.0, 1.5, 0.0],
@@ -459,23 +474,27 @@ mod tests {
             mesh: None,
             skin: None,
             weights: Vec::new(),
-            extras,
-        };
-        let text = |n: &Node| serde_json::to_string(n).unwrap();
-        let all = NodeExtras {
-            active: true,
-            enabled: true,
+            extras: NodeExtras::default(),
         };
         assert_eq!(
-            text(&node(all)),
+            serde_json::to_string(&node).unwrap(),
             r#"{"name":"Hip","children":[1],"translation":[0.0,1.5,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0]}"#
         );
+    }
+
+    #[test]
+    fn node_extras_are_written_in_key_order() {
+        let extras = NodeExtras::new([
+            (
+                "sourceObject".to_owned(),
+                serde_json::json!({ "gameObjectId": "7" }),
+            ),
+            ("active".to_owned(), Json::Bool(false)),
+            ("fixtureViewRoot".to_owned(), Json::Bool(true)),
+        ]);
         assert_eq!(
-            text(&node(NodeExtras {
-                active: false,
-                ..all
-            })),
-            r#"{"name":"Hip","children":[1],"translation":[0.0,1.5,0.0],"rotation":[0.0,0.0,0.0,1.0],"scale":[1.0,1.0,1.0],"extras":{"active":false}}"#
+            serde_json::to_string(&extras).unwrap(),
+            r#"{"active":false,"fixtureViewRoot":true,"sourceObject":{"gameObjectId":"7"}}"#
         );
     }
 

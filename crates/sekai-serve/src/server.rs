@@ -7,7 +7,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
-use std::io::{self, SeekFrom};
+use std::io::{self, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -331,9 +331,11 @@ fn never(never: Infallible) -> io::Error {
     match never {}
 }
 
-/// Writes a line about something that went wrong to the standard error stream.
+/// Writes a line about something that went wrong to the standard error stream. A stream that
+/// takes no line, such as a pipe whose reader is gone, loses the line and nothing else: the
+/// request that the line is about is answered, and the server goes on.
 fn report(message: impl fmt::Display) {
-    eprintln!("{message}");
+    let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
 /// A stream that fails once no byte has been read or written for a time, so a client that

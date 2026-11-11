@@ -3,8 +3,8 @@
 //! [`FacialTable`] produces the `facial-table` form and [`FacialTables`] the `facial-tables` form,
 //! both specified in `docs/spec/facial-tables.md`.
 
+use crate::roots::facial_table;
 use sekai_convert::fields::fields_document;
-use sekai_convert::roots::facial_table;
 use sekai_convert::tables::{TableContext, TableConverter, TablePlan};
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex};
 use serde::de::DeserializeOwned;

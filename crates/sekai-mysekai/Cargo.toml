@@ -9,12 +9,34 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
-sekai-game.workspace = true
-sekai-convert = { workspace = true, features = ["model", "animation", "particles", "timeline", "ugui", "audio"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
-crc32fast = "1.5.4"
-sekai-format.workspace = true
+sekai-convert.workspace = true
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", features = ["raw_value"], optional = true }
+crc32fast = { version = "1.5.4", optional = true }
+sekai-format = { workspace = true, optional = true }
+
+[features]
+# The forms. Without them the crate holds only the rules that name their roots.
+forms = [
+    "sekai-convert/model",
+    "sekai-convert/animation",
+    "sekai-convert/particles",
+    "sekai-convert/timeline",
+    "sekai-convert/ugui",
+    "sekai-convert/audio",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:crc32fast",
+    "dep:sekai-format",
+]
+
+[[test]]
+name = "fixture_model"
+required-features = ["forms"]
+
+[[test]]
+name = "site_model"
+required-features = ["forms"]
 
 [lints]
 workspace = true

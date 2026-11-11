@@ -98,18 +98,3 @@ fn a_later_segment_of_a_video_is_not_a_root() {
     assert!(!roots::video(&object, None, &paths("a/b-002.usm.bytes")));
     assert!(!roots::video(&object, None, &paths("a/b-002.USM.BYTES")));
 }
-
-#[test]
-fn prefab_root_paths_ignore_ascii_case() {
-    let object = index(1);
-    assert!(roots::field_camera(
-        &object,
-        None,
-        &paths("Assets/MySekai/Camera/FieldCamera.Prefab")
-    ));
-    assert!(roots::emoticon(
-        &object,
-        None,
-        &paths("Assets/MySekai/Effect/Emoticon/001/001.Prefab")
-    ));
-}

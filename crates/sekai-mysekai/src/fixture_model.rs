@@ -8,9 +8,9 @@
 mod attach;
 mod nodes;
 
+use crate::roots::fixture_model;
 use sekai_convert::Converter;
 use sekai_convert::model::{ModelConfig, Prefab, model_file};
-use sekai_convert::roots::fixture_model;
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Cost, CostClass, Member, ObjectId, ObjectIndex,
 };

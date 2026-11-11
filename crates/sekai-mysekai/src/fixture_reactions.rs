@@ -3,7 +3,7 @@
 //! [`FixtureReactions`] produces the `fixture-reactions` form, specified in
 //! `docs/spec/fixture-reactions.md`.
 
-use sekai_convert::roots::fixture_reactions;
+use crate::roots::fixture_reactions;
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex, Value};
 use serde::Serialize;
 

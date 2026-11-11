@@ -28,11 +28,12 @@ const BLOCK_CACHE_BYTES: usize = 64 << 20;
 
 /// The converters of the core, in the order the command line uses them.
 pub fn converters() -> Vec<Box<dyn Converter>> {
-    use sekai_convert::roots::{
-        Absent, emoticon, facial_table, field_camera, fixture_meta, fixture_model,
-        fixture_reactions, site_model,
-    };
+    use sekai_convert::roots::Absent;
     use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
+    use sekai_mysekai::roots::{
+        emoticon, facial_table, field_camera, fixture_meta, fixture_model, fixture_reactions,
+        site_model,
+    };
     vec![
         Box::new(sekai_convert::image::Texture),
         Box::new(sekai_convert::image::Sprite),

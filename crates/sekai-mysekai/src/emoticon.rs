@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+use crate::roots::emoticon;
 use sekai_convert::animation::clip_document;
-use sekai_convert::roots::emoticon;
 use sekai_convert::tables::{TableContext, TableConverter, TablePlan};
 use sekai_convert::{
     Asset, Context, ConvertError, Converter, Object, ObjectId, ObjectIndex, PPtr, Value,

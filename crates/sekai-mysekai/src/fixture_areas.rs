@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use sekai_convert::roots::fixture_meta;
+use crate::roots::fixture_meta;
 use sekai_convert::tables::{TableContext, TableConverter, TablePlan};
 use sekai_convert::{Asset, Context, ConvertError, Converter, ObjectId, ObjectIndex, Value};
 use serde_json::{Map, Value as Json, json};

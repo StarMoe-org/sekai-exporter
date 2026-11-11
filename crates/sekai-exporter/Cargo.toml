@@ -23,7 +23,7 @@ sekai-encode.workspace = true
 sekai-publish.workspace = true
 sekai-pipeline.workspace = true
 sekai-moesekai.workspace = true
-sekai-mysekai = { workspace = true, optional = true }
+sekai-mysekai.workspace = true
 sekai-layouts = { workspace = true, optional = true }
 sha2 = "0.11.1"
 lexopt = "0.3.2"
@@ -53,7 +53,7 @@ cdn = ["sekai-game/cdn", "catalog-db"]
 client = ["sekai-game/client", "dep:sekai-layouts"]
 s3 = ["sekai-publish/s3"]
 catalog-db = ["sekai-catalog/catalog-db"]
-mysekai = ["dep:sekai-mysekai"]
+mysekai = ["sekai-mysekai/forms"]
 serve = []
 default = ["cdn", "catalog-db", "image", "audio", "video", "model", "animation", "live2d", "text", "scenario", "episode", "virtual-live", "costume", "storage-view", "webp"]
 preset-mysekai = ["default", "mysekai"]

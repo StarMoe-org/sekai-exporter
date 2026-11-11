@@ -10,7 +10,6 @@ publish.workspace = true
 
 [dependencies]
 sekai-convert.workspace = true
-sekai-game.workspace = true
 sekai-codec = { workspace = true, optional = true }
 sekai-encode = { workspace = true, optional = true }
 sekai-format = { workspace = true, optional = true }

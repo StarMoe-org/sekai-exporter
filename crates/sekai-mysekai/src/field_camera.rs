@@ -2,7 +2,7 @@
 //!
 //! [`FieldCamera`] produces the `field-camera` form, specified in `docs/spec/field-camera.md`.
 
-use sekai_convert::roots::field_camera;
+use crate::roots::field_camera;
 use sekai_convert::{
     Asset, Context, ConvertError, Converter, Object, ObjectId, ObjectIndex, Value,
 };

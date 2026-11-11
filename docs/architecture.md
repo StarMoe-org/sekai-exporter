@@ -32,7 +32,7 @@ A **view** is a function that produces bindings. A view that only rearranges pat
 | Incremental runs | A derivation whose fingerprint already has an output is not computed again |
 | Sharing across regions | Fingerprints do not contain the region, so identical content in two regions has one fingerprint and one output |
 | Self-describing output | Each asset is published with a document that records its function, version, inputs, outputs and the role of each file |
-| Rebuildable catalog | Derivation records and bindings carry all of the semantics, so the catalog is an index that can be rebuilt from the store |
+| Rebuildable catalog | Derivation records and bindings carry all of the semantics, so the catalog is an index that can be rebuilt from the store. A rebuild restores the derivation of every asset document; what the store does not describe, such as bundle indexes, derivations that produced nothing, the records of encodings and views, and measured costs, is derived again when it is next needed |
 | Verifiable mirrors | Anyone who recomputes a derivation from the same inputs obtains the same hash |
 
 ## Identity

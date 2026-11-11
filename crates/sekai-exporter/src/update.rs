@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
 
 use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
@@ -15,7 +16,7 @@ use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
+use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
 use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
@@ -164,18 +165,76 @@ fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
     entries
 }
 
-/// The bundles of the input store, by name.
-struct Stored<'s> {
+/// The bundles of a run in the input store, as they arrive. Opening one waits until it has been
+/// fetched, so evaluation starts with the first bundles while later ones are still on their way.
+struct Arriving<'s> {
     inputs: &'s LocalStore,
-    keys: HashMap<String, Key>,
+    arrivals: Mutex<Arrivals>,
+    changed: Condvar,
 }
 
-impl Inputs for Stored<'_> {
+#[derive(Default)]
+struct Arrivals {
+    /// The key of each fetched bundle, or why it could not be fetched.
+    fetched: HashMap<String, Result<Key, String>>,
+    /// Whether fetching has ended. A bundle that has not arrived by then never does.
+    ended: bool,
+}
+
+impl<'s> Arriving<'s> {
+    fn new(inputs: &'s LocalStore) -> Self {
+        Self {
+            inputs,
+            arrivals: Mutex::default(),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Arrivals> {
+        self.arrivals.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn arrive(&self, name: &str, fetched: Result<Key, String>) {
+        self.lock().fetched.insert(name.to_owned(), fetched);
+        self.changed.notify_all();
+    }
+
+    /// Marks the end of fetching when dropped, however fetching ends.
+    fn ending(&self) -> Ending<'_, 's> {
+        Ending(self)
+    }
+
+    fn wait_until(&self, done: impl Fn(&Arrivals) -> bool) -> MutexGuard<'_, Arrivals> {
+        self.changed
+            .wait_while(self.lock(), |arrivals| !done(arrivals))
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Ends the fetching of an [`Arriving`] when dropped.
+struct Ending<'a, 's>(&'a Arriving<'s>);
+
+impl Drop for Ending<'_, '_> {
+    fn drop(&mut self) {
+        self.0.lock().ended = true;
+        self.0.changed.notify_all();
+    }
+}
+
+impl Inputs for Arriving<'_> {
     fn open(&self, name: &str) -> io::Result<BundleInput> {
-        let key = self.keys.get(name).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::NotFound, format!("{name} was not fetched"))
-        })?;
-        let source = FileSource::open(self.inputs.path(key)).map_err(io::Error::other)?;
+        let arrivals =
+            self.wait_until(|arrivals| arrivals.ended || arrivals.fetched.contains_key(name));
+        let key = match arrivals.fetched.get(name) {
+            Some(Ok(key)) => key.clone(),
+            Some(Err(e)) => return Err(io::Error::other(format!("{name}: {e}"))),
+            None => {
+                let message = format!("{name} was not fetched");
+                return Err(io::Error::new(io::ErrorKind::NotFound, message));
+            }
+        };
+        drop(arrivals);
+        let source = FileSource::open(self.inputs.path(&key)).map_err(io::Error::other)?;
         Ok(BundleInput {
             name: name.to_owned(),
             source: Arc::new(source),
@@ -255,87 +314,190 @@ fn already_stored(
     Ok(key.filter(|key| inputs.contains(key)))
 }
 
-fn download(
-    source: &dyn Source,
-    identity: &VersionIdentity,
-    entry: &BundleEntry,
-    inputs: &LocalStore,
-    monitor: &Monitor,
-) -> Result<Key, String> {
-    let mut span = monitor.span("fetch", "bundle", &entry.name);
-    let writer = inputs
-        .writer(INPUT_EXTENSION)
-        .map_err(|e| format!("input store: {e}"))?;
-    let mut sink = Deobfuscating::new(Incoming(writer));
-    let read = source
-        .fetch(identity, entry, &mut sink)
-        .map_err(|e| e.to_string())?;
-    let Incoming(writer) = sink.finish().map_err(|e| e.to_string())?;
-    let (key, size) = writer.finish().map_err(|e| format!("input store: {e}"))?;
-    span.bytes(read, size);
-    Ok(key)
+/// Where the bundles of a run come from, and where they are recorded.
+struct Fetcher<'r> {
+    source: &'r dyn Source,
+    identity: &'r VersionIdentity,
+    inputs: &'r LocalStore,
+    catalog: &'r Catalog,
+    earlier: &'r [EarlierRun],
+    region: &'r str,
+    monitor: &'r Monitor,
 }
 
-/// Makes every entry available in `inputs`, and returns the entries with their keys and the number
-/// of bundles that could not be fetched.
-#[allow(clippy::too_many_arguments)]
-fn fetch_all(
-    source: &dyn Source,
-    identity: &VersionIdentity,
-    entries: &[BundleEntry],
-    inputs: &LocalStore,
-    catalog: &Catalog,
-    earlier: &[EarlierRun],
-    region: &str,
-    concurrency: usize,
-    monitor: &Monitor,
-) -> Result<(Vec<(String, Key)>, usize), lexopt::Error> {
-    let mut stored = Vec::new();
-    let mut failed = 0;
-    let mut fetched = 0;
-    for chunk in entries.chunks(RECORD_BATCH) {
-        let results = parallel(chunk.len(), concurrency, |i| {
-            match already_stored(catalog, region, &chunk[i], inputs) {
-                Ok(Some(key)) => Ok((key, false)),
-                Ok(None) => match from_earlier_runs(earlier, region, &chunk[i], inputs) {
-                    Ok(Some(key)) => Ok((key, true)),
-                    Ok(None) => download(source, identity, &chunk[i], inputs, monitor)
-                        .map(|key| (key, true)),
-                    Err(e) => Err(e.to_string()),
-                },
-                Err(e) => Err(e.to_string()),
+impl Fetcher<'_> {
+    /// Fetches `entries` into the input store in their order, `concurrency` at a time, and tells
+    /// `arriving` of each as it arrives. The bundles this run places are recorded in the catalog
+    /// in batches, and a bundle that cannot be recorded counts as not fetched. Returns how many
+    /// bundles could not be fetched.
+    fn fetch_all(
+        &self,
+        entries: &[BundleEntry],
+        concurrency: usize,
+        arriving: &Arriving<'_>,
+    ) -> Result<usize, String> {
+        let rows = Mutex::new(Vec::new());
+        let results = parallel(entries.len(), concurrency, |i| -> Result<bool, String> {
+            let entry = &entries[i];
+            let fetched = self.fetch(entry);
+            arriving.arrive(&entry.name, fetched.clone().map(|(key, _)| key));
+            let (key, placed) = fetched?;
+            if placed {
+                self.place(&rows, entry, &key)?;
             }
+            Ok(placed)
         });
-        let mut batch = catalog.write().map_err(|e| e.to_string())?;
-        for (entry, result) in chunk.iter().zip(results) {
+        let mut new = 0;
+        let mut failed = 0;
+        for (entry, result) in entries.iter().zip(results) {
             match result {
-                Ok((key, new)) => {
-                    if new {
-                        fetched += 1;
-                        let row = BundleRow {
-                            declared: entry.declared.clone(),
-                            sha256: key.to_string()[..64].to_owned(),
-                        };
-                        batch
-                            .put_bundle(region, &entry.name, &row)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    stored.push((entry.name.clone(), key));
-                }
+                Ok(placed) => new += usize::from(placed),
                 Err(e) => {
                     failed += 1;
                     eprintln!("{}: {e}", entry.name);
                 }
             }
         }
-        batch.commit().map_err(|e| e.to_string())?;
+        self.record(&rows.into_inner().unwrap_or_else(PoisonError::into_inner))?;
+        println!(
+            "bundles {} fetched {new} reused {} failed {failed}",
+            entries.len(),
+            entries.len() - new - failed
+        );
+        Ok(failed)
     }
-    println!(
-        "bundles {} fetched {fetched} reused {} failed {failed}",
-        entries.len(),
-        stored.len() - fetched
-    );
-    Ok((stored, failed))
+
+    /// The key of `entry` in the input store, and whether this run placed it there: found in the
+    /// catalog, linked from an earlier run, or downloaded.
+    fn fetch(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
+        let error = |e: io::Error| e.to_string();
+        if let Some(key) =
+            already_stored(self.catalog, self.region, entry, self.inputs).map_err(error)?
+        {
+            return Ok((key, false));
+        }
+        if let Some(key) =
+            from_earlier_runs(self.earlier, self.region, entry, self.inputs).map_err(error)?
+        {
+            return Ok((key, true));
+        }
+        self.download(entry).map(|key| (key, true))
+    }
+
+    fn download(&self, entry: &BundleEntry) -> Result<Key, String> {
+        let mut span = self.monitor.span("fetch", "bundle", &entry.name);
+        let writer = self
+            .inputs
+            .writer(INPUT_EXTENSION)
+            .map_err(|e| format!("input store: {e}"))?;
+        let mut sink = Deobfuscating::new(Incoming(writer));
+        let read = self
+            .source
+            .fetch(self.identity, entry, &mut sink)
+            .map_err(|e| e.to_string())?;
+        let Incoming(writer) = sink.finish().map_err(|e| e.to_string())?;
+        let (key, size) = writer.finish().map_err(|e| format!("input store: {e}"))?;
+        span.bytes(read, size);
+        Ok(key)
+    }
+
+    /// Adds the row of a bundle this run placed to `rows`, and records them once there are
+    /// [`RECORD_BATCH`] of them.
+    fn place(
+        &self,
+        rows: &Mutex<Vec<(String, BundleRow)>>,
+        entry: &BundleEntry,
+        key: &Key,
+    ) -> Result<(), String> {
+        let row = BundleRow {
+            declared: entry.declared.clone(),
+            sha256: key.to_string()[..64].to_owned(),
+        };
+        let full = {
+            let mut rows = rows.lock().unwrap_or_else(PoisonError::into_inner);
+            rows.push((entry.name.clone(), row));
+            (rows.len() >= RECORD_BATCH).then(|| std::mem::take(&mut *rows))
+        };
+        full.map_or(Ok(()), |full| self.record(&full))
+    }
+
+    fn record(&self, rows: &[(String, BundleRow)]) -> Result<(), String> {
+        let write = || -> io::Result<()> {
+            let mut batch = self.catalog.write()?;
+            for (name, row) in rows {
+                batch.put_bundle(self.region, name, row)?;
+            }
+            batch.commit()
+        };
+        write().map_err(|e| format!("catalog: {e}"))
+    }
+}
+
+/// The entries of `all` that `manifest` names, in the order an evaluation of `manifest` opens
+/// them, and then the rest of them.
+fn in_opening_order(all: &[BundleEntry], manifest: &[Entry]) -> Vec<BundleEntry> {
+    let rank: HashMap<&str, usize> = stream::opening_order(manifest)
+        .into_iter()
+        .enumerate()
+        .map(|(rank, name)| (name, rank))
+        .collect();
+    let wanted: BTreeSet<&str> = manifest.iter().map(|entry| entry.name.as_str()).collect();
+    let mut entries: Vec<BundleEntry> = all
+        .iter()
+        .filter(|entry| wanted.contains(entry.name.as_str()))
+        .cloned()
+        .collect();
+    entries.sort_by_key(|entry| rank.get(entry.name.as_str()).copied().unwrap_or(usize::MAX));
+    entries
+}
+
+/// Where the dependencies of the bundles of a manifest come from.
+enum Dependencies<'a> {
+    /// The source lists them.
+    Listed,
+    /// They are read from the bundles themselves, and then the entries whose names start with one
+    /// of `only` are selected, with what they depend on.
+    Read { only: &'a [String] },
+}
+
+/// Fetches `entries` while `manifest` is evaluated, so the first segments convert while later
+/// bundles are still on their way. Returns the evaluation and how many bundles could not be
+/// fetched. Fails if the store, the records or the catalog do.
+fn fetch_and_evaluate(
+    fetcher: &Fetcher<'_>,
+    entries: &[BundleEntry],
+    concurrency: usize,
+    mut manifest: Vec<Entry>,
+    dependencies: Dependencies<'_>,
+    stream: &Stream<'_>,
+) -> Result<(Streamed, usize), String> {
+    let arriving = Arriving::new(fetcher.inputs);
+    thread::scope(|scope| {
+        let fetching = scope.spawn(|| {
+            let _ending = arriving.ending();
+            fetcher.fetch_all(entries, concurrency, &arriving)
+        });
+        let evaluate = || {
+            if let Dependencies::Read { only } = dependencies {
+                let _span = stream.recorder.span("manifest", "dependencies", "");
+                let threads = stream.options.threads;
+                stream::with_dependencies(
+                    &mut manifest,
+                    &arriving,
+                    stream.cache,
+                    stream.indexes,
+                    threads,
+                )?;
+                manifest = select(manifest, only);
+            }
+            stream::evaluate(&manifest, &arriving, stream)
+        };
+        let streamed = evaluate().map_err(|e| e.to_string());
+        let failed = fetching
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
+        Ok((streamed?, failed))
+    })
 }
 
 fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
@@ -411,45 +573,33 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     if listed {
         manifest = select(manifest, &options.only);
     }
-    let wanted: BTreeSet<&str> = manifest.iter().map(|entry| entry.name.as_str()).collect();
-    let entries: Vec<BundleEntry> = all
-        .iter()
-        .filter(|entry| wanted.contains(entry.name.as_str()))
-        .cloned()
-        .collect();
-    let (stored, failed) = fetch_all(
-        source.as_ref(),
-        &identity,
-        &entries,
-        &inputs,
-        catalog,
-        &earlier,
-        region_name,
-        concurrency,
-        monitor,
-    )?;
-    if failed > 0 {
-        return Ok(false);
-    }
-
-    let stored = Stored {
+    let entries = in_opening_order(&all, &manifest);
+    let fetcher = Fetcher {
+        source: source.as_ref(),
+        identity: &identity,
         inputs: &inputs,
-        keys: stored.into_iter().collect(),
+        catalog,
+        earlier: &earlier,
+        region: region_name,
+        monitor,
+    };
+    let dependencies = if listed {
+        Dependencies::Listed
+    } else {
+        Dependencies::Read {
+            only: &options.only,
+        }
     };
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     let indexes = catalog.bundle_indexes();
-    if !listed {
-        let _span = monitor.span("manifest", "dependencies", region_name);
-        stream::with_dependencies(&mut manifest, &stored, &cache, &indexes, options.threads)
-            .map_err(|e| e.to_string())?;
-        manifest = select(manifest, &options.only);
-    }
-
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
     let converters = converters(hca_key);
-    let mut streamed = stream::evaluate(
-        &manifest,
-        &stored,
+    let (mut streamed, failed) = fetch_and_evaluate(
+        &fetcher,
+        &entries,
+        concurrency,
+        manifest,
+        dependencies,
         &Stream {
             converters: &converters,
             naming: &InBundle,
@@ -468,9 +618,8 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             ledger: Some(IGNORED),
             limit: None,
         },
-    )
-    .map_err(|e| e.to_string())?;
-    if report(&streamed) > 0 {
+    )?;
+    if failed > 0 || report(&streamed) > 0 {
         return Ok(false);
     }
     if let Some(tables) = &tables {

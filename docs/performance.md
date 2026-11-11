@@ -23,6 +23,8 @@ Work is reduced in this order, and each step is applied before the next is consi
 
 **Block cache.** UnityFS stores data in LZ4 or LZMA blocks. Decompressed blocks are cached under the key `(bundle content hash, block index)`, and the cache counts against the memory budget. Reading an object decompresses only the blocks that contain it, and a block that several readers miss at once is decompressed once.
 
+**Files.** A bundle in the store is read from its file at an offset, without moving a cursor, so threads share one handle. The most recently read files stay open between reads, up to a fixed number.
+
 **Bundle indexes.** The index of a bundle, with the digest of the stream or resource slice each object reads, is a function of the bundle bytes alone, so it is stored in the catalog under their SHA-256. Opening a version reads the stored index of every bundle it has seen before and parses only the new ones. A bundle is parsed again when an object or a resource of it is read, only the most recently used bundles stay parsed, and a bundle that several readers open at once is parsed once.
 
 ## Scheduling
@@ -33,7 +35,7 @@ Work is reduced in this order, and each step is applied before the next is consi
 - Each derivation declares a cost class and an estimate of its peak memory, computed from object headers: the stored image data and a multiple of the decoded size for a texture, a multiple of the stored size of the cue sheet for audio, and a multiple of the stored size otherwise. A job that does not fit in the remaining budget waits, and lets a bounded number of later jobs that fit start ahead of it; a job larger than the whole budget runs alone.
 - A job takes CPU slots for each part of its work, and returns them before its files are written to the store. No other thread pool exists.
 - Within a segment, the jobs that read the same bundles are grouped. Groups start in decreasing order of their longest job, and the jobs of a group longest first, which keeps the blocks a group reads in the cache and shortens the wait for the last jobs.
-- Network transfer is separate from computation. A download is hashed and deobfuscated while it streams into a temporary file in its directory of the input store, and is placed there by a hard link. Requests to one host share one HTTP/2 connection, and a bundle that an earlier run holds is linked rather than downloaded. Computation reads only from the store.
+- Network transfer is separate from computation. A download is hashed and deobfuscated while it streams into a temporary file in its directory of the input store, and is placed there by a hard link. Requests to one host share one HTTP/2 connection, and a bundle that an earlier run holds is linked rather than downloaded. Bundles are fetched while evaluation runs, in the order it opens them, and opening a bundle waits until it has arrived, so the first segments convert while later bundles are still on their way. Computation reads only from the store.
 
 ## Hot paths
 

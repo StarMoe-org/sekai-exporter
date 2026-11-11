@@ -205,6 +205,20 @@ pub fn with_dependencies(
     Ok(())
 }
 
+/// The names of the bundles of `manifest` in the order an evaluation first opens them: the window
+/// of each unit, in name order, each bundle once. Bundles that no unit reads are not listed.
+pub fn opening_order(manifest: &[Entry]) -> Vec<&str> {
+    let units = Units::new(manifest);
+    let mut opened = vec![false; units.entries.len()];
+    let mut order = Vec::with_capacity(units.entries.len());
+    for &entry in units.windows.iter().flatten() {
+        if !std::mem::replace(&mut opened[entry], true) {
+            order.push(units.entries[entry].name.as_str());
+        }
+    }
+    order
+}
+
 /// The units of a manifest: each entry with its window.
 pub(crate) struct Units<'m> {
     /// The entries that can be evaluated, in name order.
@@ -1125,5 +1139,19 @@ mod tests {
         };
         assert_eq!(units.segment(0, &by_units), 2);
         assert_eq!(units.segment(4, &by_units), 5);
+    }
+
+    #[test]
+    fn bundles_are_opened_with_the_first_unit_that_reads_them() {
+        let manifest = [
+            entry("c", 10, &[]),
+            entry("a", 10, &["d"]),
+            entry("b", 10, &["d", "c"]),
+            entry("d", 10, &[]),
+            entry("e", 10, &[]),
+            entry("e", 10, &[]),
+        ];
+        // Two bundles share the name e, so neither is a unit and no unit opens them.
+        assert_eq!(opening_order(&manifest), ["a", "d", "b", "c"]);
     }
 }

@@ -61,12 +61,36 @@ pub struct BoundedBlockCache {
     making: Flights<BlockKey, Result<Arc<[u8]>>>,
 }
 
+/// The blocks held, each with the tick of its last use. A hit only stamps the block, so the lock
+/// is held for one lookup; eviction finds the least recently used block from `queue`.
 #[derive(Debug, Default)]
 struct Lru {
     used: usize,
     tick: u64,
     blocks: HashMap<BlockKey, (Arc<[u8]>, u64)>,
-    order: BTreeMap<u64, BlockKey>,
+    /// Every held block once, under the tick it was queued at, which is at most its last use.
+    queue: BTreeMap<u64, BlockKey>,
+}
+
+impl Lru {
+    /// Removes the least recently used block, and returns whether there was one. A block read
+    /// since it was queued is queued again under its last use instead, so blocks are evicted in
+    /// the order of their last use.
+    fn evict_one(&mut self) -> bool {
+        while let Some((queued, oldest)) = self.queue.pop_first() {
+            let Some(last) = self.blocks.get(&oldest).map(|(_, last)| *last) else {
+                continue;
+            };
+            if last == queued {
+                if let Some((evicted, _)) = self.blocks.remove(&oldest) {
+                    self.used -= evicted.len();
+                }
+                return true;
+            }
+            self.queue.insert(last, oldest);
+        }
+        false
+    }
 }
 
 impl BoundedBlockCache {
@@ -96,11 +120,8 @@ impl BlockCache for BoundedBlockCache {
         lru.tick += 1;
         let tick = lru.tick;
         let (block, last) = lru.blocks.get_mut(key)?;
-        let block = block.clone();
-        let old = std::mem::replace(last, tick);
-        lru.order.remove(&old);
-        lru.order.insert(tick, *key);
-        Some(block)
+        *last = tick;
+        Some(block.clone())
     }
 
     fn insert(&self, key: BlockKey, block: Arc<[u8]>) {
@@ -112,17 +133,14 @@ impl BlockCache for BoundedBlockCache {
             return;
         }
         while lru.used + block.len() > self.budget {
-            let Some((_, oldest)) = lru.order.pop_first() else {
+            if !lru.evict_one() {
                 break;
-            };
-            if let Some((evicted, _)) = lru.blocks.remove(&oldest) {
-                lru.used -= evicted.len();
             }
         }
         lru.tick += 1;
         let tick = lru.tick;
         lru.used += block.len();
-        lru.order.insert(tick, key);
+        lru.queue.insert(tick, key);
         lru.blocks.insert(key, (block, tick));
     }
 

@@ -126,7 +126,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `512M`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it.
+The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `512M`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it. A client may close its sending side of a connection once its request is sent, and is answered all the same.
 
 ## Other hosts
 

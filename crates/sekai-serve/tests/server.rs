@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -380,6 +380,34 @@ fn a_version_published_again_under_its_name_answers_with_its_new_files() {
     assert_eq!(server.get("/jp@local/a.txt").body, b"changed");
     assert_eq!(server.get("/jp@local/b.txt").body, b"added");
     assert_eq!(server.get("/jp/a.txt").body, b"changed");
+}
+
+#[test]
+fn a_client_that_ends_its_side_after_its_request_is_answered() {
+    let output = Output::new("half-closed");
+    let large = large();
+    output.publish("jp", "1", &[("a.txt", b"first"), ("large.bin", &large)]);
+    let server = Running::start(&output, options());
+
+    // The client sends its request and shuts down its sending side, as simple clients do. The
+    // server sees the end of the stream while it looks the file up, and still answers.
+    let cases: [(&str, u16, &[u8]); 3] = [
+        ("/jp/a.txt", 200, b"first"),
+        ("/jp/large.bin", 200, &large),
+        ("/jp/none.txt", 404, b"not found\n"),
+    ];
+    for (path, status, bytes) in cases {
+        for _ in 0..8 {
+            let mut stream = server.connect(Duration::from_secs(30));
+            send(&mut stream, "GET", path, &[]);
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            let reply = Reply::parse(&reply);
+            assert_eq!(reply.status, status, "{path}");
+            assert!(reply.body == bytes, "{path}");
+        }
+    }
 }
 
 #[test]

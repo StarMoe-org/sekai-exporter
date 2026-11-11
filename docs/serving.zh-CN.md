@@ -126,7 +126,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。
+该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
 
 ## 其他宿主
 

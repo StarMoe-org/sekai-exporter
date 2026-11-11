@@ -68,7 +68,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 | `client` | `sekai-game`, `sekai-exporter` | The `apk` source, and the field layout tables (`sekai-layouts`) for assets inside the client package |
 | `catalog-db` | `sekai-catalog` | The catalog kept in a redb database |
 | `s3` | `sekai-publish` | S3-compatible stores |
-| `serve` | `sekai-exporter` | The lazy evaluator behind an HTTP server; defined and not implemented yet |
+| `serve` | `sekai-exporter` | The `serve` command: an HTTP server that resolves the paths of published views ([Serving](serving.md)) |
 
 ## Presets
 

@@ -500,6 +500,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "httpdate"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -522,6 +528,7 @@ dependencies = [
  "http",
  "http-body",
  "httparse",
+ "httpdate",
  "itoa",
  "pin-project-lite",
  "smallvec",
@@ -1309,7 +1316,12 @@ dependencies = [
 name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "cpu-time",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "lexopt",
  "mimalloc",
  "sekai-catalog",
@@ -1323,10 +1335,13 @@ dependencies = [
  "sekai-mysekai",
  "sekai-pipeline",
  "sekai-publish",
+ "sekai-serve",
  "sekai-unity",
  "serde_json",
  "sha2",
  "sysinfo",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1416,6 +1431,15 @@ dependencies = [
  "serde_json",
  "sha2",
  "ureq",
+]
+
+[[package]]
+name = "sekai-serve"
+version = "0.0.0"
+dependencies = [
+ "sekai-format",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

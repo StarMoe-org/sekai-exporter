@@ -1,8 +1,8 @@
-//! Publishes the `storage` view of an evaluation as a path tree.
+//! Publishes the `storage` view of an evaluation: its path index and pointer, and a path tree when
+//! one is asked for.
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Derivations, Derived, Key, LocalStore, Store};
@@ -10,11 +10,13 @@ use sekai_convert::Asset;
 use sekai_format::AssetDocument;
 use sekai_format::publication::AssetFailure;
 use sekai_moesekai::storage_view::{self, Transform, ViewFile};
+use sekai_pipeline::isolate::{PANICKED, isolated};
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::parallel;
-use sekai_publish::{File, Plan, tree};
+use sekai_publish::{File, Layout, Plan, tree};
 use sha2::{Digest, Sha256};
 
+use crate::export::Destination;
 use crate::monitor::Monitor;
 
 /// One file to make: its asset, its place in the view and the member it comes from.
@@ -160,22 +162,28 @@ fn jobs(index: &Plan) -> Result<(Vec<Job>, usize), String> {
     Ok((by_path.into_values().collect(), shadowed))
 }
 
-/// Publishes the view of the assets of `index`, the plan of the index publication, at `root`.
-/// The assets that could not be produced are its failures.
+/// Publishes the view of the assets of `index`, the plan of the index publication, as `target`
+/// (`<region>/storage`) under `<output>/published`, with a path tree when `destination` has one,
+/// and returns the plan of the view. The assets that could not be produced are its failures.
 pub(crate) fn publish(
     index: &Plan,
-    version: &str,
-    root: &Path,
+    target: &str,
+    destination: &Destination<'_>,
     store: &LocalStore,
     derivations: &dyn Derivations,
     threads: usize,
     monitor: &Monitor,
-) -> Result<(), lexopt::Error> {
+) -> Result<Option<Plan>, lexopt::Error> {
     let span = monitor.span("publish", "storage", "");
     let (jobs, shadowed) = jobs(index)?;
     let mut failures = index.failures.clone();
     let results = parallel(jobs.len(), threads, |i| {
-        make(&jobs[i], store, derivations, monitor)
+        isolated(|| make(&jobs[i], store, derivations, monitor)).unwrap_or_else(|message| {
+            Ok(Err(storage_view::ViewError {
+                code: PANICKED,
+                message,
+            }))
+        })
     });
     derivations.flush().map_err(|e| e.to_string())?;
     let mut files = Vec::new();
@@ -210,23 +218,35 @@ pub(crate) fn publish(
     }
     let revision: [u8; 32] = records.finalize().into();
     let plan = Plan {
-        version: version.to_owned(),
+        version: index.version.clone(),
         files,
         assets: Vec::new(),
         listings: BTreeMap::new(),
         failures,
         revision: revision.iter().map(|b| format!("{b:02x}")).collect(),
     };
-    let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
-    drop(span);
+    sekai_publish::publish(
+        store,
+        &destination.output.join("published"),
+        target,
+        &plan,
+        Layout::Paths,
+        threads,
+    )
+    .map_err(|e| e.to_string())?;
     println!(
-        "storage files {} transformed {made} shadowed {shadowed} failed {} written {} unchanged {} deleted {} revision {}",
+        "storage files {} transformed {made} shadowed {shadowed} failed {} revision {}",
         plan.files.len(),
         plan.failures.len(),
-        report.written,
-        report.unchanged,
-        report.deleted,
         plan.revision
     );
-    Ok(())
+    if let Some(root) = destination.tree {
+        let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
+        println!(
+            "storage tree written {} unchanged {} deleted {}",
+            report.written, report.unchanged, report.deleted
+        );
+    }
+    drop(span);
+    Ok(Some(plan))
 }

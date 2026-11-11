@@ -1,77 +1,23 @@
-//! Deterministic SQLite 3 publication index (`store/<aa>/<sha256>.sqlite`) and `.tar` packing.
+//! Deterministic SQLite 3 publication index (`store/<aa>/<sha256>.sqlite`).
 //!
 //! Built bottom-up on fixed 4096-byte pages with no freelist pages, so HTTP `Range` clients
 //! (`sql.js-httpvfs`, `wa-sqlite`) resolve directory listings, exact path lookups, bundle/form
 //! filters, and full asset metadata in 1–3 page reads without thousands of JSON sidecars.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
 
+use sekai_catalog::LocalStore;
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Key, LocalStore};
-use sekai_format::publication::Pointer;
-use sha2::{Digest, Sha256};
 
-use crate::index;
-use crate::plan::{File, Plan, PublishError, hex};
-use crate::tar;
+use crate::layout::Object;
+use crate::plan::{File, Plan, PublishError};
 
 const PAGE_SIZE: usize = 4096;
 const USABLE_OVERFLOW: usize = PAGE_SIZE - 4;
 const TABLE_MAX_LOCAL: usize = PAGE_SIZE - 35; // 4061
 const INDEX_MAX_LOCAL: usize = ((PAGE_SIZE - 12) * 64 / 255) - 23; // 1002
 const MIN_LOCAL: usize = ((PAGE_SIZE - 12) * 32 / 255) - 23; // 489
-const SCHEMA_VERSION: i64 = 1;
-
-/// Multi-file composite viewer forms packed into `.tar` archives by default on S3 publications.
-pub const DEFAULT_PACK_FORMS: &[&str] = &[
-    "costume-model",
-    "emoticon",
-    "fixture-model",
-    "live2d-model",
-    "live2d-motions",
-    "site-model",
-];
-
-/// Options controlling composite `.tar` archive packing when building `index.sqlite`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SqliteOptions {
-    /// Asset forms whose multi-member assets (`members.len() > 1`) are packed into `.tar` objects.
-    pub pack_forms: BTreeSet<String>,
-}
-
-impl Default for SqliteOptions {
-    fn default() -> Self {
-        Self {
-            pack_forms: DEFAULT_PACK_FORMS
-                .iter()
-                .map(|form| (*form).to_owned())
-                .collect(),
-        }
-    }
-}
-
-impl SqliteOptions {
-    /// Builds `index.sqlite` without packing any composite `.tar` archives.
-    pub fn unpacked() -> Self {
-        Self {
-            pack_forms: BTreeSet::new(),
-        }
-    }
-}
-
-/// The store objects produced or referenced by a `sqlite::build` pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SqliteBuild {
-    /// The `store/<aa>/<sha256>.sqlite` object written to `store`.
-    pub sqlite: Key,
-    /// The byte length of the SQLite database file.
-    pub sqlite_size: u64,
-    /// Every composite `.tar` archive written to `store`, as `(key, size)`, in key order.
-    pub archives: Vec<(Key, u64)>,
-    /// Every standalone (unpacked) member object referenced by `files`, as `(key, size, media_type)`.
-    pub direct_files: Vec<(Key, u64, String)>,
-}
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Clone)]
 enum SqlValue {
@@ -81,24 +27,10 @@ enum SqlValue {
     Blob(Vec<u8>),
 }
 
-/// Builds `index.sqlite` (and any configured `.tar` archives) for `plan` in `store`, after
-/// checking on up to `threads` threads that every file of `plan` is in `store`.
-pub fn build(
-    store: &LocalStore,
-    plan: &Plan,
-    options: &SqliteOptions,
-    threads: usize,
-) -> Result<SqliteBuild, PublishError> {
+/// Builds the `index.sqlite` database of `plan` and writes it to `store`.
+pub(crate) fn build(store: &LocalStore, plan: &Plan) -> Result<Object, PublishError> {
     let wrap_doc = PublishError::wrap("documents");
-    let wrap_read = PublishError::wrap("verify");
 
-    if let Some(file) = index::missing(store, &plan.files, threads, |file| (&file.key, file.size))?
-    {
-        return Err(PublishError::new(
-            "verify",
-            format!("{} is not in the store as {}", file.path, file.key),
-        ));
-    }
     let member_files: Vec<&File> = plan
         .files
         .iter()
@@ -170,14 +102,10 @@ pub fn build(
         extension: String,
         size: i64,
         media_type: String,
-        archive_sha256: Option<[u8; 32]>,
-        archive_offset: Option<i64>,
     }
 
     let mut asset_rows = Vec::new();
     let mut file_rows = Vec::new();
-    let mut archive_map: BTreeMap<Key, u64> = BTreeMap::new();
-    let mut direct_map: BTreeMap<Key, (u64, String)> = BTreeMap::new();
 
     if !plan.assets.is_empty() {
         for (idx, asset) in plan.assets.iter().enumerate() {
@@ -202,51 +130,8 @@ pub fn build(
                 f_slot.1 = f_slot.1.saturating_add(total_size);
             }
 
-            let pack_this = asset.metadata.error.is_none()
-                && owned_files.len() > 1
-                && options.pack_forms.contains(&asset.metadata.form);
-
-            let packed_locations: Option<([u8; 32], BTreeMap<String, u64>)> = if pack_this {
-                let prefix = format!("{}/", asset.name);
-                let mut loaded = Vec::with_capacity(owned_files.len());
-                for f in owned_files {
-                    let rel = f.path.strip_prefix(&prefix).unwrap_or(&f.path);
-                    let data = store.read(&f.key).map_err(&wrap_read)?;
-                    loaded.push((f.path.as_str(), rel, data));
-                }
-                let refs: Vec<(&str, &[u8])> = loaded
-                    .iter()
-                    .map(|(_, rel, data)| (*rel, data.as_slice()))
-                    .collect();
-                let (tar_bytes, tar_members) = tar::pack(&refs);
-                let tar_size = tar_bytes.len() as u64;
-                let tar_key = store.put(&tar_bytes, "tar").map_err(&wrap_doc)?;
-                let tar_sha = tar_key.sha256;
-                archive_map.insert(tar_key, tar_size);
-
-                let mut offsets = BTreeMap::new();
-                for ((full_path, _, _), member) in loaded.iter().zip(tar_members) {
-                    offsets.insert((*full_path).to_owned(), member.offset);
-                }
-                Some((tar_sha, offsets))
-            } else {
-                None
-            };
-
             for f in owned_files {
                 let (dir, file_name) = split_dir_file(&f.path);
-                let (archive_sha256, archive_offset) = match &packed_locations {
-                    Some((sha, offsets)) => (
-                        Some(*sha),
-                        Some(i64::try_from(offsets[&f.path]).unwrap_or(i64::MAX)),
-                    ),
-                    None => {
-                        direct_map
-                            .entry(f.key.clone())
-                            .or_insert_with(|| (f.size, f.media_type.clone()));
-                        (None, None)
-                    }
-                };
                 file_rows.push(FileRow {
                     dir: dir.to_owned(),
                     file_name: file_name.to_owned(),
@@ -258,8 +143,6 @@ pub fn build(
                     extension: f.key.extension.clone(),
                     size: i64::try_from(f.size).unwrap_or(i64::MAX),
                     media_type: f.media_type.clone(),
-                    archive_sha256,
-                    archive_offset,
                 });
             }
 
@@ -317,9 +200,6 @@ pub fn build(
             bundle_stats[0].2 = bundle_stats[0].2.saturating_add(total_size);
             for f in owned {
                 let (dir, file_name) = split_dir_file(&f.path);
-                direct_map
-                    .entry(f.key.clone())
-                    .or_insert_with(|| (f.size, f.media_type.clone()));
                 file_rows.push(FileRow {
                     dir: dir.to_owned(),
                     file_name: file_name.to_owned(),
@@ -331,8 +211,6 @@ pub fn build(
                     extension: f.key.extension.clone(),
                     size: i64::try_from(f.size).unwrap_or(i64::MAX),
                     media_type: f.media_type.clone(),
-                    archive_sha256: None,
-                    archive_offset: None,
                 });
             }
             let error_code = failure_map.get(name).map(|c| (*c).to_owned());
@@ -594,9 +472,6 @@ pub fn build(
                     SqlValue::Text(row.extension.clone()),
                     SqlValue::Int(row.size),
                     SqlValue::Text(row.media_type.clone()),
-                    row.archive_sha256
-                        .map_or(SqlValue::Null, |sha| SqlValue::Blob(sha.to_vec())),
-                    row.archive_offset.map_or(SqlValue::Null, SqlValue::Int),
                 ])
             })
             .collect::<Vec<_>>(),
@@ -727,7 +602,7 @@ pub fn build(
             "files",
             "files",
             files_root,
-            "CREATE TABLE files (dir TEXT NOT NULL, file_name TEXT NOT NULL, path TEXT NOT NULL, bundle_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, role TEXT NOT NULL, sha256 BLOB NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL, archive_sha256 BLOB, archive_offset INTEGER, PRIMARY KEY (dir, file_name)) WITHOUT ROWID",
+            "CREATE TABLE files (dir TEXT NOT NULL, file_name TEXT NOT NULL, path TEXT NOT NULL, bundle_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, role TEXT NOT NULL, sha256 BLOB NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL, PRIMARY KEY (dir, file_name)) WITHOUT ROWID",
         ),
         (
             "index",
@@ -746,123 +621,12 @@ pub fn build(
     ];
 
     let sqlite_bytes = db.finalize(&schema);
-    let sqlite_size = sqlite_bytes.len() as u64;
-    let sqlite_key = store.put(&sqlite_bytes, "sqlite").map_err(&wrap_doc)?;
-
-    let archives = archive_map.into_iter().collect();
-    let direct_files = direct_map
-        .into_iter()
-        .map(|(key, (size, media_type))| (key, size, media_type))
-        .collect();
-
-    Ok(SqliteBuild {
-        sqlite: sqlite_key,
-        sqlite_size,
-        archives,
-        direct_files,
+    let key = store.put(&sqlite_bytes, "sqlite").map_err(&wrap_doc)?;
+    Ok(Object {
+        key,
+        size: sqlite_bytes.len() as u64,
+        media_type: "application/vnd.sqlite3".to_owned(),
     })
-}
-
-/// Publishes the JSON index and `index.sqlite` of `plan` to `store`, and writes
-/// `<root>/<target>/current.json` with both `root` and `sqlite` populated. The store is written
-/// and checked on up to `threads` threads.
-pub fn publish(
-    store: &LocalStore,
-    root: &Path,
-    target: &str,
-    plan: &Plan,
-    options: &SqliteOptions,
-    threads: usize,
-) -> Result<Pointer, PublishError> {
-    let index::Documents {
-        mut pointer,
-        objects,
-    } = index::documents(store, plan, threads)?;
-    let built = build(store, plan, options, threads)?;
-    if index::missing(store, &objects, threads, |(key, size)| (key, *size))?.is_some()
-        || !index::stored(store, &built.sqlite, built.sqlite_size)
-    {
-        return Err(PublishError::new(
-            "verify",
-            "an index document is missing from the store",
-        ));
-    }
-    pointer.sqlite = Some(hex(&built.sqlite.sha256));
-    write_pointer(&root.join(target).join("current.json"), &pointer)?;
-    Ok(pointer)
-}
-
-pub(crate) fn write_pointer(path: &Path, pointer: &Pointer) -> Result<(), PublishError> {
-    let bytes = serde_json::to_vec(pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let wrap = PublishError::wrap("pointer");
-    let parent = path
-        .parent()
-        .ok_or_else(|| PublishError::new("pointer", "the pointer path has no directory"))?;
-    std::fs::create_dir_all(parent).map_err(&wrap)?;
-    let hash: [u8; 32] = Sha256::digest(&bytes).into();
-    let temporary = parent.join(format!(
-        ".current.{}.{}.tmp",
-        std::process::id(),
-        hex(&hash[..8])
-    ));
-    std::fs::write(&temporary, &bytes).map_err(&wrap)?;
-    if let Err(e) = std::fs::rename(&temporary, path) {
-        let _ = std::fs::remove_file(&temporary);
-        return Err(wrap(e));
-    }
-    Ok(())
-}
-
-/// Reads an `index.sqlite` database image and returns every store [`Key`] (standalone media or
-/// `.tar` archive) referenced by its `files` table.
-pub fn referenced_keys(sqlite_bytes: &[u8]) -> Result<BTreeSet<Key>, String> {
-    if sqlite_bytes.len() < PAGE_SIZE || !sqlite_bytes.len().is_multiple_of(PAGE_SIZE) {
-        return Err("invalid sqlite image length".to_owned());
-    }
-    if &sqlite_bytes[..16] != b"SQLite format 3\0" {
-        return Err("invalid sqlite magic header".to_owned());
-    }
-    let mut files_root = None;
-    let schema_records = read_table_btree(sqlite_bytes, 1)?;
-    for rec in schema_records {
-        let cols = decode_record(&rec)?;
-        if cols.len() >= 4
-            && let (Some("table"), Some("files"), Some(rpg)) =
-                (as_text(&cols[0]), as_text(&cols[1]), as_int(&cols[3]))
-        {
-            files_root = u32::try_from(rpg).ok();
-            break;
-        }
-    }
-    let root = files_root.ok_or_else(|| "files table not found in sqlite_schema".to_owned())?;
-    let rows = read_index_btree(sqlite_bytes, root)?;
-    let mut keys = BTreeSet::new();
-    for rec in rows {
-        let cols = decode_record(&rec)?;
-        if cols.len() < 12 {
-            return Err("short files row in sqlite index".to_owned());
-        }
-        if let Some(archive_blob) = as_blob(&cols[10]) {
-            let sha256: [u8; 32] = archive_blob
-                .try_into()
-                .map_err(|_| "bad archive_sha256 length in sqlite index".to_owned())?;
-            keys.insert(Key {
-                sha256,
-                extension: "tar".to_owned(),
-            });
-        } else {
-            let sha_blob =
-                as_blob(&cols[6]).ok_or_else(|| "missing sha256 in sqlite files row".to_owned())?;
-            let sha256: [u8; 32] = sha_blob
-                .try_into()
-                .map_err(|_| "bad sha256 length in sqlite index".to_owned())?;
-            let extension = as_text(&cols[7])
-                .ok_or_else(|| "missing extension in sqlite files row".to_owned())?
-                .to_owned();
-            keys.insert(Key { sha256, extension });
-        }
-    }
-    Ok(keys)
 }
 
 fn split_dir_file(path: &str) -> (&str, &str) {
@@ -1357,265 +1121,3 @@ fn encode_record(cols: &[SqlValue]) -> Vec<u8> {
     out
 }
 
-// --- Pure-Rust SQLite B-tree reader for `referenced_keys` and tests ---
-
-fn read_varint(data: &[u8]) -> Result<(u64, usize), String> {
-    let mut acc = 0u64;
-    for (idx, &b) in data.iter().take(9).enumerate() {
-        if idx == 8 {
-            acc = (acc << 8) | u64::from(b);
-            return Ok((acc, 9));
-        }
-        acc = (acc << 7) | u64::from(b & 0x7f);
-        if b & 0x80 == 0 {
-            return Ok((acc, idx + 1));
-        }
-    }
-    Err("truncated sqlite varint".to_owned())
-}
-
-fn page_slice(db: &[u8], page: u32) -> Result<&[u8], String> {
-    if page == 0 {
-        return Err("sqlite page 0 is invalid".to_owned());
-    }
-    let start = (page as usize - 1)
-        .checked_mul(PAGE_SIZE)
-        .ok_or_else(|| "sqlite page offset overflow".to_owned())?;
-    db.get(start..start + PAGE_SIZE)
-        .ok_or_else(|| format!("sqlite page {page} out of bounds"))
-}
-
-fn read_cell_payload(
-    db: &[u8],
-    cell: &[u8],
-    max_local: usize,
-    has_rowid: bool,
-) -> Result<Vec<u8>, String> {
-    let (p_u64, mut pos) = read_varint(cell)?;
-    let p = usize::try_from(p_u64).map_err(|_| "payload size overflow".to_owned())?;
-    if has_rowid {
-        let (_, rlen) = read_varint(cell.get(pos..).ok_or("truncated rowid")?)?;
-        pos += rlen;
-    }
-    if p <= max_local {
-        return Ok(cell
-            .get(pos..pos + p)
-            .ok_or("truncated local payload")?
-            .to_vec());
-    }
-    let k = MIN_LOCAL + ((p - MIN_LOCAL) % USABLE_OVERFLOW);
-    let local = if k <= max_local { k } else { MIN_LOCAL };
-    let mut out = Vec::with_capacity(p);
-    out.extend_from_slice(
-        cell.get(pos..pos + local)
-            .ok_or("truncated split payload")?,
-    );
-    let ovf_bytes = cell
-        .get(pos + local..pos + local + 4)
-        .ok_or("missing overflow pointer")?;
-    let mut next_pg = u32::from_be_bytes(ovf_bytes.try_into().unwrap());
-    while out.len() < p {
-        if next_pg == 0 {
-            return Err("premature end of sqlite overflow chain".to_owned());
-        }
-        let pg = page_slice(db, next_pg)?;
-        next_pg = u32::from_be_bytes(pg[..4].try_into().unwrap());
-        let take = (p - out.len()).min(USABLE_OVERFLOW);
-        out.extend_from_slice(&pg[4..4 + take]);
-    }
-    Ok(out)
-}
-
-fn read_table_btree(db: &[u8], page: u32) -> Result<Vec<Vec<u8>>, String> {
-    let mut out = Vec::new();
-    collect_table_btree(db, page, &mut out)?;
-    Ok(out)
-}
-
-fn collect_table_btree(db: &[u8], page: u32, out: &mut Vec<Vec<u8>>) -> Result<(), String> {
-    let pg = page_slice(db, page)?;
-    let hdr = if page == 1 { 100 } else { 0 };
-    let flag = pg[hdr];
-    let count = u16::from_be_bytes([pg[hdr + 3], pg[hdr + 4]]) as usize;
-    match flag {
-        0x0d => {
-            for i in 0..count {
-                let ptr_off = hdr + 8 + 2 * i;
-                let cell_off = u16::from_be_bytes([pg[ptr_off], pg[ptr_off + 1]]) as usize;
-                out.push(read_cell_payload(
-                    db,
-                    &pg[cell_off..],
-                    TABLE_MAX_LOCAL,
-                    true,
-                )?);
-            }
-            Ok(())
-        }
-        0x05 => {
-            let right_child =
-                u32::from_be_bytes([pg[hdr + 8], pg[hdr + 9], pg[hdr + 10], pg[hdr + 11]]);
-            for i in 0..count {
-                let ptr_off = hdr + 12 + 2 * i;
-                let cell_off = u16::from_be_bytes([pg[ptr_off], pg[ptr_off + 1]]) as usize;
-                let left_child = u32::from_be_bytes(
-                    pg[cell_off..cell_off + 4]
-                        .try_into()
-                        .map_err(|_| "truncated interior cell")?,
-                );
-                collect_table_btree(db, left_child, out)?;
-            }
-            collect_table_btree(db, right_child, out)
-        }
-        other => Err(format!("unexpected table btree page flag 0x{other:02x}")),
-    }
-}
-
-fn read_index_btree(db: &[u8], page: u32) -> Result<Vec<Vec<u8>>, String> {
-    let mut out = Vec::new();
-    collect_index_btree(db, page, &mut out)?;
-    Ok(out)
-}
-
-fn collect_index_btree(db: &[u8], page: u32, out: &mut Vec<Vec<u8>>) -> Result<(), String> {
-    let pg = page_slice(db, page)?;
-    let flag = pg[0];
-    let count = u16::from_be_bytes([pg[3], pg[4]]) as usize;
-    match flag {
-        0x0a => {
-            for i in 0..count {
-                let ptr_off = 8 + 2 * i;
-                let cell_off = u16::from_be_bytes([pg[ptr_off], pg[ptr_off + 1]]) as usize;
-                out.push(read_cell_payload(
-                    db,
-                    &pg[cell_off..],
-                    INDEX_MAX_LOCAL,
-                    false,
-                )?);
-            }
-            Ok(())
-        }
-        0x02 => {
-            let right_child = u32::from_be_bytes([pg[8], pg[9], pg[10], pg[11]]);
-            for i in 0..count {
-                let ptr_off = 12 + 2 * i;
-                let cell_off = u16::from_be_bytes([pg[ptr_off], pg[ptr_off + 1]]) as usize;
-                let left_child = u32::from_be_bytes(
-                    pg[cell_off..cell_off + 4]
-                        .try_into()
-                        .map_err(|_| "truncated index interior cell")?,
-                );
-                collect_index_btree(db, left_child, out)?;
-                out.push(read_cell_payload(
-                    db,
-                    &pg[cell_off + 4..],
-                    INDEX_MAX_LOCAL,
-                    false,
-                )?);
-            }
-            collect_index_btree(db, right_child, out)
-        }
-        other => Err(format!("unexpected index btree page flag 0x{other:02x}")),
-    }
-}
-
-fn decode_record(record: &[u8]) -> Result<Vec<SqlValue>, String> {
-    let (hdr_u64, mut hdr_pos) = read_varint(record)?;
-    let hdr_end = usize::try_from(hdr_u64).map_err(|_| "record header overflow".to_owned())?;
-    if hdr_end > record.len() {
-        return Err("truncated sqlite record header".to_owned());
-    }
-    let mut serials = Vec::new();
-    while hdr_pos < hdr_end {
-        let (s, len) = read_varint(&record[hdr_pos..hdr_end])?;
-        serials.push(s);
-        hdr_pos += len;
-    }
-    let mut body_pos = hdr_end;
-    let mut cols = Vec::with_capacity(serials.len());
-    for s in serials {
-        let val = match s {
-            0 => SqlValue::Null,
-            8 => SqlValue::Int(0),
-            9 => SqlValue::Int(1),
-            1 => {
-                let b = *record.get(body_pos).ok_or("truncated i8")? as i8;
-                body_pos += 1;
-                SqlValue::Int(i64::from(b))
-            }
-            2 => {
-                let slice = record.get(body_pos..body_pos + 2).ok_or("truncated i16")?;
-                body_pos += 2;
-                SqlValue::Int(i64::from(i16::from_be_bytes([slice[0], slice[1]])))
-            }
-            3 => {
-                let slice = record.get(body_pos..body_pos + 3).ok_or("truncated i24")?;
-                body_pos += 3;
-                let sign = if slice[0] & 0x80 != 0 { 0xff } else { 0x00 };
-                SqlValue::Int(i64::from(i32::from_be_bytes([
-                    sign, slice[0], slice[1], slice[2],
-                ])))
-            }
-            4 => {
-                let slice = record.get(body_pos..body_pos + 4).ok_or("truncated i32")?;
-                body_pos += 4;
-                SqlValue::Int(i64::from(i32::from_be_bytes(slice.try_into().unwrap())))
-            }
-            5 => {
-                let slice = record.get(body_pos..body_pos + 6).ok_or("truncated i48")?;
-                body_pos += 6;
-                let sign = if slice[0] & 0x80 != 0 { 0xff } else { 0x00 };
-                SqlValue::Int(i64::from_be_bytes([
-                    sign, sign, slice[0], slice[1], slice[2], slice[3], slice[4], slice[5],
-                ]))
-            }
-            6 => {
-                let slice = record.get(body_pos..body_pos + 8).ok_or("truncated i64")?;
-                body_pos += 8;
-                SqlValue::Int(i64::from_be_bytes(slice.try_into().unwrap()))
-            }
-            n if n >= 12 && n.is_multiple_of(2) => {
-                let len = usize::try_from((n - 12) / 2).map_err(|_| "blob len overflow")?;
-                let slice = record
-                    .get(body_pos..body_pos + len)
-                    .ok_or("truncated blob")?;
-                body_pos += len;
-                SqlValue::Blob(slice.to_vec())
-            }
-            n if n >= 13 && !n.is_multiple_of(2) => {
-                let len = usize::try_from((n - 13) / 2).map_err(|_| "text len overflow")?;
-                let slice = record
-                    .get(body_pos..body_pos + len)
-                    .ok_or("truncated text")?;
-                body_pos += len;
-                let text = std::str::from_utf8(slice)
-                    .map_err(|_| "non-UTF-8 text in sqlite record")?
-                    .to_owned();
-                SqlValue::Text(text)
-            }
-            other => return Err(format!("unsupported sqlite serial type {other}")),
-        };
-        cols.push(val);
-    }
-    Ok(cols)
-}
-
-fn as_text(val: &SqlValue) -> Option<&str> {
-    match val {
-        SqlValue::Text(s) => Some(s.as_str()),
-        _ => None,
-    }
-}
-
-fn as_int(val: &SqlValue) -> Option<i64> {
-    match val {
-        SqlValue::Int(v) => Some(*v),
-        _ => None,
-    }
-}
-
-fn as_blob(val: &SqlValue) -> Option<&[u8]> {
-    match val {
-        SqlValue::Blob(b) => Some(b.as_slice()),
-        _ => None,
-    }
-}

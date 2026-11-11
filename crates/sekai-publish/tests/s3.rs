@@ -1,6 +1,6 @@
 //! Publishing to an S3-compatible bucket, against a local server that checks signatures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
-use sekai_publish::s3::{Bucket, Check, Credentials, S3, S3Layout, publish, publish_with};
-use sekai_publish::{Binding, Plan, plan};
+use sekai_publish::s3::{Bucket, Check, Credentials, S3, publish, publish_with};
+use sekai_publish::{Binding, Layout, Plan, documents, plan};
 use sha2::{Digest, Sha256};
 
 const ACCESS_KEY: &str = "TESTACCESSKEY";
@@ -408,8 +408,8 @@ fn a_second_publication_uploads_nothing() {
     let plan = sample(&store, "v1", b"mask");
 
     let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
-    // Seven files, plus three shards, one listing and the root.
-    assert_eq!((report.uploaded, report.present), (12, 0));
+    // Seven files, three shards, one listing and the root, and a path index of one chunk.
+    assert_eq!((report.uploaded, report.present), (14, 0));
     assert!(report.pointer_written);
     for file in &plan.files {
         assert_eq!(
@@ -424,7 +424,7 @@ fn a_second_publication_uploads_nothing() {
         Some(serde_json::to_vec(&pointer).unwrap())
     );
     let root = Key {
-        sha256: sekai_catalog::store::parse_hex(&pointer.root).unwrap(),
+        sha256: sekai_catalog::store::parse_hex(pointer.root.as_deref().unwrap()).unwrap(),
         extension: "json".to_owned(),
     };
     assert!(server.object(&object_name(&root)).is_some());
@@ -432,7 +432,7 @@ fn a_second_publication_uploads_nothing() {
     let puts = server.state.puts.load(Ordering::SeqCst);
     let (again, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(again, pointer);
-    assert_eq!((report.uploaded, report.present), (0, 12));
+    assert_eq!((report.uploaded, report.present), (0, 14));
     assert!(!report.pointer_written);
     assert_eq!(server.state.puts.load(Ordering::SeqCst), puts);
 }
@@ -465,7 +465,7 @@ fn an_interrupted_publication_converges() {
 
     server.refuse_after(None);
     let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
-    assert_eq!(report.uploaded + report.present, 12);
+    assert_eq!(report.uploaded + report.present, 14);
     assert!(report.present >= 4);
     assert_eq!(
         server.object(POINTER),
@@ -547,8 +547,9 @@ fn incremental_publication_skips_head_for_live_objects() {
     .unwrap();
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 
-    // Changing one member checks only the 6 changed objects (1 member + 1 doc + 2 shards ("a" and
-    // "a/two") + 1 listing + 1 root), skipping HEAD on all 6 unchanged objects from v1.
+    // Changing one member checks only the 8 changed objects (1 member, 1 document, the shards "a"
+    // and "a/two", 1 listing, the root, and the chunk and root of the path index), skipping HEAD
+    // on the 6 unchanged objects of v1.
     let (_, report) = publish(
         &store,
         &s3,
@@ -557,8 +558,8 @@ fn incremental_publication_skips_head_for_live_objects() {
         2,
     )
     .unwrap();
-    assert_eq!((report.uploaded, report.present), (6, 6));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 6);
+    assert_eq!((report.uploaded, report.present), (8, 6));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 8);
 }
 
 #[test]
@@ -583,12 +584,12 @@ fn verifying_lists_the_store_and_restores_lost_objects() {
         &s3,
         "jp/canonical",
         &plan,
-        &S3Layout::Index,
+        Layout::Index,
         Check::Listing,
         2,
     )
     .unwrap();
-    assert_eq!((report.uploaded, report.present), (1, 11));
+    assert_eq!((report.uploaded, report.present), (1, 13));
     assert!(!report.pointer_written);
     assert_eq!(
         server.object(&lost),
@@ -600,7 +601,7 @@ fn verifying_lists_the_store_and_restores_lost_objects() {
 }
 
 #[test]
-fn sqlite_layout_packs_composite_forms_sets_cache_control_and_skips_unchanged_heads() {
+fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
     let s = Scratch::new("sqlite-s3");
     let store = s.store();
     let server = Server::start();
@@ -651,20 +652,23 @@ fn sqlite_layout_packs_composite_forms_sets_cache_control_and_skips_unchanged_he
     };
     let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
 
+    let objects = |plan: &Plan| -> BTreeSet<Key> {
+        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
+        publication.objects.into_iter().map(|o| o.key).collect()
+    };
     let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
     let (pointer, report) = publish_with(
         &store,
         &s3,
         "jp/canonical",
         &v1,
-        &S3Layout::default(),
+        Layout::Sqlite,
         Check::Pointer,
         2,
     )
     .unwrap();
-    // 1 sqlite + 1 root.json + 1 packed .tar + 1 standalone .webp = 4 store objects.
-    assert_eq!((report.uploaded, report.present), (4, 0));
-    assert!(pointer.sqlite.is_some());
+    assert_eq!((report.uploaded, report.present), (objects(&v1).len(), 0));
+    assert!(pointer.sqlite.is_some() && pointer.paths.is_some());
 
     let sqlite_key = Key {
         sha256: sekai_catalog::store::parse_hex(pointer.sqlite.as_deref().unwrap()).unwrap(),
@@ -679,20 +683,22 @@ fn sqlite_layout_packs_composite_forms_sets_cache_control_and_skips_unchanged_he
     );
     assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
 
-    // Incremental v2 adding one texture skips HEAD on the existing `.tar` and `.webp`.
+    // A second version asks only about the objects the first did not have.
     server.state.heads.store(0, Ordering::SeqCst);
     let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
     let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
-    let (_, report2) = publish_with(
+    let (_, report) = publish_with(
         &store,
         &s3,
         "jp/canonical",
         &v2,
-        &S3Layout::default(),
+        Layout::Sqlite,
         Check::Pointer,
         2,
     )
     .unwrap();
-    assert_eq!((report2.uploaded, report2.present), (3, 2));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 3);
+    let all = objects(&v2);
+    let new = all.difference(&objects(&v1)).count();
+    assert_eq!((report.uploaded, report.present), (new, all.len() - new));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), new);
 }

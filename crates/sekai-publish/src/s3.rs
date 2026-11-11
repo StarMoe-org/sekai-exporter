@@ -22,14 +22,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore};
+use sekai_format::paths::{Chunk, PathIndex};
 use sekai_format::publication::{IndexRoot, IndexShard, Pointer};
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
-use crate::index::{Documents, documents};
+use crate::layout::{Layout, Publication, check_version, documents, version_pointer};
 use crate::plan::{Plan, PublishError, hex};
-use crate::sqlite::{self, SqliteBuild, SqliteOptions};
 
 /// The SHA-256 of no bytes.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -377,26 +377,8 @@ impl S3 {
     }
 }
 
-/// Which publication layout an S3 upload writes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum S3Layout {
-    /// Classic JSON-sharded layout (`IndexRoot`, `IndexShard`s, `Listing`s, `.asset.json`, members).
-    Index,
-    /// Three-tier browser-native layout (`index.sqlite`, `.tar` composite archives, standalone media).
-    Sqlite(SqliteOptions),
-}
-
-impl Default for S3Layout {
-    fn default() -> Self {
-        Self::Sqlite(SqliteOptions::default())
-    }
-}
-
-/// Publishes `plan` in the `index` layout to the bucket of `s3`: the objects first, then the
-/// pointer of `target`. The shards, listings and root are written to `store` first, and every
-/// object the bucket lacks is read from `store`. A failed stage leaves the previous pointer in
-/// place, and running the publication again uploads only what is still missing. The documents
-/// are written on up to `threads` threads.
+/// Publishes `plan` as `target` in the `index` layout to the bucket of `s3`, learning what the
+/// bucket holds from its pointer. See [`publish_with`].
 pub fn publish(
     store: &LocalStore,
     s3: &S3,
@@ -409,78 +391,33 @@ pub fn publish(
         s3,
         target,
         plan,
-        &S3Layout::Index,
+        Layout::Index,
         Check::Pointer,
         threads,
     )
 }
 
-/// Publishes `plan` in `layout` to the bucket of `s3`, learning what the bucket holds as `check`
-/// says. The documents are written on up to `threads` threads.
+/// Publishes `plan` as `target` in `layout` to the bucket of `s3`: the objects first, then the
+/// pointer of its version, then the current pointer of `target`. The documents are written to
+/// `store` first, and every object the bucket lacks is read from `store`. A failed stage leaves
+/// the previous pointer in place, and running the publication again uploads only what is still
+/// missing. What the bucket holds is learned as `check` says. The documents are written on up
+/// to `threads` threads.
 pub fn publish_with(
     store: &LocalStore,
     s3: &S3,
     target: &str,
     plan: &Plan,
-    layout: &S3Layout,
+    layout: Layout,
     check: Check,
     threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
-    let (pointer, all) = match layout {
-        S3Layout::Index => {
-            let Documents { pointer, objects } = documents(store, plan, threads)?;
-            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
-            for file in &plan.files {
-                all.insert(file.key.clone(), (file.size, file.media_type.clone()));
-            }
-            for (key, size) in objects {
-                all.insert(key, (size, "application/json".to_owned()));
-            }
-            (pointer, all)
-        }
-        S3Layout::Sqlite(options) => {
-            let SqliteBuild {
-                sqlite,
-                sqlite_size,
-                archives,
-                direct_files,
-            } = sqlite::build(store, plan, options, threads)?;
-            let root_doc = IndexRoot {
-                format: "index-root".to_owned(),
-                version: 1,
-                published_version: plan.version.clone(),
-                revision: plan.revision.clone(),
-                shards: Vec::new(),
-                listings: Vec::new(),
-                failures: plan.failures.clone(),
-            };
-            let root_bytes =
-                serde_json::to_vec(&root_doc).map_err(|e| PublishError::new("documents", e))?;
-            let root_size = root_bytes.len() as u64;
-            let root_key = store
-                .put(&root_bytes, "json")
-                .map_err(PublishError::wrap("documents"))?;
-            let pointer = Pointer {
-                format: "pointer".to_owned(),
-                version: 1,
-                published_version: plan.version.clone(),
-                revision: plan.revision.clone(),
-                root: hex(&root_key.sha256),
-                sqlite: Some(hex(&sqlite.sha256)),
-            };
-            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
-            for (key, size, media_type) in direct_files {
-                all.insert(key, (size, media_type));
-            }
-            for (key, size) in archives {
-                all.insert(key, (size, "application/x-tar".to_owned()));
-            }
-            all.insert(root_key, (root_size, "application/json".to_owned()));
-            all.insert(sqlite, (sqlite_size, "application/vnd.sqlite3".to_owned()));
-            (pointer, all)
-        }
-    };
-
+    check_version(&plan.version)?;
+    let Publication { pointer, objects } = documents(store, target, plan, layout, threads)?;
+    let all: BTreeMap<Key, (u64, String)> = objects
+        .into_iter()
+        .map(|object| (object.key, (object.size, object.media_type)))
+        .collect();
     let all: Vec<_> = all.into_iter().collect();
     let pointer_bytes =
         serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
@@ -559,14 +496,21 @@ pub fn publish_with(
     if pointer_written {
         let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
         let sha256 = hex(&digest);
-        s3.put(
-            &pointer_name,
-            &sha256,
-            "application/json",
-            POINTER_CACHE_CONTROL,
-            || Ok(pointer_bytes.as_slice()),
-        )
-        .map_err(failed)?;
+        let version_name = format!(
+            "{}published/{}",
+            s3.bucket.prefix,
+            version_pointer(target, &plan.version)
+        );
+        for name in [&version_name, &pointer_name] {
+            s3.put(
+                name,
+                &sha256,
+                "application/json",
+                POINTER_CACHE_CONTROL,
+                || Ok(pointer_bytes.as_slice()),
+            )
+            .map_err(failed)?;
+        }
     }
     let uploaded = uploaded.into_inner();
     Ok((
@@ -579,78 +523,67 @@ pub fn publish_with(
     ))
 }
 
-fn live_keys_from_pointer(store: &LocalStore, prev: &Pointer) -> BTreeSet<Key> {
-    let mut keys = BTreeSet::new();
-    let Some(root_sha) = parse_hex(&prev.root) else {
-        return keys;
+/// Reads the object `<sha256>.<extension>` from `store` and records it in `live`.
+fn read_live(
+    store: &LocalStore,
+    live: &mut BTreeSet<Key>,
+    sha256: &str,
+    extension: &str,
+) -> Option<Vec<u8>> {
+    let key = Key {
+        sha256: parse_hex(sha256)?,
+        extension: extension.to_owned(),
     };
-    let root_key = Key {
-        sha256: root_sha,
-        extension: "json".to_owned(),
-    };
-    if store.contains(&root_key) {
-        keys.insert(root_key.clone());
-    }
+    let bytes = store.read(&key).ok()?;
+    live.insert(key);
+    Some(bytes)
+}
 
-    if let Some(sqlite_hex) = &prev.sqlite {
-        if let Some(sqlite_sha) = parse_hex(sqlite_hex) {
-            let sqlite_key = Key {
-                sha256: sqlite_sha,
-                extension: "sqlite".to_owned(),
-            };
-            if let Ok(sqlite_bytes) = store.read(&sqlite_key) {
-                keys.insert(sqlite_key);
-                if let Ok(referenced) = sqlite::referenced_keys(&sqlite_bytes) {
-                    keys.extend(referenced);
-                }
-            }
-        }
-        return keys;
+/// The objects of the publication `previous` names, as far as the local store describes them: its
+/// documents and every file its index shards or path index list.
+fn live_keys_from_pointer(store: &LocalStore, previous: &Pointer) -> BTreeSet<Key> {
+    let mut live = BTreeSet::new();
+    if let Some(sqlite) = &previous.sqlite {
+        read_live(store, &mut live, sqlite, "sqlite");
     }
-
-    // Classic `index` layout: resolve shards, listings, and every file entry from local store.
-    let Ok(root_bytes) = store.read(&root_key) else {
-        return keys;
-    };
-    let Ok(root_doc) = serde_json::from_slice::<IndexRoot>(&root_bytes) else {
-        return keys;
-    };
-    for listing in &root_doc.listings {
-        if let Some(sha256) = parse_hex(&listing.sha256) {
-            let lkey = Key {
-                sha256,
-                extension: "json".to_owned(),
-            };
-            if store.contains(&lkey) {
-                keys.insert(lkey);
-            }
-        }
+    let root = (previous.root.as_deref())
+        .and_then(|root| read_live(store, &mut live, root, "json"))
+        .and_then(|bytes| serde_json::from_slice::<IndexRoot>(&bytes).ok());
+    for listing in root.iter().flat_map(|root| &root.listings) {
+        read_live(store, &mut live, &listing.sha256, "json");
     }
-    for shard_ref in &root_doc.shards {
-        let Some(sha256) = parse_hex(&shard_ref.sha256) else {
+    for shard in root.iter().flat_map(|root| &root.shards) {
+        let Some(shard) = read_live(store, &mut live, &shard.sha256, "json")
+            .and_then(|bytes| serde_json::from_slice::<IndexShard>(&bytes).ok())
+        else {
             continue;
         };
-        let skey = Key {
-            sha256,
-            extension: "json".to_owned(),
-        };
-        let Ok(shard_bytes) = store.read(&skey) else {
-            continue;
-        };
-        let Ok(shard_doc) = serde_json::from_slice::<IndexShard>(&shard_bytes) else {
-            continue;
-        };
-        keys.insert(skey);
-        for entry in shard_doc.entries {
-            if let Some(fsha) = parse_hex(&entry.sha256) {
-                keys.insert(Key {
-                    sha256: fsha,
+        for entry in shard.entries {
+            if let Some(sha256) = parse_hex(&entry.sha256) {
+                live.insert(Key {
+                    sha256,
                     extension: entry.extension,
                 });
             }
         }
     }
-    keys
+    let paths = (previous.paths.as_deref())
+        .and_then(|paths| read_live(store, &mut live, paths, "json"))
+        .and_then(|bytes| PathIndex::from_bytes(&bytes).ok());
+    for chunk in paths.iter().flat_map(|paths| &paths.chunks) {
+        let Some(chunk) = read_live(store, &mut live, &chunk.sha256, "paths")
+            .and_then(|bytes| Chunk::decode(&bytes).ok())
+        else {
+            continue;
+        };
+        for file in chunk.files() {
+            live.insert(Key {
+                sha256: file.sha256,
+                extension: file.extension.clone(),
+            });
+        }
+    }
+    live
 }
 
 /// Runs `job` for indices `0..n` on up to `threads` threads, stopping after the first failure.

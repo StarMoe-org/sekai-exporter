@@ -49,7 +49,8 @@ This page lists every part of the exporter with its state, so that anyone can se
 | S3-compatible stores | Done | [Publishing](publishing.md#s3-compatible-buckets) |
 | WebAssembly core, compared with the native build in continuous integration | Done | |
 | Lazy evaluator as a library | Done | [Architecture](architecture.md) |
-| `serve`: the lazy evaluator behind an HTTP server | Planned | The feature is defined; it is built when a deployment needs it |
+| Path indexes and the `serve` resolver | Done | [Serving](serving.md), [Path index](spec/path-index.md) |
+| Resolver for edge workers in front of a bucket | Planned | The `sekai-serve` core does no I/O; a worker supplies the reads |
 
 ## General forms
 

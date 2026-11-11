@@ -74,6 +74,7 @@ sekai-exporter update <区服> <输出目录> --config <配置文件> --secrets 
 | [性能](docs/performance.zh-CN.md) | 设计如何避免工作，以及其余工作在何处运行 |
 | [来源](docs/sources.zh-CN.md) | 输入、区服、版本发现与凭据 |
 | [发布](docs/publishing.zh-CN.md) | store、布局、资产文档与发布协议 |
+| [服务](docs/serving.zh-CN.md) | `serve` 解析器：路径索引、路由与 HTTP 响应 |
 | [功能开关](docs/features.zh-CN.md) | crate、Cargo feature 与预设 |
 | [路线图](docs/roadmap.zh-CN.md) | 每个部分的状态，以及如何认领未完成的工作 |
 | [Live2D 动作](docs/live2d-motion.zh-CN.md) | 游戏如何保存 Live2D 动作，以及其规范形式为何是 clip 的曲线 |

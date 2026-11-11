@@ -651,20 +651,22 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         monitor,
     )?;
     write_ledger(&streamed.ledgers, &options.output, monitor)?;
+    let storage_target = format!("{region_name}/storage");
+    let storage = crate::storage::publish(
+        &plan,
+        &storage_target,
+        &Destination {
+            output: &options.output,
+            tree: options.storage.as_deref(),
+        },
+        &store,
+        &derivations,
+        options.threads,
+        monitor,
+    )?;
     if !selection {
-        publish_bucket(&config, options, &store, &target, &plan, monitor)?;
-    }
-
-    if let Some(root) = &options.storage {
-        crate::storage::publish(
-            &plan,
-            &name,
-            root,
-            &store,
-            &derivations,
-            options.threads,
-            monitor,
-        )?;
+        let storage = storage.as_ref().map(|plan| (storage_target.as_str(), plan));
+        publish_bucket(&config, options, &store, (&target, &plan), storage, monitor)?;
     }
 
     let record = || -> io::Result<()> {
@@ -783,19 +785,22 @@ fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
         .ok_or_else(|| format!("the secret {name} is not set").into())
 }
 
-/// Publishes `plan` to the bucket that the `publish.s3` section of the configuration describes,
-/// with the secrets of `options`. With `--verify`, what the bucket holds is learned from a listing
-/// of its whole store.
+/// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one, to
+/// the bucket that the `publish.s3` section of the configuration describes, with the secrets of
+/// `options`. The canonical view is published in the layout the section names, and the storage
+/// view with its path index alone. With `--verify`, what the bucket holds is learned from a
+/// listing of its whole store.
 #[cfg(feature = "s3")]
 fn publish_bucket(
     config: &str,
     options: &Options,
     store: &LocalStore,
-    target: &str,
-    plan: &Plan,
+    canonical: (&str, &Plan),
+    storage: Option<(&str, &Plan)>,
     monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
-    use sekai_publish::s3::{self, Bucket, Check, Credentials, S3, S3Layout};
+    use sekai_publish::Layout;
+    use sekai_publish::s3::{self, Bucket, Check, Credentials, S3};
 
     let secrets = options.secrets.as_deref();
 
@@ -841,10 +846,10 @@ fn publish_bucket(
         },
     };
     let layout = match section.get("layout") {
-        None => S3Layout::Sqlite(parse_sqlite_options(&section)?),
+        None => Layout::Sqlite,
         Some(value) => match text(Some(value), "layout")?.as_str() {
-            "sqlite" => S3Layout::Sqlite(parse_sqlite_options(&section)?),
-            "index" => S3Layout::Index,
+            "sqlite" => Layout::Sqlite,
+            "index" => Layout::Index,
             other => {
                 return Err(
                     format!("publish.s3.layout {other:?} must be \"sqlite\" or \"index\"").into(),
@@ -853,46 +858,30 @@ fn publish_bucket(
         },
     };
     let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
-    let _span = monitor.span("publish", "s3", target);
     let check = if options.verify {
         Check::Listing
     } else {
         Check::Pointer
     };
-    let (_, report) = s3::publish_with(store, &s3, target, plan, &layout, check, options.threads)
-        .map_err(|e| e.to_string())?;
-    println!(
-        "bucket uploaded {} present {} pointer {}",
-        report.uploaded,
-        report.present,
-        if report.pointer_written {
-            "written"
-        } else {
-            "unchanged"
-        }
-    );
-    Ok(())
-}
-
-#[cfg(feature = "s3")]
-fn parse_sqlite_options(
-    section: &serde_json::Value,
-) -> Result<sekai_publish::sqlite::SqliteOptions, lexopt::Error> {
-    use sekai_publish::sqlite::SqliteOptions;
-    let Some(value) = section.get("pack_forms") else {
-        return Ok(SqliteOptions::default());
-    };
-    let array = value
-        .as_array()
-        .ok_or("publish.s3.pack_forms must be an array of strings")?;
-    let mut pack_forms = std::collections::BTreeSet::new();
-    for item in array {
-        let form = item
-            .as_str()
-            .ok_or("publish.s3.pack_forms entries must be strings")?;
-        pack_forms.insert(form.to_owned());
+    let views =
+        std::iter::once((canonical, layout)).chain(storage.map(|view| (view, Layout::Paths)));
+    for ((target, plan), layout) in views {
+        let _span = monitor.span("publish", "s3", target);
+        let (_, report) =
+            s3::publish_with(store, &s3, target, plan, layout, check, options.threads)
+                .map_err(|e| e.to_string())?;
+        println!(
+            "bucket {target} uploaded {} present {} pointer {}",
+            report.uploaded,
+            report.present,
+            if report.pointer_written {
+                "written"
+            } else {
+                "unchanged"
+            }
+        );
     }
-    Ok(SqliteOptions { pack_forms })
+    Ok(())
 }
 
 /// Refuses a configuration that names a bucket, which this build cannot publish to.
@@ -901,8 +890,8 @@ fn publish_bucket(
     config: &str,
     _options: &Options,
     _store: &LocalStore,
-    _target: &str,
-    _plan: &Plan,
+    _canonical: (&str, &Plan),
+    _storage: Option<(&str, &Plan)>,
     _monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
     match bucket_section(config)? {

@@ -1,6 +1,6 @@
 # Storage view
 
-The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update --storage <dir>` publishes it. View version: 2.
+The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update` publishes it with a path index at `<region>/storage`, and `--storage <dir>` also writes it as a tree. View version: 2.
 
 ## 1. Runtime
 
@@ -39,7 +39,7 @@ Assets that share a name follow the naming rule in [architecture](../architectur
 
 A transform is a derivation: its fingerprint is made from the view version, the transform, its encoder version and the hash of the member. A second run reuses every result.
 
-The tree is written in the order given in [publishing](../publishing.md). A fixed path cannot be switched atomically.
+A [resolver](../serving.md) switches every path of the view to a new version at once. A tree written with `--storage` cannot be switched atomically, and is written in the order given in [publishing](../publishing.md).
 
 ## 5. Correctness
 

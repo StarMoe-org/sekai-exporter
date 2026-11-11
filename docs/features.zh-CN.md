@@ -68,7 +68,7 @@
 | `client` | `sekai-game`、`sekai-exporter` | `apk` 来源，以及读取客户端安装包内资产所用的字段布局表（`sekai-layouts`） |
 | `catalog-db` | `sekai-catalog` | 保存于 redb 数据库的目录 |
 | `s3` | `sekai-publish` | S3 兼容的 store |
-| `serve` | `sekai-exporter` | 以 HTTP 服务形式运行的惰性求值器；已定义，尚未实现 |
+| `serve` | `sekai-exporter` | `serve` 命令：解析已发布视图路径的 HTTP 服务（[服务](serving.zh-CN.md)） |
 
 ## 预设
 

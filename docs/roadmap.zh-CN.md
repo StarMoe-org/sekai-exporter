@@ -49,7 +49,8 @@
 | S3 兼容存储 | 已完成 | [发布](publishing.zh-CN.md#s3-兼容存储桶) |
 | WebAssembly 核心，持续集成中与原生构建比对 | 已完成 | |
 | 惰性求值器（作为库） | 已完成 | [架构](architecture.zh-CN.md) |
-| `serve`：以 HTTP 服务器提供惰性求值 | 计划中 | feature 已定义；有部署需要时再实现 |
+| 路径索引与 `serve` 解析器 | 已完成 | [服务](serving.zh-CN.md)、[路径索引](spec/path-index.zh-CN.md) |
+| 桶前的边缘 worker 解析器 | 计划中 | `sekai-serve` 核心不做 I/O，读取由 worker 提供 |
 
 ## 通用形式
 

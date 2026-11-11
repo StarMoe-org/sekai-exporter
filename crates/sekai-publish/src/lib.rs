@@ -1,13 +1,15 @@
-//! Publishing: layouts, stores, asset listings and the publication protocol.
+//! Publishing: layouts, stores, asset listings, path indexes and the publication protocol.
 
 #[cfg(feature = "s3")]
 pub mod s3;
 
-pub mod index;
+mod index;
+mod layout;
 mod parallel;
+mod paths;
 pub mod plan;
-pub mod sqlite;
-pub mod tar;
+mod sqlite;
 pub mod tree;
 
+pub use layout::{Layout, Object, Publication, documents, publish};
 pub use plan::{Binding, File, Plan, PublishError, PublishedAsset, plan};

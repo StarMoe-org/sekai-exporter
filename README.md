@@ -74,6 +74,7 @@ The documents in [`docs/`](docs/) describe the design that the code implements.
 | [Performance](docs/performance.md) | How the design avoids work, and where the remaining work runs |
 | [Sources](docs/sources.md) | Inputs, regions, version discovery and credentials |
 | [Publishing](docs/publishing.md) | Stores, layouts, asset documents and the publication protocol |
+| [Serving](docs/serving.md) | The `serve` resolver: path indexes, routes and HTTP responses |
 | [Features](docs/features.md) | Crates, Cargo features and presets |
 | [Roadmap](docs/roadmap.md) | The state of every part, and how to pick up open work |
 | [Live2D motions](docs/live2d-motion.md) | How the game stores Live2D motions, and why their canonical form is the clip's curves |

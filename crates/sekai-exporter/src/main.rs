@@ -26,19 +26,20 @@ mod client {
 mod export;
 mod monitor;
 mod objects;
+#[cfg(feature = "serve")]
+mod serve;
 #[cfg(feature = "catalog-db")]
 mod stats;
 #[cfg(all(feature = "cdn", feature = "storage-view"))]
 mod storage;
 #[cfg(all(feature = "cdn", not(feature = "storage-view")))]
 mod storage {
-    use std::path::Path;
-
     use sekai_catalog::{Derivations, LocalStore};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
     use sekai_publish::Plan;
 
+    use crate::export::Destination;
     use crate::monitor::Monitor;
 
     /// Makes no further files in a build without the storage view.
@@ -60,17 +61,22 @@ mod storage {
         }
     }
 
-    /// Refuses to publish a view that this build does not have.
+    /// Publishes no view in a build without the storage view, and refuses to write its tree.
     pub(crate) fn publish(
         _index: &Plan,
-        _version: &str,
-        _root: &Path,
+        _target: &str,
+        destination: &Destination<'_>,
         _store: &LocalStore,
         _derivations: &dyn Derivations,
         _threads: usize,
         _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        Err("this build has no storage view: enable the storage-view feature".into())
+    ) -> Result<Option<Plan>, lexopt::Error> {
+        match destination.tree {
+            Some(_) => {
+                Err("this build has no storage view: enable the storage-view feature".into())
+            }
+            None => Ok(None),
+        }
     }
 }
 #[cfg(feature = "cdn")]
@@ -103,11 +109,14 @@ commands:
          [--plain] [--force] [--verify]
       Bring <output> up to the current version of a region of the configuration.
       Bundles go to <output>/inputs, which holds game data and must stay private.
-      A version that matches the last complete run is left alone unless --force
-      or --verify is given. --verify checks the bucket against a listing of its
-      store and uploads what it lacks, whatever its pointer says. --only selects bundles by name prefix, with their dependencies.
-      A selection is neither recorded as a version nor sent to a bucket; it needs
-      an <output> without a complete run and empty --tree and --storage folders.
+      The canonical and the storage view are published under <output>/published
+      with their path indexes; --tree and --storage also write them as path
+      trees. A version that matches the last complete run is left alone unless
+      --force or --verify is given. --verify checks the bucket against a listing
+      of its store and uploads what it lacks, whatever its pointer says. --only
+      selects bundles by name prefix, with their dependencies. A selection is
+      neither recorded as a version nor sent to a bucket; it needs an <output>
+      without a complete run and empty --tree and --storage folders.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.
@@ -120,6 +129,11 @@ commands:
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the
       converters whose memory estimates are furthest from their decoded size.
+  serve <output> --routes <file> [--listen <address>] [--threads <n>]
+      Answer HTTP requests for the files of the views published in <output>,
+      by the paths that the routes file maps to them. --listen is
+      127.0.0.1:8080 by default. A new publication takes effect within the
+      max_age of the routes file.
 
   --threads sets how many conversions and encodings run at once; a video
   encoding counts as two. --memory sets the memory the process may use, such
@@ -155,6 +169,16 @@ fn account(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexo
     Err("this build has no distribution sources: enable the cdn feature".into())
 }
 
+#[cfg(feature = "serve")]
+fn serve(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    serve::run(args)
+}
+
+#[cfg(not(feature = "serve"))]
+fn serve(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no server: enable the serve feature".into())
+}
+
 #[cfg(not(feature = "cdn"))]
 fn update(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     Err("this build has no distribution sources: enable the cdn feature".into())
@@ -168,6 +192,7 @@ fn main() -> ExitCode {
         Some("update") => update(args),
         Some("account") => account(args),
         Some("stats") => stats(args),
+        Some("serve") => serve(args),
         Some("--version") => {
             println!("sekai-exporter {}", env!("CARGO_PKG_VERSION"));
             Ok(true)

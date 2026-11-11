@@ -3,7 +3,14 @@
 use serde::{Deserialize, Serialize};
 
 /// The version of these document formats.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// Whether `text` can name a region, a view or a published version in a path: ASCII letters,
+/// digits, `.`, `_` and `-`, and not only dots.
+pub fn is_name(text: &str) -> bool {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    !text.is_empty() && text.chars().all(allowed) && !text.chars().all(|c| c == '.')
+}
 
 /// One published file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,11 +125,17 @@ pub struct Pointer {
     pub published_version: String,
     /// The revision of the publication.
     pub revision: String,
-    /// The SHA-256 of the index root, as lowercase hexadecimal.
-    pub root: String,
+    /// The SHA-256 of the index root, as lowercase hexadecimal. A view without index shards has
+    /// none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<String>,
     /// The SHA-256 of the SQLite index (`store/<aa>/<sha256>.sqlite`), as lowercase hexadecimal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sqlite: Option<String>,
+    /// The SHA-256 of the root of the path index (`store/<aa>/<sha256>.json`), as lowercase
+    /// hexadecimal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<String>,
 }
 
 /// One file of a path tree.

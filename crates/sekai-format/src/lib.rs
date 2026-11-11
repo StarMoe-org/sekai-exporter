@@ -1,5 +1,5 @@
-//! Types of the published documents: object documents, asset documents, index shards, listings
-//! and the documents asset forms carry as members.
+//! Types of the published documents: object documents, asset documents, index shards, listings,
+//! path indexes and the documents asset forms carry as members.
 //!
 //! Consumers depend on this crate to read the published output.
 
@@ -13,6 +13,7 @@ pub mod gltf;
 pub mod identity;
 pub mod live2d;
 pub mod number;
+pub mod paths;
 pub mod publication;
 pub mod story;
 

@@ -23,6 +23,7 @@ sekai-encode = { path = "crates/sekai-encode" }
 sekai-publish = { path = "crates/sekai-publish" }
 sekai-pipeline = { path = "crates/sekai-pipeline" }
 sekai-moesekai = { path = "crates/sekai-moesekai" }
+sekai-serve = { path = "crates/sekai-serve" }
 sekai-mysekai = { path = "crates/sekai-mysekai" }
 sekai-wasm = { path = "crates/sekai-wasm" }
 

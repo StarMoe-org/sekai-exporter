@@ -25,16 +25,18 @@ The documents of a publication are specified in [Publication documents](spec/pub
 
 | Layout | Shape | Duplication | How a consumer reads it |
 |---|---|---|---|
-| `index` | The store itself, plus a path index per region and view: small JSON shards by directory, mapping each name to its hash, size, type, owning asset and role | None | Look up the index, then fetch the object. A small TypeScript resolver with caching is provided outside the Rust workspace |
+| `paths` | The store itself, plus a [path index](spec/path-index.md) per region and view: chunks of paths in byte order with the hash, size and type of each file | None | Through a resolver, such as `sekai-exporter serve` ([Serving](serving.md)), that maps a path to its object |
+| `index` | The `paths` layout, plus small JSON shards by directory, mapping each name to its hash, size, type, owning asset and role, and the listings | None | Look up the index, then fetch the object. A small TypeScript resolver with caching is provided outside the Rust workspace |
+| `sqlite` | The `index` layout, plus an `index.sqlite` database of the directories, assets and files | None | Query the database with HTTP range requests, then fetch the object |
 | `tree` | A path tree per region and view | Bytes that appear in several regions are stored once per tree, unless the backend supports links | Fetch by path |
 
-The `index` layout references the store directly and copies nothing. A `tree` layout uses hard links on a local file system and on backends that support them; on plain S3 it uses server-side copies.
+The `paths`, `index` and `sqlite` layouts reference the store directly and copy nothing. A `tree` layout uses hard links on a local file system and on backends that support them; on plain S3 it uses server-side copies.
 
 For each asset form there is also a **listing**: logical path, asset form, fingerprint and size of every asset of that form in a region and version. Consumers use it instead of indexes built for one viewer.
 
 ## The storage view
 
-The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. Assets that share a logical path use the names defined in the [architecture](architecture.md). It is materialized as a `tree` at fixed public paths, which cannot be switched atomically. It is therefore written in this order:
+The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. Assets that share a logical path use the names defined in the [architecture](architecture.md). It is published like the canonical view, with a path index and a pointer at `<region>/storage`, so a [resolver](serving.md) serves it at fixed paths and switches every path to a new version at once. `update --storage <dir>` also materializes it as a `tree`, which cannot be switched atomically. A tree is therefore written in this order:
 
 1. every new file is written;
 2. the listing of the new version is written;
@@ -48,8 +50,9 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 2. Index shards are immutable and named by their SHA-256.
 3. The revision of a publication is the hash of its sorted records, so it does not depend on how the JSON is formatted.
 4. Before the pointer of a version is advanced, every object the publication refers to is checked to exist in the store under its recorded hash. Objects are written under a temporary name and renamed, so an object that exists under its name is complete.
-5. Failures are reported with the name of the stage that failed. A failed stage leaves the previous pointer in place.
-6. When a publication goes to several destinations, the pointers of different destinations are not advanced atomically together. Each destination keeps its last complete pointer, and running the publication again completes the remaining destinations.
+5. The pointer is written to `<region>/<view>/versions/<published version>.json`, and then made current at `<region>/<view>/current.json`, so every published version stays reachable for as long as its objects are kept. A published version is named by ASCII letters, digits, `.`, `_` and `-`, and not only dots.
+6. Failures are reported with the name of the stage that failed. A failed stage leaves the previous pointer in place.
+7. When a publication goes to several destinations, the pointers of different destinations are not advanced atomically together. Each destination keeps its last complete pointer, and running the publication again completes the remaining destinations.
 
 ## S3-compatible buckets
 
@@ -76,12 +79,11 @@ With the `s3` feature, `sekai-exporter update` also publishes to an S3-compatibl
 | `endpoint` | The address of the bucket, path-style (`https://<host>/<bucket>`) or virtual-hosted (`https://<bucket>.<host>`) |
 | `region` | The region the requests are signed for |
 | `prefix` | Optional. Prepended to every object name; empty or ending in `/` |
-| `layout` | Optional, `"sqlite"` by default (`"sqlite"` or `"index"`). `"sqlite"` uploads the three-tier browser layout (`index.sqlite` + `.tar` composite archives + standalone media) without JSON sidecar explosion; `"index"` uploads the classic JSON shard layout |
-| `pack_forms` | Optional array of asset form names whose multi-member assets are packed into `.tar` archives under `"sqlite"` layout (defaults to `costume-model`, `emoticon`, `fixture-model`, `live2d-model`, `live2d-motions`, `site-model`) |
+| `layout` | Optional. The [layout](#layouts) of the canonical view: `"sqlite"`, the default, or `"index"`. The storage view is always uploaded in the `paths` layout |
 | `connections` | Optional, 8 by default. Requests in flight at once |
 | `secrets` | The names of the secrets that hold the access key ID and the secret access key. Each value is read from the environment variable of that name, or from the file of that name in the `--secrets` directory |
 
-The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer at `<prefix>published/<region>/<view>/current.json`. Immutable objects under `store/` are written with `Cache-Control: public, max-age=31536000, immutable` and pointers with `Cache-Control: no-cache`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
+The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointers of the canonical and the storage view at `<prefix>published/<region>/<view>/current.json` and `<prefix>published/<region>/<view>/versions/<published version>.json`. Immutable objects under `store/` are written with `Cache-Control: public, max-age=31536000, immutable` and pointers with `Cache-Control: no-cache`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
 
 A publication first reads the bucket's live `current.json` pointer. If it already names the publication, no object requests are sent. Otherwise the objects of the live publication that the local store describes are taken as present, and each other object is looked up with a `HEAD` request, or, when that would take more requests, in a listing of the store's 256 directories (`ListObjectsV2`, one directory per connection). `update --verify` trusts neither the pointer nor the local store: it lists the whole store, uploads every object the bucket lacks or holds with another size, and runs even when the version is unchanged. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
 
@@ -89,8 +91,8 @@ A publication first reads the bucket's live `current.json` pointer. If it alread
 
 | Deployment | Evaluation | Place | Layout |
 |---|---|---|---|
-| Full static mirror | Eager | Batch run | `index`, plus `tree` for the storage view |
-| Self-hosted with limited storage | Bindings eager, conversions lazy | Server: a program using the crates as a library, since the command-line program has no server | `index`, with the store as an evictable cache |
+| Full static mirror | Eager | Batch run | `sqlite`, with a [resolver](serving.md) for paths |
+| Self-hosted with limited storage | Bindings eager, conversions lazy | Server: a program using the crates as a library, since `serve` resolves published files only | `index`, with the store as an evictable cache |
 | Serverless | Bindings eager, conversions lazy | A function running the WebAssembly core: look up the binding, fetch the bundle, convert, cache, return | `index` |
 | A user with their own files | Lazy | Browser: the WebAssembly core unpacks and converts a dropped bundle locally, without a server | None |
 | Another program | Any | Library | Chosen by the program |

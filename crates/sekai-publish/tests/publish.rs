@@ -6,7 +6,7 @@ use sekai_catalog::{Key, LocalStore};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
-use sekai_publish::{Binding, Plan, index, plan, tree};
+use sekai_publish::{Binding, Layout, Plan, documents, plan, publish, tree};
 
 struct Scratch(PathBuf);
 
@@ -136,9 +136,9 @@ fn an_index_publication_is_reproducible() {
     let bindings = [asset(&store, "a/one", &[("image", b"1")])];
     let plan = plan("v1", &bindings, &store, 2).unwrap();
     let root = s.0.join("published");
-    let first = index::publish(&store, &root, "jp/canonical", &plan, 2).unwrap();
+    let first = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
     let bytes = std::fs::read(root.join("jp/canonical/current.json")).unwrap();
-    let second = index::publish(&store, &root, "jp/canonical", &plan, 2).unwrap();
+    let second = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
     assert_eq!(first, second);
     assert_eq!(
         bytes,
@@ -154,16 +154,19 @@ fn a_missing_object_stops_the_pointer() {
     let store = s.store();
     let root = s.0.join("published");
     let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
-    index::publish(&store, &root, "t", &good, 2).unwrap();
-    let before = std::fs::read(root.join("t/current.json")).unwrap();
+    publish(&store, &root, "jp/t", &good, Layout::Index, 2).unwrap();
+    let before = std::fs::read(root.join("jp/t/current.json")).unwrap();
 
     let binding = asset(&store, "b", &[("image", b"gone")]);
     let plan = plan("v2", &[binding], &store, 2).unwrap();
     let member = plan.files.iter().find(|f| f.role == "image").unwrap();
     std::fs::remove_file(store.path(&member.key)).unwrap();
-    let error = index::publish(&store, &root, "t", &plan, 2).unwrap_err();
+    let error = publish(&store, &root, "jp/t", &plan, Layout::Index, 2).unwrap_err();
     assert_eq!(error.stage, "verify");
-    assert_eq!(before, std::fs::read(root.join("t/current.json")).unwrap());
+    assert_eq!(
+        before,
+        std::fs::read(root.join("jp/t/current.json")).unwrap()
+    );
 }
 
 #[test]
@@ -223,17 +226,15 @@ fn publishing_again_changes_nothing() {
 }
 
 #[test]
-fn sqlite_index_is_deterministic_packs_composite_forms_and_validates() {
+fn sqlite_index_is_deterministic_and_valid() {
     use sekai_format::asset::SourceObject;
-    use sekai_publish::sqlite::{self, SqliteOptions};
-    use sekai_publish::tar;
 
     let s = Scratch::new("sqlite");
     let store = s.store();
     let root = s.0.join("published");
 
     let mut bindings = Vec::new();
-    // Multi-member composite Live2D model (packed into .tar under default options).
+    // An asset of several members.
     let l2d_members: Vec<MemberFile> = [
         (
             "model",
@@ -336,62 +337,43 @@ fn sqlite_index_is_deterministic_packs_composite_forms_and_validates() {
     rev_bindings.reverse();
     let backward = plan("v1", &rev_bindings, &store, 2).unwrap();
 
-    let built_a = sqlite::build(&store, &forward, &SqliteOptions::default(), 2).unwrap();
-    let built_b = sqlite::build(&store, &backward, &SqliteOptions::default(), 2).unwrap();
-    assert_eq!(built_a, built_b);
-    assert_eq!(built_a.archives.len(), 1);
-    assert_eq!(built_a.direct_files.len(), 220);
+    let sqlite_of = |plan: &Plan| {
+        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
+        publication.pointer.sqlite.unwrap()
+    };
+    let sqlite = sqlite_of(&forward);
+    assert_eq!(sqlite, sqlite_of(&backward));
+    let pointer = publish(&store, &root, "jp/canonical", &forward, Layout::Sqlite, 2).unwrap();
+    assert_eq!(pointer.sqlite.as_deref(), Some(sqlite.as_str()));
 
-    // Verify `.tar` archive member offsets match raw bytes (in sorted member path order).
-    let tar_bytes = store.read(&built_a.archives[0].0).unwrap();
-    let tar_entries = tar::entries(&tar_bytes).unwrap();
-    assert_eq!(tar_entries.len(), 3);
-    assert_eq!(tar_entries[0].path, "moc3.moc3");
-    let start = tar_entries[0].offset as usize;
-    let end = start + tar_entries[0].size as usize;
-    assert_eq!(&tar_bytes[start..end], b"MOC3_BINARY_DATA");
-    assert_eq!(tar_entries[1].path, "model.json");
-
-    // Verify pure-Rust `referenced_keys` extracts the 1 `.tar` + 220 `.webp` keys.
-    let db_bytes = store.read(&built_a.sqlite).unwrap();
-    let refs = sqlite::referenced_keys(&db_bytes).unwrap();
-    assert_eq!(refs.len(), 221);
-    assert!(refs.contains(&built_a.archives[0].0));
-
-    // Verify local `sqlite::publish` populates `pointer.sqlite`.
-    let pointer = sqlite::publish(
-        &store,
-        &root,
-        "jp/canonical",
-        &forward,
-        &SqliteOptions::unpacked(),
-        2,
-    )
-    .unwrap();
-    assert!(pointer.sqlite.is_some());
-
-    // When Python with `sqlite3` is present on the host, run `PRAGMA integrity_check` as well.
-    let has_python_sqlite = std::process::Command::new("python3")
-        .args(["-c", "import sqlite3"])
-        .status()
-        .is_ok_and(|s| s.success());
-    if has_python_sqlite {
-        let db_path = store.path(&built_a.sqlite);
-        let output = std::process::Command::new("python3")
-            .args([
-                "-c",
-                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); \
-                 assert c.execute('PRAGMA integrity_check').fetchall() == [('ok',)]; \
-                 assert c.execute('SELECT COUNT(*) FROM assets').fetchone() == (222,); \
-                 assert c.execute('SELECT COUNT(*) FROM files').fetchone() == (223,)",
-            ])
-            .arg(&db_path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "sqlite3 integrity check failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    // SQLite itself checks the database, through the `sqlite3` module of Python.
+    let python = ["python3", "python"]
+        .into_iter()
+        .find(|python| {
+            std::process::Command::new(python)
+                .args(["-c", "import sqlite3"])
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+        .expect("the integrity check needs Python with its sqlite3 module");
+    let db_path = store.path(&Key {
+        sha256: sekai_catalog::store::parse_hex(&sqlite).unwrap(),
+        extension: "sqlite".to_owned(),
+    });
+    let output = std::process::Command::new(python)
+        .args([
+            "-c",
+            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); \
+             assert c.execute('PRAGMA integrity_check').fetchall() == [('ok',)]; \
+             assert c.execute('SELECT COUNT(*) FROM assets').fetchone() == (222,); \
+             assert c.execute('SELECT COUNT(*) FROM files').fetchone() == (223,)",
+        ])
+        .arg(&db_path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "sqlite3 integrity check failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -1,6 +1,6 @@
 # storage 视图
 
-`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update --storage <目录>` 发布该视图。视图版本：2。
+`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update` 以 `<区服>/storage` 下的路径索引发布该视图，`--storage <目录>` 还会把它写成路径树。视图版本：2。
 
 ## 1. 运行时
 
@@ -39,7 +39,7 @@
 
 变换也是派生：其指纹由视图版本、变换、编码器版本与成员哈希构成。第二次运行复用全部结果。
 
-路径树的写入顺序见[发布](../publishing.zh-CN.md)。固定路径无法原子切换。
+[解析器](../serving.zh-CN.md)让视图的所有路径同时切换到新版本。用 `--storage` 写出的路径树无法原子切换，其写入顺序见[发布](../publishing.zh-CN.md)。
 
 ## 5. 正确性
 

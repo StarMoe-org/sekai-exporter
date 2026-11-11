@@ -1,25 +1,30 @@
-//! The `index` layout: the store itself, plus shards that map names to objects.
+//! The documents of the `index` layout: shards that map the names of a directory to objects,
+//! listings of the assets of each form, and the root that lists both.
 
 use std::collections::BTreeMap;
 use std::io;
-use std::path::Path;
 
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::publication::{
-    IndexEntry, IndexRoot, IndexShard, Listing, ListingReference, Pointer, ShardReference, VERSION,
+    IndexEntry, IndexRoot, IndexShard, Listing, ListingReference, ShardReference, VERSION,
 };
 use serde::Serialize;
 
+use crate::layout::Object;
 use crate::parallel;
 use crate::plan::{File, Plan, PublishError, hex};
 
-/// Stores `document` as JSON and gives its key and size.
-fn put(store: &LocalStore, document: &impl Serialize) -> Result<(Key, u64), PublishError> {
+/// Stores `document` as JSON.
+fn put(store: &LocalStore, document: &impl Serialize) -> Result<Object, PublishError> {
     let bytes = serde_json::to_vec(document).map_err(|e| PublishError::new("documents", e))?;
     let key = store
         .put(&bytes, "json")
         .map_err(PublishError::wrap("documents"))?;
-    Ok((key, bytes.len() as u64))
+    Ok(Object {
+        key,
+        size: bytes.len() as u64,
+        media_type: "application/json".to_owned(),
+    })
 }
 
 /// The first of `files` that is not in `store`; `key` gives the key and size of a file. The files
@@ -72,19 +77,13 @@ fn entry(file: &File) -> IndexEntry {
     }
 }
 
-/// Whether the store holds `key` with `size` bytes. An object is written under a temporary name
-/// and renamed, so one that exists under its name is complete.
-pub(crate) fn stored(store: &LocalStore, key: &Key, size: u64) -> bool {
-    std::fs::metadata(store.path(key)).is_ok_and(|m| m.is_file() && m.len() == size)
-}
-
-/// The documents of an `index` publication: the pointer, and the shards, listings and root it
-/// refers to with their sizes, written to the local store.
+/// The index documents of a publication: the root, and the shards, listings and root it consists
+/// of, in the order they were written.
 pub(crate) struct Documents {
-    /// The pointer of the publication.
-    pub(crate) pointer: Pointer,
-    /// The shards, listings and root, in the order they were written.
-    pub(crate) objects: Vec<(Key, u64)>,
+    /// The index root.
+    pub(crate) root: Key,
+    /// The shards, the listings and the root.
+    pub(crate) objects: Vec<Object>,
 }
 
 /// Writes the shards, listings and root of `plan` to `store`, the shards on up to `threads`
@@ -113,15 +112,15 @@ pub(crate) fn documents(
             }
         })
         .collect();
-    let mut written = parallel::map(&shards, threads, |shard| put(store, shard))
+    let mut objects = parallel::map(&shards, threads, |shard| put(store, shard))
         .into_iter()
         .collect::<Result<Vec<_>, _>>()?;
     let shards = shards
         .into_iter()
-        .zip(&written)
-        .map(|(shard, (key, _))| ShardReference {
+        .zip(&objects)
+        .map(|(shard, object)| ShardReference {
             directory: shard.directory,
-            sha256: hex(&key.sha256),
+            sha256: hex(&object.key.sha256),
         })
         .collect();
     let mut listings = Vec::new();
@@ -137,11 +136,11 @@ pub(crate) fn documents(
         )?;
         listings.push(ListingReference {
             form: form.clone(),
-            sha256: hex(&listing.0.sha256),
+            sha256: hex(&listing.key.sha256),
         });
-        written.push(listing);
+        objects.push(listing);
     }
-    let (index_root, size) = put(
+    let root = put(
         store,
         &IndexRoot {
             format: "index-root".to_owned(),
@@ -153,52 +152,7 @@ pub(crate) fn documents(
             failures: plan.failures.clone(),
         },
     )?;
-    let root = hex(&index_root.sha256);
-    written.push((index_root, size));
-
-    Ok(Documents {
-        pointer: Pointer {
-            format: "pointer".to_owned(),
-            version: VERSION,
-            published_version: plan.version.clone(),
-            revision: plan.revision.clone(),
-            root,
-            sqlite: None,
-        },
-        objects: written,
-    })
-}
-
-/// Writes the shards, listings and root of `plan` to `store`, checks that every file exists, and
-/// then points `<root>/<target>/current.json` at the publication. The store is written and
-/// checked on up to `threads` threads. A failed stage leaves the previous pointer in place.
-pub fn publish(
-    store: &LocalStore,
-    root: &Path,
-    target: &str,
-    plan: &Plan,
-    threads: usize,
-) -> Result<Pointer, PublishError> {
-    let Documents { pointer, objects } = documents(store, plan, threads)?;
-    if let Some(file) = missing(store, &plan.files, threads, |file| (&file.key, file.size))? {
-        return Err(PublishError::new(
-            "verify",
-            format!("{} is not in the store as {}", file.path, file.key),
-        ));
-    }
-    if let Some((key, _)) = missing(store, &objects, threads, |(key, size)| (key, *size))? {
-        return Err(PublishError::new(
-            "verify",
-            format!("{key} is not in the store"),
-        ));
-    }
-
-    let bytes = serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let wrap = PublishError::wrap("pointer");
-    let directory = root.join(target);
-    std::fs::create_dir_all(&directory).map_err(&wrap)?;
-    let temporary = directory.join("current.json.tmp");
-    std::fs::write(&temporary, bytes).map_err(&wrap)?;
-    std::fs::rename(&temporary, directory.join("current.json")).map_err(&wrap)?;
-    Ok(pointer)
+    let key = root.key.clone();
+    objects.push(root);
+    Ok(Documents { root: key, objects })
 }

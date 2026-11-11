@@ -13,8 +13,7 @@ use sekai_pipeline::ledger::BundleLedger;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes};
-use sekai_publish::sqlite::{self, SqliteOptions};
-use sekai_publish::{Binding, Plan, plan, tree};
+use sekai_publish::{Binding, Layout, Plan, plan, tree};
 use sekai_unity::{BoundedBlockCache, ClassLayouts, NoClasses};
 use sha2::{Digest, Sha256};
 
@@ -530,12 +529,12 @@ pub(crate) fn publish(
         .collect();
     let publishing = monitor.span("publish", "index", "");
     let plan = plan(version, &bindings, store, threads).map_err(|e| e.to_string())?;
-    let pointer = sqlite::publish(
+    let pointer = sekai_publish::publish(
         store,
         &output.join("published"),
         target,
         &plan,
-        &SqliteOptions::unpacked(),
+        Layout::Sqlite,
         threads,
     )
     .map_err(|e| e.to_string())?;

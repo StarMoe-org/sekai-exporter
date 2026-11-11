@@ -59,7 +59,8 @@ pub struct Usage {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Read {
     /// The pointer of a view: the file at this path below the published root, such as
-    /// `jp/storage/current.json`. The path is made of names, so it stays below the root.
+    /// `jp/storage/current.json`. The path is made of names, none of them the name of a device,
+    /// so it is a file below the root on every system.
     Pointer(String),
     /// The root of a path index, an object of the store.
     Root(ObjectId),

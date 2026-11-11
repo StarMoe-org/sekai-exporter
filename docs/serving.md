@@ -39,7 +39,7 @@ A routes file says which URL paths name which views. Routes are tried in order, 
 }
 ```
 
-A pattern starts with `/` and is a sequence of `/`-separated segments. A segment is literal text, placeholders, or both, such as `{region}@{version}`; two placeholders are separated by text. A placeholder takes the characters of its segment up to the first occurrence of the text that follows it, and they must form a name: at most 200 bytes of ASCII letters, digits, `.`, `_` and `-`, and not only dots. A route whose placeholders do not take names does not match, and the next route is tried. The first route that matches decides even when its view has no such path, so routes with literal text come before the more general ones.
+A pattern starts with `/` and is a sequence of `/`-separated segments. A segment is literal text, placeholders, or both, such as `{region}@{version}`; two placeholders are separated by text. A placeholder takes the characters of its segment up to the first occurrence of the text that follows it, and they must form a name: at most 200 bytes of ASCII letters, digits, `.`, `_` and `-`, not only dots, and not a name that Windows keeps for a device, such as `con` or `nul.json`. A route whose placeholders do not take names does not match, and the next route is tried. The first route that matches decides even when its view has no such path, so routes with literal text come before the more general ones.
 
 | Placeholder | Meaning |
 |---|---|

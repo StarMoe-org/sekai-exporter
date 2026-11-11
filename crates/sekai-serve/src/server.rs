@@ -39,8 +39,8 @@ const HEAD_BYTES: usize = 16 << 10;
 /// How many bytes of a file are read at a time.
 const READ_SIZE: usize = 64 << 10;
 
-/// How long the server waits before it accepts again after accepting failed, as it does when
-/// the process has no file descriptor left.
+/// How long the server waits before it accepts again after accepting failed for a reason that
+/// lasts, as it does when the process has no file descriptor left.
 const ACCEPT_PAUSE: Duration = Duration::from_millis(100);
 
 type ResponseBody = BoxBody<Bytes, io::Error>;
@@ -149,6 +149,7 @@ impl Server {
             let room = room.map_err(io::Error::other)?;
             let stream = match listener.accept().await {
                 Ok((stream, _)) => stream,
+                Err(error) if concerns_one_connection(&error) => continue,
                 Err(error) => {
                     report(format_args!("a connection could not be accepted: {error}"));
                     tokio::time::sleep(ACCEPT_PAUSE).await;
@@ -270,6 +271,19 @@ impl Host {
         let stream = ReaderStream::with_capacity(file.take(slice.length), READ_SIZE);
         Ok(StreamBody::new(stream.map_ok(Frame::data)).boxed())
     }
+}
+
+/// Whether an error of accepting concerns only the connection that was to be accepted, such as
+/// one that its client has reset already, so the next one can be accepted at once. Any other
+/// error, such as having no file descriptor left, would only repeat.
+fn concerns_one_connection(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+    )
 }
 
 /// The content of the file at `path`, which fails when it is longer than `limit` bytes.
@@ -409,5 +423,32 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Quiet<S> {
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let polled = Pin::new(&mut self.stream).poll_shutdown(cx);
         self.waited(cx, polled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepting_pauses_only_after_an_error_that_would_repeat() {
+        use io::ErrorKind::{ConnectionAborted, ConnectionRefused, ConnectionReset, Interrupted};
+        for kind in [
+            ConnectionAborted,
+            ConnectionRefused,
+            ConnectionReset,
+            Interrupted,
+        ] {
+            assert!(concerns_one_connection(&kind.into()), "{kind}");
+        }
+        let lasting = [
+            io::Error::other("no file descriptor is left"),
+            io::ErrorKind::OutOfMemory.into(),
+            io::ErrorKind::PermissionDenied.into(),
+            io::ErrorKind::InvalidInput.into(),
+        ];
+        for error in lasting {
+            assert!(!concerns_one_connection(&error), "{error}");
+        }
     }
 }

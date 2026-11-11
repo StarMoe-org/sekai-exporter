@@ -340,9 +340,22 @@ fn capture<'a>(pieces: &[Piece], mut segment: &'a str, captures: &mut Captures<'
     segment.is_empty().then_some(())
 }
 
-/// Whether `text` can name a region, a view or a version in a request.
+/// Whether `text` can name a region, a view or a version in a request: a name that is not too
+/// long to be part of a file name, and that no host takes for a device.
 fn is_request_name(text: &str) -> bool {
-    text.len() <= MAX_NAME_BYTES && is_name(text)
+    text.len() <= MAX_NAME_BYTES && is_name(text) && !is_device_name(text)
+}
+
+/// Whether Windows takes a file named `name` for a device, which it does whatever follows the
+/// first dot: `con`, `prn`, `aux`, `nul`, and `com` or `lpt` with a digit, in either case. A
+/// host there would open the device where it means to open a pointer.
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    match stem.to_ascii_lowercase().as_bytes() {
+        b"con" | b"prn" | b"aux" | b"nul" => true,
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
+        _ => false,
+    }
 }
 
 /// `text` with every `%XX` replaced by the byte it encodes, if that makes UTF-8.

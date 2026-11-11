@@ -69,7 +69,7 @@ impl Hca {
     /// Reads the stream `data`, which `key` decrypts.
     ///
     /// A stream of cipher type 56 needs `key`; reading one without it fails with
-    /// [`DecodeError::Unsupported`]. The checksum of a frame covers its stored bytes, so a wrong
+    /// [`DecodeError::MissingKey`]. The checksum of a frame covers its stored bytes, so a wrong
     /// key is not detected.
     pub fn new(data: Vec<u8>, key: Option<HcaKey>) -> Result<Self, DecodeError> {
         let frames = hca::Frames::new(&data, key)?;
@@ -139,7 +139,7 @@ pub fn decode_adx_available(data: &[u8]) -> Result<Pcm, DecodeError> {
 /// Decodes one HCA stream to PCM, without its encoder delay and padding.
 ///
 /// A stream of cipher type 56 needs `key`; decoding one without it fails with
-/// [`DecodeError::Unsupported`]. The checksum of a frame covers its stored bytes, so a wrong key
+/// [`DecodeError::MissingKey`]. The checksum of a frame covers its stored bytes, so a wrong key
 /// is not detected.
 pub fn decode_hca(data: &[u8], key: Option<HcaKey>) -> Result<Pcm, DecodeError> {
     hca::decode(data, key)

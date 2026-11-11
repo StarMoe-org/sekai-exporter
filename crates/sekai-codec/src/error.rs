@@ -27,6 +27,11 @@ pub enum DecodeError {
         /// What is wrong.
         message: String,
     },
+    /// The payload is encrypted and no key was given.
+    MissingKey {
+        /// What is encrypted.
+        what: &'static str,
+    },
 }
 
 impl DecodeError {
@@ -36,6 +41,7 @@ impl DecodeError {
             Self::Unsupported { .. } => "unsupported",
             Self::Truncated { .. } => "truncated",
             Self::Malformed { .. } => "malformed",
+            Self::MissingKey { .. } => "missing_key",
         }
     }
 }
@@ -50,6 +56,7 @@ impl fmt::Display for DecodeError {
                 available,
             } => write!(f, "{what}: needs {needed} bytes, {available} available"),
             Self::Malformed { what, message } => write!(f, "{what}: {message}"),
+            Self::MissingKey { what } => write!(f, "{what} is encrypted and no key was given"),
         }
     }
 }

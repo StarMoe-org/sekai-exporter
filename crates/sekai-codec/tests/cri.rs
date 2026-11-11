@@ -84,7 +84,7 @@ fn a_stream_is_checked_when_it_is_opened() {
 #[test]
 fn encrypted_stream_needs_a_key() {
     let result = decode_hca(&fixture("sine_stereo_key.hca"), None);
-    assert!(matches!(result, Err(DecodeError::Unsupported { .. })));
+    assert!(matches!(result, Err(DecodeError::MissingKey { .. })));
 }
 
 #[test]

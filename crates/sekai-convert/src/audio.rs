@@ -219,14 +219,10 @@ impl Audio {
             subkey: bank.subkey,
         });
         Hca::new(stream.data.to_vec(), key).map_err(|e| match e {
-            DecodeError::Unsupported { what, .. }
-                if key.is_none() && what.starts_with("HCA stream encrypted") =>
-            {
-                ConvertError::new(
-                    "missing_key",
-                    format!("cue {cue} is encrypted and no HCA key was given"),
-                )
-            }
+            DecodeError::MissingKey { .. } => ConvertError::new(
+                e.code(),
+                format!("cue {cue} is encrypted and no HCA key was given"),
+            ),
             e => ConvertError::from(e),
         })
     }

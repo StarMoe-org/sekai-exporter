@@ -239,10 +239,7 @@ fn cipher_table(header: &Header, key: Option<HcaKey>) -> Result<[u8; 256], Decod
         (0, _) => Ok(core::array::from_fn(|i| i as u8)),
         (1, _) => Ok(cipher_table_1()),
         (56, Some(key)) => Ok(cipher_table_56(key)),
-        (56, None) => Err(DecodeError::Unsupported {
-            what: "HCA stream encrypted without a key, cipher type",
-            value: 56,
-        }),
+        (56, None) => Err(DecodeError::MissingKey { what: "HCA stream" }),
         (other, _) => Err(unsupported("HCA cipher type", other)),
     }
 }

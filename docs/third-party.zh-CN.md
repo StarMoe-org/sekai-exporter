@@ -33,7 +33,6 @@
 | crunch DXT5 解码 | [crunch](https://github.com/Unity-Technologies/crunch)（`unity` 分支） | 流布局译自 `crn_decomp.h`；参考：比对解包后的块 | ZLIB |
 | BC3 解码 | Khronos Data Format Specification | 规范；DXT 块按其公式以精确算术比对 | — |
 | ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
-| BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
 | PNG 写出与读取（图片的规范形式） | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
 | 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`webp`](https://crates.io/crates/webp) 与 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 

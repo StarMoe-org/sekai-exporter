@@ -33,7 +33,6 @@ An entry is added in the same change that adds the component, and removed in the
 | Crunched DXT5 decoding | [crunch](https://github.com/Unity-Technologies/crunch) (branch `unity`) | Stream layout translated from `crn_decomp.h`; reference: unpacked blocks are compared | ZLIB |
 | BC3 decoding | Khronos Data Format Specification | Specification; DXT blocks are compared with exact arithmetic from its formulas | — |
 | ETC1, ETC2 and EAC decoding | Khronos Data Format Specification; [texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | Specification; reference: decoded pixels are compared byte by byte | MIT (texture2ddecoder) |
-| BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
 | PNG writing and reading (the canonical image form) | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
 | Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`webp`](https://crates.io/crates/webp) and [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
 

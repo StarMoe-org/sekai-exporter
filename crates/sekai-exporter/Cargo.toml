@@ -16,6 +16,10 @@ path = "src/main.rs"
 name = "serve"
 required-features = ["serve"]
 
+[[test]]
+name = "update"
+required-features = ["cdn"]
+
 [dependencies]
 sekai-unity.workspace = true
 sekai-format.workspace = true

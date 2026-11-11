@@ -837,23 +837,17 @@ fn materials_keep_their_stored_properties_and_images_are_members() {
             "colors": { "_Color": [1.0, 0.5, 0.0, 1.0] }
         })
     );
-    assert_eq!(
-        glb.json["textures"],
-        json!([{ "sampler": 0, "extensions": { "EXT_texture_webp": { "source": 0 } } }])
-    );
+    assert_eq!(glb.json["textures"], json!([{ "sampler": 0, "source": 0 }]));
     assert_eq!(
         glb.json["samplers"],
         json!([{ "magFilter": 9729, "minFilter": 9729, "wrapS": 33071, "wrapT": 10497 }])
     );
     assert_eq!(
         glb.json["images"],
-        json!([{ "name": "body_C", "uri": "texture/0.webp" }])
+        json!([{ "name": "body_C", "uri": "texture/0.png" }])
     );
-    assert_eq!(glb.json["extensionsRequired"], json!(["EXT_texture_webp"]));
-    assert_eq!(
-        glb.json["extensionsUsed"],
-        json!(["EXT_texture_webp", "KHR_texture_transform"])
-    );
+    assert!(glb.json.get("extensionsRequired").is_none());
+    assert_eq!(glb.json["extensionsUsed"], json!(["KHR_texture_transform"]));
 }
 
 #[test]
@@ -920,15 +914,6 @@ fn parts_the_documents_do_not_define_are_unsupported() {
     let mut bundle = part();
     bundle.set(23, "pivotNode", r(31));
     assert_eq!(code(convert(&CostumeModel, 1, &bundle)), "unsupported");
-    // a bone that is not a node of the model
-    let mut bundle = part();
-    bundle.set(9, "m_Bones", list(vec![r(6), r(31)]));
-    assert_eq!(code(convert(&CostumeModel, 1, &bundle)), "unsupported");
-    // a vertex weighs on a bone slot that binds no node by hash or by `m_Bones`
-    let mut bundle =
-        part_with_mesh(|mesh| add(mesh, "m_BoneNameHashes", bone_hashes(&[NOWHERE, ROOT])));
-    bundle.set(9, "m_Bones", list(vec![r(31), r(2)]));
-    assert_eq!(code(convert(&CostumeModel, 1, &bundle)), "unsupported");
     // a blend shape channel with two frames
     let bundle = part_with_mesh(|mesh| {
         let Value::Struct(fields) = mesh else {
@@ -947,6 +932,24 @@ fn parts_the_documents_do_not_define_are_unsupported() {
         );
     });
     assert_eq!(code(convert(&CostumeModel, 1, &bundle)), "unsupported");
+}
+
+#[test]
+fn a_mesh_whose_vertices_weigh_on_a_bone_that_binds_no_node_is_not_drawn() {
+    // The first slot binds no node by hash or by `m_Bones`, and a vertex weighs on it.
+    let mut bundle =
+        part_with_mesh(|mesh| add(mesh, "m_BoneNameHashes", bone_hashes(&[NOWHERE, ROOT])));
+    bundle.set(9, "m_Bones", list(vec![r(31), r(2)]));
+    let glb = Glb::read(&file(&convert(&CostumeModel, 1, &bundle).unwrap(), "model"));
+    let node = &glb.json["nodes"][3];
+    assert_eq!(node["extras"], json!({ "enabled": false, "unbound": true }));
+    assert!(node.get("mesh").is_none() && node.get("skin").is_none());
+    for unused in ["meshes", "skins", "accessors", "materials"] {
+        assert!(
+            glb.json[unused].as_array().is_none_or(Vec::is_empty),
+            "{unused}"
+        );
+    }
 }
 
 #[test]

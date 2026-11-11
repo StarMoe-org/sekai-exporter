@@ -13,7 +13,8 @@ use sekai_pipeline::ledger::BundleLedger;
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Evaluation, NoBundleIndexes};
-use sekai_publish::{Binding, Plan, index, plan, tree};
+use sekai_publish::sqlite::{self, SqliteOptions};
+use sekai_publish::{Binding, Plan, plan, tree};
 use sekai_unity::{BoundedBlockCache, ClassLayouts, NoClasses};
 use sha2::{Digest, Sha256};
 
@@ -398,9 +399,12 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation,
         "local",
         "local/canonical",
-        &options.output,
-        options.tree.as_deref(),
+        &Destination {
+            output: &options.output,
+            tree: options.tree.as_deref(),
+        },
         &store,
+        options.threads,
         monitor,
     )?;
     write_ledger(&streamed.ledgers, &options.output, monitor)?;
@@ -484,17 +488,26 @@ pub(crate) fn write_ledger(
     Ok(())
 }
 
+/// Where a publication goes: the output folder of the run, and the root of a path tree if one is
+/// wanted.
+pub(crate) struct Destination<'a> {
+    pub(crate) output: &'a Path,
+    pub(crate) tree: Option<&'a Path>,
+}
+
 /// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,
-/// with `tree_root`, a path tree. Returns the pointer and the plan of the publication.
+/// with a tree root, a path tree, working on up to `threads` threads. Returns the pointer and the
+/// plan of the publication.
 pub(crate) fn publish(
     evaluation: &Evaluation,
     version: &str,
     target: &str,
-    output: &Path,
-    tree_root: Option<&Path>,
+    destination: &Destination<'_>,
     store: &LocalStore,
+    threads: usize,
     monitor: &Monitor,
 ) -> Result<(Pointer, Plan), lexopt::Error> {
+    let output = destination.output;
     let mut listing = String::new();
     for output in &evaluation.outputs {
         listing.push_str(&format!(
@@ -515,14 +528,21 @@ pub(crate) fn publish(
         })
         .collect();
     let publishing = monitor.span("publish", "index", "");
-    let plan = plan(version, &bindings, store).map_err(|e| e.to_string())?;
-    let pointer = index::publish(store, &output.join("published"), target, &plan)
-        .map_err(|e| e.to_string())?;
+    let plan = plan(version, &bindings, store, threads).map_err(|e| e.to_string())?;
+    let pointer = sqlite::publish(
+        store,
+        &output.join("published"),
+        target,
+        &plan,
+        &SqliteOptions::unpacked(),
+        threads,
+    )
+    .map_err(|e| e.to_string())?;
     drop(publishing);
     println!("published revision {}", pointer.revision);
-    if let Some(root) = tree_root {
+    if let Some(root) = destination.tree {
         let _span = monitor.span("publish", "tree", "");
-        let report = tree::publish(store, root, &plan).map_err(|e| e.to_string())?;
+        let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
         println!(
             "tree written {} unchanged {} deleted {}",
             report.written, report.unchanged, report.deleted

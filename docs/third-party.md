@@ -34,8 +34,7 @@ An entry is added in the same change that adds the component, and removed in the
 | BC3 decoding | Khronos Data Format Specification | Specification; DXT blocks are compared with exact arithmetic from its formulas | — |
 | ETC1, ETC2 and EAC decoding | Khronos Data Format Specification; [texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | Specification; reference: decoded pixels are compared byte by byte | MIT (texture2ddecoder) |
 | BC1 to BC7 decoding | Khronos Data Format Specification; Microsoft block compression documentation | Specification | — |
-| PNG writing | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
-| Lossless WebP writing (the canonical image form) | [`image-webp`](https://crates.io/crates/image-webp), with the change listed in [`third_party`](../third_party/README.md) | Linked | MIT OR Apache-2.0 |
+| PNG writing and reading (the canonical image form) | [`png`](https://crates.io/crates/png) | Linked | MIT OR Apache-2.0 |
 | Lossy WebP writing | [libwebp](https://chromium.googlesource.com/webm/libwebp) through [`webp`](https://crates.io/crates/webp) and [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | Linked statically in native builds | BSD-3-Clause (libwebp), MIT (`libwebp-sys`) |
 
 ## Audio and video
@@ -47,11 +46,10 @@ An entry is added in the same change that adds the component, and removed in the
 | USM demultiplexing | [WannaCRI](https://github.com/donmai-me/WannaCRI) | Reference: separated streams are compared byte by byte | MIT |
 | HCA test fixtures | [VGAudio](https://github.com/Thealexbarney/VGAudio) | Used to encode generated audio; not linked or distributed | MIT |
 | OpenEXR writing (the canonical HDR image form) | [`exr`](https://crates.io/crates/exr) | Linked | BSD-3-Clause |
-| FLAC writing | [`flacenc`](https://crates.io/crates/flacenc), with the change listed in [`third_party`](../third_party/README.md), and [`libm`](https://crates.io/crates/libm) | Linked | Apache-2.0; MIT |
-| FLAC reading | [`claxon`](https://crates.io/crates/claxon) | Linked with the `storage-view` feature, which reads canonical FLAC members, and in tests, where written FLAC is decoded and compared sample by sample | Apache-2.0 |
+| MP3 writing (the canonical audio form) | [`rusty_mp3`](https://crates.io/crates/rusty_mp3), with the changes listed in [`third_party`](../third_party/README.md), and [`libm`](https://crates.io/crates/libm) | Linked | Apache-2.0; MIT |
+| MP3 reading in tests | [`symphonia`](https://crates.io/crates/symphonia) | Used in tests, where written MP3 is decoded and compared with its samples; not linked into the exporter | MPL-2.0 |
 | AAC writing | [FFmpeg libavcodec](https://ffmpeg.org/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later |
-| MP3 writing | [LAME](https://lame.sourceforge.io/) | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.0-or-later |
-| Loading LAME and libavcodec at run time | [`libloading`](https://crates.io/crates/libloading) | Linked in native builds | ISC |
+| Loading libavcodec at run time | [`libloading`](https://crates.io/crates/libloading) | Linked in native builds | ISC |
 | AAC writing for MP4 audio tracks | [FFmpeg](https://ffmpeg.org/) libavcodec | Loaded at run time in native builds; not distributed with the exporter | LGPL-2.1-or-later, when FFmpeg is built without GPL components |
 | MP4 writing with H.264 and AAC | [FFmpeg](https://ffmpeg.org/) with [x264](https://www.videolan.org/developers/x264.html) | Run as a separate program; not linked or distributed with the exporter | GPL-2.0-or-later |
 
@@ -80,7 +78,7 @@ An entry is added in the same change that adds the component, and removed in the
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | Linked | MIT |
 | Hashing | [`sha2`](https://crates.io/crates/sha2) | Linked | MIT OR Apache-2.0 |
 | CRC-32 of node paths | [`crc32fast`](https://crates.io/crates/crc32fast) | Linked when the `model` feature is enabled | MIT OR Apache-2.0 |
-| HTTP and TLS | [`ureq`](https://crates.io/crates/ureq), [`rustls`](https://crates.io/crates/rustls), [`ring`](https://crates.io/crates/ring), [`webpki-roots`](https://crates.io/crates/webpki-roots), [`socks`](https://crates.io/crates/socks) | Linked when the `cdn` or `s3` feature is enabled | MIT OR Apache-2.0; Apache-2.0 OR ISC OR MIT; Apache-2.0 AND ISC; CDLA-Permissive-2.0; MIT OR Apache-2.0 |
+| HTTP and TLS | [`reqwest`](https://crates.io/crates/reqwest), [`hyper`](https://crates.io/crates/hyper), [`h2`](https://crates.io/crates/h2), [`tokio`](https://crates.io/crates/tokio), [`ureq`](https://crates.io/crates/ureq), [`rustls`](https://crates.io/crates/rustls), [`ring`](https://crates.io/crates/ring), [`webpki-roots`](https://crates.io/crates/webpki-roots), [`socks`](https://crates.io/crates/socks) | Linked when the `cdn` or `s3` feature is enabled | MIT OR Apache-2.0; Apache-2.0 OR ISC OR MIT; Apache-2.0 AND ISC; CDLA-Permissive-2.0; MIT OR Apache-2.0 |
 | Catalog | [`redb`](https://crates.io/crates/redb) | Linked when the `catalog-db` feature is enabled | MIT OR Apache-2.0 |
 | Loading libraries at run time | [`libloading`](https://crates.io/crates/libloading) | Linked | ISC |
 | Command-line parsing | [`lexopt`](https://crates.io/crates/lexopt) | Linked | MIT |
@@ -88,4 +86,4 @@ An entry is added in the same change that adds the component, and removed in the
 
 ## Libraries loaded at run time
 
-LAME and libavcodec are not linked into the exporter and are not distributed with it. When a run needs the MP3 or AAC backend, the exporter loads the library installed on the system, checks its version, and records the backend name, version and parameters in the fingerprints of the affected outputs. When the library is missing or its version differs, the run stops with an error that names the missing library; it does not fall back to another backend.
+libavcodec is not linked into the exporter and is not distributed with it. When a run needs the AAC backend, the exporter loads the library installed on the system, checks its version, and records the backend name, version and parameters in the fingerprints of the affected outputs. When the library is missing or its version differs, the run stops with an error that names the missing library; it does not fall back to another backend.

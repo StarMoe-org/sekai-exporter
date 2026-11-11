@@ -354,7 +354,6 @@ fn part() -> File {
 fn base_config() -> ModelConfig<'static> {
     ModelConfig {
         flip_uv: true,
-        declare_webp: true,
         node_keys: None,
         material_keys: None,
     }
@@ -459,33 +458,14 @@ fn unflipped_texture_coordinates_are_stored_as_they_are() {
 }
 
 #[test]
-fn the_webp_extension_is_declared_by_default() {
+fn textures_name_their_png_images_directly() {
     let glb = Glb::read(&part_glb(&base_config()));
-    assert_eq!(glb.json["extensionsUsed"], json!(["EXT_texture_webp"]));
-    assert_eq!(glb.json["extensionsRequired"], json!(["EXT_texture_webp"]));
-    assert_eq!(
-        glb.json["textures"],
-        json!([{ "sampler": 0, "extensions": { "EXT_texture_webp": { "source": 0 } } }])
-    );
-    assert_eq!(
-        glb.json["images"],
-        json!([{ "name": "body_C", "uri": "texture/0.webp" }])
-    );
-}
-
-#[test]
-fn the_webp_extension_is_left_out_on_request() {
-    let config = ModelConfig {
-        declare_webp: false,
-        ..base_config()
-    };
-    let glb = Glb::read(&part_glb(&config));
     assert!(glb.json.get("extensionsUsed").is_none());
     assert!(glb.json.get("extensionsRequired").is_none());
     assert_eq!(glb.json["textures"], json!([{ "sampler": 0, "source": 0 }]));
     assert_eq!(
         glb.json["images"],
-        json!([{ "name": "body_C", "uri": "texture/0.webp" }])
+        json!([{ "name": "body_C", "uri": "texture/0.png" }])
     );
 }
 

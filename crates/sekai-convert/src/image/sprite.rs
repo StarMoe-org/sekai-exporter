@@ -31,6 +31,10 @@ impl Converter for Sprite {
         2
     }
 
+    fn encoders(&self) -> crate::Encoders {
+        crate::Encoders::TEXTURE
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

@@ -120,6 +120,9 @@ pub struct Pointer {
     pub revision: String,
     /// The SHA-256 of the index root, as lowercase hexadecimal.
     pub root: String,
+    /// The SHA-256 of the SQLite index (`store/<aa>/<sha256>.sqlite`), as lowercase hexadecimal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sqlite: Option<String>,
 }
 
 /// One file of a path tree.

@@ -7,7 +7,23 @@
 use sekai_unity::index::{FileIndex, ObjectIndex, PPtr};
 use sekai_unity::serialized::External;
 
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
+
+/// The streamed `.resS`/`.resource` slice referenced by one object, and the SHA-256 of its bytes
+/// when that slice is readable in the object's bundle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StreamDigest {
+    /// The object's path ID, in ascending order within the file.
+    pub(crate) path_id: i64,
+    /// The resource entry name inside the bundle.
+    pub(crate) file: String,
+    /// The byte offset inside the resource entry.
+    pub(crate) offset: u64,
+    /// The byte length inside the resource entry.
+    pub(crate) size: u64,
+    /// The SHA-256 of `entry[offset..offset + size]`, or `None` if missing or out of bounds.
+    pub(crate) sha256: Option<[u8; 32]>,
+}
 
 /// What indexing a bundle produced.
 #[derive(Debug)]
@@ -16,6 +32,8 @@ pub(crate) struct IndexRecord {
     pub(crate) files: Vec<FileIndex>,
     /// The SHA-256 of each resource entry that can be read, in directory order.
     pub(crate) resources: Vec<[u8; 32]>,
+    /// Streamed resource slices for each serialized file, sorted by `path_id`.
+    pub(crate) streams: Vec<Vec<StreamDigest>>,
 }
 
 fn put_u32(out: &mut Vec<u8>, value: usize) {
@@ -80,6 +98,10 @@ impl<'a> Reader<'a> {
 
     fn i32(&mut self) -> Option<i32> {
         self.array().map(i32::from_le_bytes)
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        self.array().map(u64::from_le_bytes)
     }
 
     fn i64(&mut self) -> Option<i64> {
@@ -161,6 +183,20 @@ impl<'a> Reader<'a> {
             container: self.list(|r| Some((r.string()?, r.pptr()?)))?,
         })
     }
+
+    fn stream_digest(&mut self) -> Option<StreamDigest> {
+        Some(StreamDigest {
+            path_id: self.i64()?,
+            file: self.string()?,
+            offset: self.u64()?,
+            size: self.u64()?,
+            sha256: if self.flag()? {
+                Some(self.array()?)
+            } else {
+                None
+            },
+        })
+    }
 }
 
 impl IndexRecord {
@@ -196,6 +232,20 @@ impl IndexRecord {
                 put_pptr(&mut out, *reference);
             }
         }
+        put_u32(&mut out, self.streams.len());
+        for list in &self.streams {
+            put_u32(&mut out, list.len());
+            for s in list {
+                out.extend_from_slice(&s.path_id.to_le_bytes());
+                put_str(&mut out, &s.file);
+                out.extend_from_slice(&s.offset.to_le_bytes());
+                out.extend_from_slice(&s.size.to_le_bytes());
+                out.push(u8::from(s.sha256.is_some()));
+                if let Some(sha) = s.sha256 {
+                    out.extend_from_slice(&sha);
+                }
+            }
+        }
         Some(out)
     }
 
@@ -205,9 +255,16 @@ impl IndexRecord {
         if reader.u32()? != FORMAT {
             return None;
         }
+        let resources = reader.list(Reader::array)?;
+        let files = reader.list(Reader::file)?;
+        let streams = reader.list(|r| r.list(Reader::stream_digest))?;
+        if streams.len() != files.len() {
+            return None;
+        }
         let record = Self {
-            resources: reader.list(Reader::array)?,
-            files: reader.list(Reader::file)?,
+            resources,
+            files,
+            streams,
         };
         reader.0.is_empty().then_some(record)
     }
@@ -258,6 +315,13 @@ mod tests {
                     },
                 )],
             }],
+            streams: vec![vec![StreamDigest {
+                path_id: -7,
+                file: "CAB-a.resS".to_owned(),
+                offset: 64,
+                size: 128,
+                sha256: Some([9; 32]),
+            }]],
         }
     }
 

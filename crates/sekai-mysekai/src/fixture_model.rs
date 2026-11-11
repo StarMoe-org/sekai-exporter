@@ -32,7 +32,11 @@ impl Converter for FixtureModel {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
+    }
+
+    fn encoders(&self) -> sekai_convert::Encoders {
+        sekai_convert::Encoders::IMAGE
     }
 
     fn is_root(
@@ -52,8 +56,6 @@ impl Converter for FixtureModel {
         let config = ModelConfig {
             // Texture coordinates keep their `v`, which the runtime flips when it samples an image.
             flip_uv: false,
-            // The images are WebP files outside the file, which no extension declares.
-            declare_webp: false,
             node_keys: Some(&node_keys),
             material_keys: Some(&ShaderKeys),
         };

@@ -1,6 +1,6 @@
 //! Watching a run: CPU and memory samples, and the spans of the evaluator.
 //!
-//! A run writes one JSON document per line to `metrics.jsonl` and shows a status line on standard
+//! A sample counts the run's own process and, apart, the encoder programs it started. A run writes one JSON document per line to `metrics.jsonl` and shows a status line on standard
 //! error. Nothing here reaches the store or any published file.
 
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use cpu_time::ThreadTime;
 use sekai_pipeline::metrics::{Recorder, Span};
 use serde_json::json;
-use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 /// How many samples pass between status lines.
@@ -106,10 +106,8 @@ impl Monitor {
         let Ok(mut system) = System::new() else {
             return peak;
         };
-        let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
         // CPU use is measured between two refreshes.
-        system.refresh_cpu_usage();
-        system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
+        refresh(&mut system);
         let mut samples = 0u64;
         let mut done = self.done.lock().unwrap();
         while !*done {
@@ -117,18 +115,9 @@ impl Monitor {
             if *done {
                 break;
             }
-            system.refresh_cpu_usage();
-            system.refresh_memory();
-            system.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
-            let Some(process) = system.process(pid) else {
+            refresh(&mut system);
+            let Some(sample) = Sample::of(&system, pid) else {
                 continue;
-            };
-            let sample = Sample {
-                cores: f64::from(process.cpu_usage()) / 100.0,
-                rss: process.memory(),
-                system_cpu: f64::from(system.global_cpu_usage()),
-                system_used: system.used_memory(),
-                system_total: system.total_memory(),
             };
             peak.add(&sample);
             self.write(&json!({
@@ -136,6 +125,8 @@ impl Monitor {
                 "t_ms": self.millis(),
                 "process_cores": sample.cores,
                 "process_rss": sample.rss,
+                "child_cores": sample.child_cores,
+                "child_rss": sample.child_rss,
                 "system_cpu_pct": sample.system_cpu,
                 "system_mem_used": sample.system_used,
                 "system_mem_total": sample.system_total,
@@ -143,11 +134,13 @@ impl Monitor {
             samples += 1;
             if samples.is_multiple_of(STATUS_EVERY) {
                 eprintln!(
-                    "[{:>6}s] cpu {:.1} cores (machine {:.0}%)  memory {:.2} GiB (machine {:.1}/{:.1} GiB)",
+                    "[{:>6}s] cpu {:.1}+{:.1} cores (machine {:.0}%)  memory {:.2}+{:.2} GiB (machine {:.1}/{:.1} GiB)",
                     self.start.elapsed().as_secs(),
                     sample.cores,
+                    sample.child_cores,
                     sample.system_cpu,
                     sample.rss as f64 / GIB,
+                    sample.child_rss as f64 / GIB,
                     sample.system_used as f64 / GIB,
                     sample.system_total as f64 / GIB,
                 );
@@ -162,9 +155,10 @@ impl Monitor {
         rows.sort_by_key(|(_, total)| std::cmp::Reverse(total.wall_us));
         let elapsed = self.start.elapsed().as_secs_f64();
         eprintln!(
-            "run {elapsed:.1}s  peak memory {:.2} GiB  mean cpu {:.1} cores  peak machine cpu {:.0}%  peak machine memory {:.1} GiB",
+            "run {elapsed:.1}s  peak memory {:.2} GiB  mean cpu {:.1}+{:.1} cores  peak machine cpu {:.0}%  peak machine memory {:.1} GiB",
             peak.rss as f64 / GIB,
             peak.mean_cores(),
+            peak.mean_child_cores(),
             peak.system_cpu,
             peak.system_used as f64 / GIB,
         );
@@ -193,6 +187,7 @@ impl Monitor {
             "elapsed_ms": self.millis(),
             "peak_rss": peak.rss,
             "mean_cores": peak.mean_cores(),
+            "mean_child_cores": peak.mean_child_cores(),
             "peak_system_cpu_pct": peak.system_cpu,
             "peak_system_mem_used": peak.system_used,
         }));
@@ -200,18 +195,59 @@ impl Monitor {
     }
 }
 
+/// Refreshes the machine's CPU and memory use and every process, so that the run's children are
+/// found.
+fn refresh(system: &mut System) {
+    let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
+    system.refresh_cpu_usage();
+    system.refresh_memory();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
+}
+
 struct Sample {
     cores: f64,
     rss: u64,
+    /// The cores and memory of the programs the run started.
+    child_cores: f64,
+    child_rss: u64,
     system_cpu: f64,
     system_used: u64,
     system_total: u64,
+}
+
+impl Sample {
+    /// The use of the process `pid` and its children, or `None` when it is gone.
+    fn of(system: &System, pid: Pid) -> Option<Self> {
+        let process = system.process(pid)?;
+        let children = system
+            .processes()
+            .values()
+            .filter(|child| child.parent() == Some(pid));
+        let (child_cores, child_rss) = children.fold((0.0, 0), |(cores, rss), child| {
+            (cores + cores_of(child.cpu_usage()), rss + child.memory())
+        });
+        Some(Sample {
+            cores: cores_of(process.cpu_usage()),
+            rss: process.memory(),
+            child_cores,
+            child_rss,
+            system_cpu: f64::from(system.global_cpu_usage()),
+            system_used: system.used_memory(),
+            system_total: system.total_memory(),
+        })
+    }
+}
+
+/// Cores from a CPU use in percent of one core.
+fn cores_of(usage: f32) -> f64 {
+    f64::from(usage) / 100.0
 }
 
 #[derive(Debug, Default)]
 struct Peak {
     rss: u64,
     cores_sum: f64,
+    child_cores_sum: f64,
     samples: u64,
     system_cpu: f64,
     system_used: u64,
@@ -219,8 +255,9 @@ struct Peak {
 
 impl Peak {
     fn add(&mut self, sample: &Sample) {
-        self.rss = self.rss.max(sample.rss);
+        self.rss = self.rss.max(sample.rss + sample.child_rss);
         self.cores_sum += sample.cores;
+        self.child_cores_sum += sample.child_cores;
         self.samples += 1;
         self.system_cpu = self.system_cpu.max(sample.system_cpu);
         self.system_used = self.system_used.max(sample.system_used);
@@ -228,6 +265,10 @@ impl Peak {
 
     fn mean_cores(&self) -> f64 {
         self.cores_sum / self.samples.max(1) as f64
+    }
+
+    fn mean_child_cores(&self) -> f64 {
+        self.child_cores_sum / self.samples.max(1) as f64
     }
 }
 

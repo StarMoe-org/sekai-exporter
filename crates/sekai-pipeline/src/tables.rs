@@ -13,7 +13,8 @@ use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile};
 use sha2::{Digest, Sha256};
 
-use crate::eval::{Evaluation, Output, asset_error, encode, hex, parallel};
+use crate::canonical::encode;
+use crate::eval::{Evaluation, Output, asset_error, hex, parallel};
 use crate::metrics::Recorder;
 
 /// What the table stage works with.

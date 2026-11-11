@@ -7,27 +7,42 @@
 //! An object is uploaded only when the bucket does not already hold it with its size. Each upload
 //! is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects bytes
 //! that do not match. The pointer is written last, and only when it changes.
+//!
+//! What the bucket holds is learned as [`Check`] says: by default from the live pointer, whose
+//! publication the local store describes, and for the other objects by asking for each or by
+//! listing the store, whichever takes fewer requests; or, to verify a bucket, by listing the
+//! whole store and trusting nothing else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{IndexRoot, IndexShard, Pointer};
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
 use crate::index::{Documents, documents};
 use crate::plan::{Plan, PublishError, hex};
+use crate::sqlite::{self, SqliteBuild, SqliteOptions};
 
 /// The SHA-256 of no bytes.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /// How many times a request is sent before its failure is reported.
 const ATTEMPTS: u32 = 3;
+/// Cache policy for immutable content-addressed objects under `store/`.
+const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+/// Cache policy for mutable target pointers (`published/<target>/current.json`).
+const POINTER_CACHE_CONTROL: &str = "no-cache";
+/// The most names one listing request returns.
+const LIST_PAGE: usize = 1000;
+/// The store directories: the first two hexadecimal digits of the names.
+const SHARDS: usize = 256;
 
 /// Where a publication goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +101,20 @@ pub struct S3Report {
     pub present: usize,
     /// Whether the pointer was written; it is not when it already pointed at the publication.
     pub pointer_written: bool,
+}
+
+/// How a publication learns which objects the bucket holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Check {
+    /// A pointer that already names the publication means the bucket holds all of it, and the
+    /// objects of the live publication that the local store describes are taken as held. The
+    /// other objects are asked for one by one or found by listing the store, whichever takes
+    /// fewer requests.
+    #[default]
+    Pointer,
+    /// Every object is looked up in a listing of the whole store, and the pointer is not
+    /// trusted: a bucket that lost objects gets them back.
+    Listing,
 }
 
 impl S3 {
@@ -148,8 +177,14 @@ impl S3 {
         format!("{}published/{target}/current.json", self.bucket.prefix)
     }
 
-    /// The signed headers of a request for `name`.
-    fn headers(&self, method: &str, uri: &str, payload: &str) -> Vec<(&'static str, String)> {
+    /// The signed headers of a request for `uri` with the canonical query string `query`.
+    fn headers(
+        &self,
+        method: &str,
+        uri: &str,
+        query: &str,
+        payload: &str,
+    ) -> Vec<(&'static str, String)> {
         let time = timestamp(SystemTime::now());
         let signed = [
             ("host", self.host.as_str()),
@@ -162,7 +197,7 @@ impl S3 {
             &time,
             method,
             uri,
-            "",
+            query,
             &signed,
             payload,
         );
@@ -181,20 +216,25 @@ impl S3 {
         ]
     }
 
-    /// Sends a request for `name` until it gets a response that trying again cannot change.
+    /// Sends a request for `name` with the canonical query string `query` until it gets a
+    /// response that trying again cannot change.
     fn send(
         &self,
         method: &'static str,
         name: &str,
+        query: &str,
         payload: &str,
         request: impl Fn(&str, Vec<(&'static str, String)>) -> Result<Response<Body>, ureq::Error>,
     ) -> Result<Response<Body>, String> {
         let uri = format!("{}/{}", self.path, encode(name));
-        let url = format!("{}{uri}", self.origin);
+        let url = match query {
+            "" => format!("{}{uri}", self.origin),
+            query => format!("{}{uri}?{query}", self.origin),
+        };
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let failure = match request(&url, self.headers(method, &uri, payload)) {
+            let failure = match request(&url, self.headers(method, &uri, query, payload)) {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if !(status == 429 || status >= 500) || attempt >= ATTEMPTS {
@@ -213,7 +253,7 @@ impl S3 {
 
     /// The size of `name`, or `None` when the bucket does not hold it.
     fn head(&self, name: &str) -> Result<Option<u64>, String> {
-        let response = self.send("HEAD", name, EMPTY, |url, headers| {
+        let response = self.send("HEAD", name, "", EMPTY, |url, headers| {
             let mut request = self.agent.head(url);
             for (header, value) in headers {
                 request = request.header(header, value);
@@ -234,7 +274,7 @@ impl S3 {
 
     /// The bytes of `name`, or `None` when the bucket does not hold it.
     fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
-        let mut response = self.send("GET", name, EMPTY, |url, headers| {
+        let mut response = self.send("GET", name, "", EMPTY, |url, headers| {
             let mut request = self.agent.get(url);
             for (header, value) in headers {
                 request = request.header(header, value);
@@ -252,16 +292,76 @@ impl S3 {
         }
     }
 
+    /// The names under `prefix` with their sizes, from as many listing requests as it takes.
+    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>, String> {
+        let mut names = BTreeMap::new();
+        let mut token: Option<String> = None;
+        loop {
+            // The parameters in name order, as the canonical query string has them.
+            let continuation = token.as_deref().map(|token| ("continuation-token", token));
+            let query = continuation
+                .into_iter()
+                .chain([("list-type", "2"), ("prefix", prefix)])
+                .map(|(name, value)| format!("{name}={}", encode_component(value)))
+                .collect::<Vec<_>>()
+                .join("&");
+            let mut response = self.send("GET", "", &query, EMPTY, |url, headers| {
+                let mut request = self.agent.get(url);
+                for (header, value) in headers {
+                    request = request.header(header, value);
+                }
+                request.call()
+            })?;
+            let status = response.status().as_u16();
+            if status != 200 {
+                return Err(format!("LIST {prefix}: HTTP {status}"));
+            }
+            let body = response
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| format!("LIST {prefix}: {e}"))?;
+            let page = Page::parse(&body).map_err(|e| format!("LIST {prefix}: {e}"))?;
+            names.extend(page.names);
+            match page.next {
+                Some(next) => token = Some(next),
+                None => return Ok(names),
+            }
+        }
+    }
+
+    /// Every object of the store in the bucket with its size, listed one store directory per
+    /// connection.
+    fn list_store(&self) -> Result<BTreeMap<String, u64>, PublishError> {
+        let names = Mutex::new(BTreeMap::new());
+        each(SHARDS, self.bucket.connections, |shard| {
+            let prefix = format!("{}store/{shard:02x}/", self.bucket.prefix);
+            let listed = self
+                .list(&prefix)
+                .map_err(|e| PublishError::new("files", e))?;
+            names
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(listed);
+            Ok(())
+        })?;
+        Ok(names.into_inner().unwrap_or_else(|e| e.into_inner()))
+    }
+
     /// Writes the body that `body` makes to `name`. `sha256` is the SHA-256 of its bytes.
     fn put<B: AsSendBody>(
         &self,
         name: &str,
         sha256: &str,
         media_type: &str,
+        cache_control: &'static str,
         body: impl Fn() -> Result<B, String>,
     ) -> Result<(), String> {
-        let response = self.send("PUT", name, sha256, |url, headers| {
-            let mut request = self.agent.put(url).header("content-type", media_type);
+        let response = self.send("PUT", name, "", sha256, |url, headers| {
+            let mut request = self
+                .agent
+                .put(url)
+                .header("content-type", media_type)
+                .header("cache-control", cache_control);
             for (header, value) in headers {
                 request = request.header(header, value);
             }
@@ -277,58 +377,196 @@ impl S3 {
     }
 }
 
+/// Which publication layout an S3 upload writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3Layout {
+    /// Classic JSON-sharded layout (`IndexRoot`, `IndexShard`s, `Listing`s, `.asset.json`, members).
+    Index,
+    /// Three-tier browser-native layout (`index.sqlite`, `.tar` composite archives, standalone media).
+    Sqlite(SqliteOptions),
+}
+
+impl Default for S3Layout {
+    fn default() -> Self {
+        Self::Sqlite(SqliteOptions::default())
+    }
+}
+
 /// Publishes `plan` in the `index` layout to the bucket of `s3`: the objects first, then the
 /// pointer of `target`. The shards, listings and root are written to `store` first, and every
 /// object the bucket lacks is read from `store`. A failed stage leaves the previous pointer in
-/// place, and running the publication again uploads only what is still missing.
+/// place, and running the publication again uploads only what is still missing. The documents
+/// are written on up to `threads` threads.
 pub fn publish(
     store: &LocalStore,
     s3: &S3,
     target: &str,
     plan: &Plan,
+    threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
-    let Documents { pointer, objects } = documents(store, plan)?;
-    let mut all: BTreeMap<&Key, (u64, &str)> = BTreeMap::new();
-    for file in &plan.files {
-        all.insert(&file.key, (file.size, file.media_type.as_str()));
-    }
-    for (key, size) in &objects {
-        all.insert(key, (*size, "application/json"));
-    }
-    let all: Vec<_> = all.into_iter().collect();
+    publish_with(
+        store,
+        s3,
+        target,
+        plan,
+        &S3Layout::Index,
+        Check::Pointer,
+        threads,
+    )
+}
 
-    let uploaded = AtomicUsize::new(0);
-    each(all.len(), s3.bucket.connections, |i| {
-        let (key, (size, media_type)) = all[i];
-        let name = s3.object(key);
-        let failed = |message: String| PublishError::new("files", message);
-        if s3.head(&name).map_err(failed)? == Some(size) {
-            return Ok(());
+/// Publishes `plan` in `layout` to the bucket of `s3`, learning what the bucket holds as `check`
+/// says. The documents are written on up to `threads` threads.
+pub fn publish_with(
+    store: &LocalStore,
+    s3: &S3,
+    target: &str,
+    plan: &Plan,
+    layout: &S3Layout,
+    check: Check,
+    threads: usize,
+) -> Result<(Pointer, S3Report), PublishError> {
+    let (pointer, all) = match layout {
+        S3Layout::Index => {
+            let Documents { pointer, objects } = documents(store, plan, threads)?;
+            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
+            for file in &plan.files {
+                all.insert(file.key.clone(), (file.size, file.media_type.clone()));
+            }
+            for (key, size) in objects {
+                all.insert(key, (size, "application/json".to_owned()));
+            }
+            (pointer, all)
         }
+        S3Layout::Sqlite(options) => {
+            let SqliteBuild {
+                sqlite,
+                sqlite_size,
+                archives,
+                direct_files,
+            } = sqlite::build(store, plan, options, threads)?;
+            let root_doc = IndexRoot {
+                format: "index-root".to_owned(),
+                version: 1,
+                published_version: plan.version.clone(),
+                revision: plan.revision.clone(),
+                shards: Vec::new(),
+                listings: Vec::new(),
+                failures: plan.failures.clone(),
+            };
+            let root_bytes =
+                serde_json::to_vec(&root_doc).map_err(|e| PublishError::new("documents", e))?;
+            let root_size = root_bytes.len() as u64;
+            let root_key = store
+                .put(&root_bytes, "json")
+                .map_err(PublishError::wrap("documents"))?;
+            let pointer = Pointer {
+                format: "pointer".to_owned(),
+                version: 1,
+                published_version: plan.version.clone(),
+                revision: plan.revision.clone(),
+                root: hex(&root_key.sha256),
+                sqlite: Some(hex(&sqlite.sha256)),
+            };
+            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
+            for (key, size, media_type) in direct_files {
+                all.insert(key, (size, media_type));
+            }
+            for (key, size) in archives {
+                all.insert(key, (size, "application/x-tar".to_owned()));
+            }
+            all.insert(root_key, (root_size, "application/json".to_owned()));
+            all.insert(sqlite, (sqlite_size, "application/vnd.sqlite3".to_owned()));
+            (pointer, all)
+        }
+    };
+
+    let all: Vec<_> = all.into_iter().collect();
+    let pointer_bytes =
+        serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
+    let pointer_name = s3.pointer(target);
+
+    // Pre-verify local store presence so missing store objects always surface as `verify` even
+    // when the remote pointer already holds parts of the publication.
+    for (key, (size, _)) in &all {
         let path = store.path(key);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == size) {
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
             return Err(PublishError::new(
                 "verify",
                 format!("{key} is not in the store with {size} bytes"),
             ));
         }
-        s3.put(&name, &hex(&key.sha256), media_type, || {
-            File::open(&path).map_err(|e| format!("{key}: {e}"))
-        })
+    }
+
+    let remote_pointer = s3
+        .get(&pointer_name)
+        .map_err(|e| PublishError::new("pointer", e))?;
+    let pointer_current = remote_pointer.as_deref() == Some(pointer_bytes.as_slice());
+    if check == Check::Pointer && pointer_current {
+        return Ok((
+            pointer,
+            S3Report {
+                uploaded: 0,
+                present: all.len(),
+                pointer_written: false,
+            },
+        ));
+    }
+    let live = match check {
+        Check::Pointer => remote_pointer
+            .as_deref()
+            .and_then(|raw| serde_json::from_slice::<Pointer>(raw).ok())
+            .map(|previous| live_keys_from_pointer(store, &previous))
+            .unwrap_or_default(),
+        Check::Listing => BTreeSet::new(),
+    };
+    let unknown: Vec<_> = all.iter().filter(|(key, _)| !live.contains(key)).collect();
+    // A listing takes at least one request per store directory, a lookup one per object.
+    let listing_requests = SHARDS * all.len().div_ceil(SHARDS * LIST_PAGE).max(1);
+    let listed = if check == Check::Listing || unknown.len() > listing_requests {
+        Some(s3.list_store()?)
+    } else {
+        None
+    };
+
+    let uploaded = AtomicUsize::new(0);
+    each(unknown.len(), s3.bucket.connections, |i| {
+        let (key, (size, media_type)) = unknown[i];
+        let name = s3.object(key);
+        let failed = |message: String| PublishError::new("files", message);
+        let held = match &listed {
+            Some(listed) => listed.get(&name).copied(),
+            None => s3.head(&name).map_err(failed)?,
+        };
+        if held == Some(*size) {
+            return Ok(());
+        }
+        let path = store.path(key);
+        s3.put(
+            &name,
+            &hex(&key.sha256),
+            media_type,
+            IMMUTABLE_CACHE_CONTROL,
+            || File::open(&path).map_err(|e| format!("{key}: {e}")),
+        )
         .map_err(failed)?;
         uploaded.fetch_add(1, Ordering::Relaxed);
         Ok(())
     })?;
 
-    let bytes = serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let name = s3.pointer(target);
     let failed = |message: String| PublishError::new("pointer", message);
-    let pointer_written = s3.get(&name).map_err(failed)?.as_deref() != Some(&bytes[..]);
+    let pointer_written = !pointer_current;
     if pointer_written {
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
         let sha256 = hex(&digest);
-        s3.put(&name, &sha256, "application/json", || Ok(bytes.as_slice()))
-            .map_err(failed)?;
+        s3.put(
+            &pointer_name,
+            &sha256,
+            "application/json",
+            POINTER_CACHE_CONTROL,
+            || Ok(pointer_bytes.as_slice()),
+        )
+        .map_err(failed)?;
     }
     let uploaded = uploaded.into_inner();
     Ok((
@@ -339,6 +577,80 @@ pub fn publish(
             pointer_written,
         },
     ))
+}
+
+fn live_keys_from_pointer(store: &LocalStore, prev: &Pointer) -> BTreeSet<Key> {
+    let mut keys = BTreeSet::new();
+    let Some(root_sha) = parse_hex(&prev.root) else {
+        return keys;
+    };
+    let root_key = Key {
+        sha256: root_sha,
+        extension: "json".to_owned(),
+    };
+    if store.contains(&root_key) {
+        keys.insert(root_key.clone());
+    }
+
+    if let Some(sqlite_hex) = &prev.sqlite {
+        if let Some(sqlite_sha) = parse_hex(sqlite_hex) {
+            let sqlite_key = Key {
+                sha256: sqlite_sha,
+                extension: "sqlite".to_owned(),
+            };
+            if let Ok(sqlite_bytes) = store.read(&sqlite_key) {
+                keys.insert(sqlite_key);
+                if let Ok(referenced) = sqlite::referenced_keys(&sqlite_bytes) {
+                    keys.extend(referenced);
+                }
+            }
+        }
+        return keys;
+    }
+
+    // Classic `index` layout: resolve shards, listings, and every file entry from local store.
+    let Ok(root_bytes) = store.read(&root_key) else {
+        return keys;
+    };
+    let Ok(root_doc) = serde_json::from_slice::<IndexRoot>(&root_bytes) else {
+        return keys;
+    };
+    for listing in &root_doc.listings {
+        if let Some(sha256) = parse_hex(&listing.sha256) {
+            let lkey = Key {
+                sha256,
+                extension: "json".to_owned(),
+            };
+            if store.contains(&lkey) {
+                keys.insert(lkey);
+            }
+        }
+    }
+    for shard_ref in &root_doc.shards {
+        let Some(sha256) = parse_hex(&shard_ref.sha256) else {
+            continue;
+        };
+        let skey = Key {
+            sha256,
+            extension: "json".to_owned(),
+        };
+        let Ok(shard_bytes) = store.read(&skey) else {
+            continue;
+        };
+        let Ok(shard_doc) = serde_json::from_slice::<IndexShard>(&shard_bytes) else {
+            continue;
+        };
+        keys.insert(skey);
+        for entry in shard_doc.entries {
+            if let Some(fsha) = parse_hex(&entry.sha256) {
+                keys.insert(Key {
+                    sha256: fsha,
+                    extension: entry.extension,
+                });
+            }
+        }
+    }
+    keys
 }
 
 /// Runs `job` for indices `0..n` on up to `threads` threads, stopping after the first failure.
@@ -380,15 +692,85 @@ fn each(
 /// Encodes a path as the canonical URI of AWS Signature Version 4: every byte except unreserved
 /// characters and `/` as `%XX`.
 fn encode(path: &str) -> String {
-    let mut out = String::with_capacity(path.len());
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'/') {
+    percent_encode(path, |byte| byte == b'/')
+}
+
+/// Encodes a query parameter as the canonical query string of AWS Signature Version 4: every
+/// byte except unreserved characters as `%XX`.
+fn encode_component(value: &str) -> String {
+    percent_encode(value, |_| false)
+}
+
+/// `text` with every byte as `%XX` except unreserved characters and those `keep` accepts.
+fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') || keep(byte) {
             out.push(char::from(byte));
         } else {
             out.push_str(&format!("%{byte:02X}"));
         }
     }
     out
+}
+
+/// One page of a listing.
+#[derive(Debug, PartialEq, Eq)]
+struct Page {
+    /// The names on the page with their sizes.
+    names: Vec<(String, u64)>,
+    /// The continuation token of the next page, when the listing goes on.
+    next: Option<String>,
+}
+
+impl Page {
+    /// Reads the XML of a `ListObjectsV2` response.
+    fn parse(xml: &str) -> Result<Self, String> {
+        let names = elements(xml, "Contents")
+            .map(|contents| {
+                let name = element(contents, "Key").ok_or("an object has no Key")?;
+                let size = element(contents, "Size")
+                    .and_then(|size| size.parse().ok())
+                    .ok_or("an object has no Size")?;
+                Ok((unescape(name), size))
+            })
+            .collect::<Result<_, &str>>()?;
+        let next = match element(xml, "IsTruncated") {
+            Some("true") => Some(unescape(
+                element(xml, "NextContinuationToken").ok_or("a truncated page has no token")?,
+            )),
+            _ => None,
+        };
+        Ok(Self { names, next })
+    }
+}
+
+/// The text of every element `tag` in `xml`, in order.
+fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut rest = xml;
+    std::iter::from_fn(move || {
+        let start = rest.find(&open)? + open.len();
+        let end = start + rest[start..].find(&close)?;
+        let text = &rest[start..end];
+        rest = &rest[end + close.len()..];
+        Some(text)
+    })
+}
+
+/// The text of the first element `tag` in `xml`.
+fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    elements(xml, tag).next()
+}
+
+/// `text` with the five predefined XML entities replaced by their characters.
+fn unescape(text: &str) -> String {
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 /// The time of a request, `YYYYMMDDTHHMMSSZ` in UTC.
@@ -518,6 +900,34 @@ mod tests {
         assert_eq!(at(1_369_353_600), "20130524T000000Z");
         assert_eq!(at(951_782_400 + 3661), "20000229T010101Z");
         assert_eq!(at(4_102_444_799), "20991231T235959Z");
+    }
+
+    #[test]
+    fn reads_listing_pages() {
+        let xml = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+            <Contents><Key>p/store/ab/a&amp;b.json</Key><Size>12</Size></Contents>\
+            <Contents><Key>p/store/ab/c.png</Key><Size>3</Size></Contents>\
+            <NextContinuationToken>t+1/=</NextContinuationToken></ListBucketResult>";
+        assert_eq!(
+            Page::parse(xml),
+            Ok(Page {
+                names: vec![
+                    ("p/store/ab/a&b.json".to_owned(), 12),
+                    ("p/store/ab/c.png".to_owned(), 3)
+                ],
+                next: Some("t+1/=".to_owned()),
+            })
+        );
+        let last = "<ListBucketResult><IsTruncated>false</IsTruncated></ListBucketResult>";
+        assert_eq!(
+            Page::parse(last),
+            Ok(Page {
+                names: Vec::new(),
+                next: None
+            })
+        );
+        assert!(Page::parse("<Contents><Key>x</Key></Contents>").is_err());
+        assert_eq!(encode_component("t+1/="), "t%2B1%2F%3D");
     }
 
     #[test]

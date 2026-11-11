@@ -1,4 +1,4 @@
-//! The encoders that need a C library. Tests that need LAME or ffmpeg pass without checking
+//! The encoders that need a C library. Tests that need a library or ffmpeg pass without checking
 //! anything on a machine that does not have them.
 
 use std::process::{Command, Stdio};
@@ -52,72 +52,49 @@ mod lossy_webp {
     }
 }
 
-#[cfg(feature = "mp3")]
-mod mp3 {
-    use super::{Command, EncodeError, Pcm, Stdio, tone};
-    use sekai_encode::mp3;
+mod movie {
+    use super::{Command, EncodeError, Stdio, tone};
+    use sekai_codec::Movie;
+    use sekai_encode::mp4;
+
+    /// An MPEG-2 video stream of `frames` test frames, or `None` without ffmpeg.
+    fn stream(frames: u32) -> Option<Vec<u8>> {
+        let output = Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=64x48:rate=30",
+            ])
+            .args(["-frames:v", &frames.to_string(), "-f", "mpeg2video", "-"])
+            .stdin(Stdio::null())
+            .output()
+            .ok()?;
+        assert!(output.status.success(), "ffmpeg failed");
+        Some(output.stdout)
+    }
 
     #[test]
-    fn a_missing_library_is_unavailable() {
-        let result = mp3::encode_with(&["no-such-library-for-this-test"], &tone(1, 1152), 128);
-        let Err(EncodeError::Unavailable { message, .. }) = result else {
-            panic!("expected unavailable, got {result:?}");
+    fn a_movie_is_the_same_on_every_run() {
+        let Some(stream) = stream(12) else {
+            return;
         };
-        assert!(message.contains("no-such-library-for-this-test"));
-    }
-
-    /// Decodes with ffmpeg to the sample count and channel count, if ffmpeg exists.
-    fn decode_with_ffmpeg(bytes: &[u8], channels: u16) -> Option<usize> {
-        let mut path = std::env::temp_dir();
-        path.push(format!(
-            "sekai-encode-test-{}-{channels}.mp3",
-            std::process::id()
-        ));
-        std::fs::write(&path, bytes).expect("written");
-        let output = Command::new("ffmpeg")
-            .args(["-v", "error", "-i"])
-            .arg(&path)
-            .args(["-f", "s16le", "-ac"])
-            .arg(channels.to_string())
-            .arg("-")
-            .stdin(Stdio::null())
-            .output();
-        std::fs::remove_file(&path).expect("removed");
-        let output = output.ok()?;
-        assert!(output.status.success(), "ffmpeg failed");
-        Some(output.stdout.len() / 2 / usize::from(channels))
-    }
-
-    fn check(pcm: &Pcm) {
-        let first = match mp3::encode(pcm, 128) {
+        let movie = Movie {
+            stream,
+            width: 64,
+            height: 48,
+            framerate_n: 30,
+            framerate_d: 1,
+            audio: Some(tone(2, 44100 / 2)),
+        };
+        let first = match mp4::encode(&movie) {
             Err(EncodeError::Unavailable { .. }) => return,
             other => other.expect("encoded"),
         };
-        assert_eq!(first, mp3::encode(pcm, 128).expect("encoded"));
-        let channels = pcm.channels();
-        let expected = pcm.samples().len() / usize::from(channels);
-        if let Some(decoded) = decode_with_ffmpeg(&first, channels) {
-            let frames = (expected + 2 * 1152).div_ceil(1152) * 1152;
-            assert!(
-                (expected..=frames + 1152).contains(&decoded),
-                "{expected} samples became {decoded}"
-            );
-        }
-    }
-
-    #[test]
-    fn mono_and_stereo_are_the_same_on_every_run_and_decode_to_the_length() {
-        check(&tone(1, 44100));
-        check(&tone(2, 30000));
-    }
-
-    #[test]
-    fn three_channels_fail() {
-        let result = mp3::encode(&tone(3, 1152), 128);
-        assert!(matches!(
-            result,
-            Err(EncodeError::Failed { .. } | EncodeError::Unavailable { .. })
-        ));
+        assert_eq!(&first[4..8], b"ftyp");
+        assert_eq!(first, mp4::encode(&movie).expect("encoded"));
     }
 }
 

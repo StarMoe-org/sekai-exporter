@@ -35,6 +35,10 @@ impl Converter for Texture {
         3
     }
 
+    fn encoders(&self) -> crate::Encoders {
+        crate::Encoders::TEXTURE
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

@@ -223,13 +223,14 @@ struct Joint {
 
 impl Binding {
     /// Binds the bone slots of `mesh` as `slot_nodes` describes, leaving out the slots that
-    /// bind no node.
+    /// bind no node, or `None` when a vertex weighs on such a slot, so that the mesh cannot be
+    /// posed by the nodes of the model.
     fn new(
         renderer: &Object,
         mesh: &Mesh,
         prefab: &Prefab,
         cx: &dyn Context,
-    ) -> Result<Self, ConvertError> {
+    ) -> Result<Option<Self>, ConvertError> {
         let skin = mesh
             .skin
             .as_ref()
@@ -256,16 +257,12 @@ impl Binding {
                     binding.joints.push(Joint { node, inverse_bind });
                     joint
                 }
-                None if skin.weighed.contains(&slot) => {
-                    return Err(unsupported(
-                        "a bone that a vertex weighs on binds no node of the model",
-                    ));
-                }
+                None if skin.weighed.contains(&slot) => return Ok(None),
                 None => 0,
             };
             binding.slot_joints.push(joint);
         }
-        Ok(binding)
+        Ok(Some(binding))
     }
 }
 
@@ -352,6 +349,26 @@ impl Builder<'_> {
         let Some(mesh) = renderer.mesh else {
             return Ok(());
         };
+        // The skin is bound before the mesh and materials join the file, so that a mesh that
+        // cannot be posed adds nothing to it.
+        let read = match self.geometry.get(&mesh) {
+            Some(_) => None,
+            None => Some(mesh::read(mesh, self.cx)?),
+        };
+        let binding = if renderer.skinned {
+            let parsed = read.as_ref().unwrap_or_else(|| &self.geometry[&mesh].mesh);
+            let Some(binding) = Binding::new(renderer.object, parsed, prefab, self.cx)? else {
+                node.extras.insert("unbound", Json::Bool(true));
+                return Ok(());
+            };
+            Some(binding)
+        } else {
+            None
+        };
+        if let Some(read) = read {
+            let geometry = Geometry::new(read, self.config.flip_uv, &mut self.buffers)?;
+            self.geometry.insert(mesh, geometry);
+        }
         let mut materials = Vec::new();
         for material in array(fields, "m_Materials")? {
             let material = material
@@ -362,23 +379,6 @@ impl Builder<'_> {
                 None => None,
             });
         }
-        let geometry = load(
-            &mut self.geometry,
-            mesh,
-            self.config.flip_uv,
-            self.cx,
-            &mut self.buffers,
-        )?;
-        let binding = if renderer.skinned {
-            Some(Binding::new(
-                renderer.object,
-                &geometry.mesh,
-                prefab,
-                self.cx,
-            )?)
-        } else {
-            None
-        };
         let (slot_joints, joints) = binding
             .map(|binding| (binding.slot_joints, binding.joints))
             .unzip();
@@ -503,9 +503,7 @@ impl Builder<'_> {
             buffer_views: Vec::new(),
             buffers: Vec::new(),
         };
-        let images = self
-            .materials
-            .finish(self.config.declare_webp, &mut document);
+        let images = self.materials.finish(&mut document);
         let bin = self.buffers.finish(&mut document);
         let json = document
             .to_bytes()

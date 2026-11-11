@@ -5,26 +5,24 @@
 
 use std::fmt;
 
-use sekai_codec::{Pcm, Surface};
+use sekai_codec::Surface;
 use sekai_convert::Content;
-use sekai_encode::{mp3, png};
+use sekai_encode::webp;
 use sekai_format::AssetDocument;
 
 /// The version of the view. It changes whenever a path or a transform changes.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
-/// The bit rate of the MP3 files.
-const MP3_KBPS: u32 = 320;
+/// The libwebp quality factor of the WebP files.
+const WEBP_QUALITY: f32 = 75.0;
 
 /// How the file of a view is made from a member of its asset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transform {
     /// The bytes of the member.
     Copy,
-    /// A PNG of the WebP member.
-    Png,
-    /// A 320 kb/s MP3 of the FLAC member.
-    Mp3,
+    /// A lossy WebP of the PNG member.
+    Webp,
 }
 
 impl Transform {
@@ -32,8 +30,7 @@ impl Transform {
     pub fn identity(self) -> String {
         match self {
             Self::Copy => "copy".to_owned(),
-            Self::Png => format!("{} {}", png::NAME, png::VERSION),
-            Self::Mp3 => format!("{} {} {MP3_KBPS}", mp3::NAME, mp3::VERSION),
+            Self::Webp => format!("{} {} {WEBP_QUALITY}", webp::NAME, webp::VERSION),
         }
     }
 
@@ -41,8 +38,7 @@ impl Transform {
     pub fn extension(self) -> Option<&'static str> {
         match self {
             Self::Copy => None,
-            Self::Png => Some("png"),
-            Self::Mp3 => Some("mp3"),
+            Self::Webp => Some("webp"),
         }
     }
 
@@ -50,8 +46,7 @@ impl Transform {
     pub fn media_type(self) -> Option<&'static str> {
         match self {
             Self::Copy => None,
-            Self::Png => Some("image/png"),
-            Self::Mp3 => Some("audio/mpeg"),
+            Self::Webp => Some("image/webp"),
         }
     }
 }
@@ -144,16 +139,17 @@ pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
             });
         };
         match (document.form.as_str(), m.role.as_str()) {
-            ("texture" | "sprite", "image") if m.extension == "webp" => {
-                add(at(format!("{file}.webp")), Transform::Copy);
-                add(at(format!("{file}.png")), Transform::Png);
+            ("texture" | "sprite", "image") if m.extension == "png" => {
+                add(at(format!("{file}.png")), Transform::Copy);
+                add(at(format!("{file}.webp")), Transform::Webp);
             }
             ("texture", "image") => add(at(format!("{file}.{}", m.extension)), Transform::Copy),
             ("audio", role) => {
                 if let Some(cue) = role.strip_prefix("cue/")
                     && !is_alternative_mix(bundle, cue)
                 {
-                    add(at(format!("{}.mp3", cue.replace('/', "_"))), Transform::Mp3);
+                    let cue = cue.replace('/', "_");
+                    add(at(format!("{cue}.{}", m.extension)), Transform::Copy);
                 }
             }
             ("video", "video") => add(at(format!("{}.mp4", movie_stem(file))), Transform::Copy),
@@ -166,42 +162,21 @@ pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
     out
 }
 
-fn decode_webp(bytes: &[u8]) -> Result<Surface, ViewError> {
-    let mut decoder =
-        image_webp::WebPDecoder::new(std::io::Cursor::new(bytes)).map_err(malformed)?;
-    let (width, height) = decoder.dimensions();
-    let size = decoder
+/// The pixels of a canonical image, which is an 8-bit RGBA PNG.
+fn decode_png(bytes: &[u8]) -> Result<Surface, ViewError> {
+    let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+        .read_info()
+        .map_err(malformed)?;
+    let size = reader
         .output_buffer_size()
         .ok_or_else(|| malformed("the image is too large"))?;
     let mut pixels = vec![0; size];
-    decoder.read_image(&mut pixels).map_err(malformed)?;
-    if !decoder.has_alpha() {
-        pixels = pixels
-            .as_chunks::<3>()
-            .0
-            .iter()
-            .flat_map(|p| [p[0], p[1], p[2], 0xff])
-            .collect();
+    let frame = reader.next_frame(&mut pixels).map_err(malformed)?;
+    if (frame.color_type, frame.bit_depth) != (png::ColorType::Rgba, png::BitDepth::Eight) {
+        return Err(malformed("the image is not 8-bit RGBA"));
     }
-    Surface::new(width, height, pixels).map_err(malformed)
-}
-
-fn decode_flac(bytes: &[u8]) -> Result<Pcm, ViewError> {
-    let mut reader = claxon::FlacReader::new(bytes).map_err(malformed)?;
-    let info = reader.streaminfo();
-    if info.bits_per_sample != 16 {
-        return Err(malformed(format!(
-            "{} bits per sample",
-            info.bits_per_sample
-        )));
-    }
-    let samples = reader
-        .samples()
-        .map(|s| s.map(|s| s as i16))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(malformed)?;
-    let channels = u16::try_from(info.channels).map_err(malformed)?;
-    Pcm::new(info.sample_rate, channels, samples).map_err(malformed)
+    pixels.truncate(frame.buffer_size());
+    Surface::new(frame.width, frame.height, pixels).map_err(malformed)
 }
 
 fn encoded(e: sekai_encode::EncodeError) -> ViewError {
@@ -218,8 +193,9 @@ pub fn apply_decoded(
     content: &Content,
 ) -> Option<Result<Vec<u8>, ViewError>> {
     match (transform, content) {
-        (Transform::Png, Content::Image(surface)) => Some(png::encode(surface).map_err(encoded)),
-        (Transform::Mp3, Content::Audio(pcm)) => Some(mp3::encode(pcm, MP3_KBPS).map_err(encoded)),
+        (Transform::Webp, Content::Image(surface)) => {
+            Some(webp::encode(surface, WEBP_QUALITY).map_err(encoded))
+        }
         _ => None,
     }
 }
@@ -228,32 +204,32 @@ pub fn apply_decoded(
 pub fn apply(transform: Transform, member: &[u8]) -> Result<Vec<u8>, ViewError> {
     match transform {
         Transform::Copy => Ok(member.to_vec()),
-        Transform::Png => png::encode(&decode_webp(member)?).map_err(encoded),
-        Transform::Mp3 => mp3::encode(&decode_flac(member)?, MP3_KBPS).map_err(encoded),
+        Transform::Webp => webp::encode(&decode_png(member)?, WEBP_QUALITY).map_err(encoded),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sekai_encode::webp_lossless;
     use sekai_format::asset::{MemberFile, SourceObject};
 
     #[test]
-    fn a_decoded_image_gives_the_png_of_its_webp() {
+    fn a_decoded_image_gives_the_webp_of_its_png() {
         let pixels = (0..16 * 4).map(|v| (v * 3) as u8).collect();
         let surface = Surface::new(4, 4, pixels).unwrap();
-        let webp = webp_lossless::encode(&surface).unwrap();
-        let direct = apply_decoded(Transform::Png, &Content::Image(surface))
+        let png = sekai_encode::png::encode(&surface).unwrap();
+        let direct = apply_decoded(Transform::Webp, &Content::Image(surface))
             .unwrap()
             .unwrap();
-        assert_eq!(direct, apply(Transform::Png, &webp).unwrap());
+        assert_eq!(direct, apply(Transform::Webp, &png).unwrap());
+        assert_eq!((&direct[..4], &direct[8..12]), (&b"RIFF"[..], &b"WEBP"[..]));
     }
 
     #[test]
     fn a_transform_does_not_read_other_content() {
-        let pcm = Pcm::new(48000, 1, vec![0; 4]).unwrap();
-        assert!(apply_decoded(Transform::Png, &Content::Audio(pcm)).is_none());
+        let pcm = sekai_codec::Pcm::new(48000, 1, vec![0; 4]).unwrap();
+        let sound = Content::Audio(sekai_codec::Sound::Pcm(pcm));
+        assert!(apply_decoded(Transform::Webp, &sound).is_none());
     }
 
     fn document(name: &str, form: &str, bundle: &str, members: &[(&str, &str)]) -> AssetDocument {
@@ -293,23 +269,23 @@ mod tests {
     }
 
     #[test]
-    fn images_have_a_webp_and_a_png() {
+    fn images_have_a_png_and_a_webp() {
         let d = document(
             "character/member/a/card_normal",
             "texture",
             "character/member/a",
-            &[("image", "webp")],
+            &[("image", "png")],
         );
         assert_eq!(
             paths(&d),
             [
                 (
-                    "character/member/a/card_normal.webp".to_owned(),
+                    "character/member/a/card_normal.png".to_owned(),
                     Transform::Copy
                 ),
                 (
-                    "character/member/a/card_normal.png".to_owned(),
-                    Transform::Png
+                    "character/member/a/card_normal.webp".to_owned(),
+                    Transform::Webp
                 ),
             ]
         );
@@ -321,7 +297,7 @@ mod tests {
             "b/s",
             "sprite",
             "b",
-            &[("image", "webp"), ("sprite", "json")],
+            &[("image", "png"), ("sprite", "json")],
         );
         assert_eq!(files(&d).len(), 2);
         assert!(files(&d).iter().all(|f| f.member == 0));
@@ -333,7 +309,7 @@ mod tests {
             "b/lut",
             "texture",
             "b",
-            &[("slice/0", "webp"), ("slice/1", "webp")],
+            &[("slice/0", "png"), ("slice/1", "png")],
         );
         assert!(files(&slices).is_empty());
 
@@ -342,18 +318,18 @@ mod tests {
     }
 
     #[test]
-    fn each_cue_is_an_mp3_in_the_bundle() {
+    fn each_cue_is_its_mp3_in_the_bundle() {
         let d = document(
             "sound/voice/a/deep/a.acb",
             "audio",
             "sound/voice/a",
-            &[("cue/one", "flac"), ("cue/two/2", "flac")],
+            &[("cue/one", "mp3"), ("cue/two/2", "mp3")],
         );
         assert_eq!(
             paths(&d),
             [
-                ("sound/voice/a/one.mp3".to_owned(), Transform::Mp3),
-                ("sound/voice/a/two_2.mp3".to_owned(), Transform::Mp3),
+                ("sound/voice/a/one.mp3".to_owned(), Transform::Copy),
+                ("sound/voice/a/two_2.mp3".to_owned(), Transform::Copy),
             ]
         );
     }
@@ -365,14 +341,14 @@ mod tests {
             "audio",
             "music/long/a",
             &[
-                ("cue/a", "flac"),
-                ("cue/a_VR", "flac"),
-                ("cue/a_SCREEN", "flac"),
+                ("cue/a", "mp3"),
+                ("cue/a_VR", "mp3"),
+                ("cue/a_SCREEN", "mp3"),
             ],
         );
         assert_eq!(
             paths(&d),
-            [("music/long/a/a.mp3".to_owned(), Transform::Mp3)]
+            [("music/long/a/a.mp3".to_owned(), Transform::Copy)]
         );
     }
 
@@ -401,7 +377,7 @@ mod tests {
 
     #[test]
     fn an_asset_with_an_error_has_no_files() {
-        let mut d = document("a/b", "texture", "a", &[("image", "webp")]);
+        let mut d = document("a/b", "texture", "a", &[("image", "png")]);
         d.error = Some(sekai_format::asset::AssetError {
             code: "x".to_owned(),
             message: String::new(),
@@ -410,36 +386,17 @@ mod tests {
     }
 
     #[test]
-    fn a_png_has_the_pixels_of_the_webp() {
+    fn a_canonical_png_is_decoded_to_its_pixels() {
         let pixels = vec![10, 20, 30, 40, 50, 60, 70, 255];
         let surface = Surface::new(2, 1, pixels.clone()).unwrap();
-        let webp = sekai_encode::webp_lossless::encode(&surface).unwrap();
-        let png_bytes = apply(Transform::Png, &webp).unwrap();
-        let decoder = ::png::Decoder::new(std::io::Cursor::new(png_bytes));
-        let mut reader = decoder.read_info().unwrap();
-        let mut out = vec![0; reader.output_buffer_size().unwrap()];
-        reader.next_frame(&mut out).unwrap();
-        assert_eq!(out, pixels);
+        let png = sekai_encode::png::encode(&surface).unwrap();
+        assert_eq!(decode_png(&png).unwrap().pixels(), pixels);
     }
 
     #[test]
-    fn flac_is_decoded_to_its_samples() {
-        let pcm = Pcm::new(48_000, 2, vec![1, -1, 300, -300]).unwrap();
-        let flac = sekai_encode::flac::encode(&pcm).unwrap();
-        let decoded = decode_flac(&flac).unwrap();
-        assert_eq!(decoded.samples(), pcm.samples());
-        assert_eq!(decoded.sample_rate(), 48_000);
-        assert_eq!(decoded.channels(), 2);
-    }
-
-    #[test]
-    fn broken_members_are_named_errors() {
+    fn a_broken_member_is_a_named_error() {
         assert_eq!(
-            apply(Transform::Png, b"nope").unwrap_err().code,
-            "malformed"
-        );
-        assert_eq!(
-            apply(Transform::Mp3, b"nope").unwrap_err().code,
+            apply(Transform::Webp, b"nope").unwrap_err().code,
             "malformed"
         );
     }

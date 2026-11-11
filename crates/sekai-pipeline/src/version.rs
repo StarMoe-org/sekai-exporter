@@ -10,12 +10,13 @@ use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
 use sekai_unity::{
-    BlockCache, Bundle, ByteSource, ClassLayouts, NoClasses, SerializedFile, open_files,
+    BlockCache, Bundle, ByteSource, ClassLayouts, Field, Flights, NoClasses, Scalar,
+    SerializedFile, Visitor, open_files,
 };
 use sha2::{Digest, Sha256};
 
-use crate::eval::parallel;
-use crate::index_record::IndexRecord;
+use crate::index_record::{IndexRecord, StreamDigest};
+use crate::sched::{Limits, Need, Scheduler};
 
 /// The estimated memory of the bundles that stay parsed, in bytes.
 const PARSED_BYTES: u64 = 512 << 20;
@@ -54,22 +55,66 @@ impl Opened {
     }
 
     fn record(&self, cache: &dyn BlockCache) -> sekai_unity::Result<IndexRecord> {
-        let files = self
-            .files
-            .iter()
-            .map(|(entry, file, layouts)| {
-                index_file(&OpenFile {
-                    path: &self.bundle.entries()[*entry].path,
-                    file,
-                    source: &self.bundle.entry(*entry, cache),
-                    layouts,
-                })
-            })
-            .collect::<sekai_unity::Result<_>>()?;
+        let mut files = Vec::with_capacity(self.files.len());
+        let mut streams = Vec::with_capacity(self.files.len());
+        for (entry, file, layouts) in &self.files {
+            let source = self.bundle.entry(*entry, cache);
+            let open = OpenFile {
+                path: &self.bundle.entries()[*entry].path,
+                file,
+                source: &source,
+                layouts,
+            };
+            let indexed = index_file(&open)?;
+            streams.push(self.file_streams(&open, cache));
+            files.push(indexed);
+        }
         Ok(IndexRecord {
             files,
             resources: self.resource_hashes(cache),
+            streams,
         })
+    }
+
+    fn file_streams(&self, open: &OpenFile<'_>, cache: &dyn BlockCache) -> Vec<StreamDigest> {
+        const STREAM_CLASSES: &[i32] = &[28, 43, 83, 89, 117, 187, 329];
+        let mut digests = Vec::new();
+        for (idx, object) in open.file.objects.iter().enumerate() {
+            if !STREAM_CLASSES.contains(&object.class_id) {
+                continue;
+            }
+            let mut visitor = StreamVisitor::default();
+            if open.read(idx, &mut visitor).is_err() {
+                continue;
+            }
+            let Some((file, offset, size)) = visitor.finish() else {
+                continue;
+            };
+            let sha256 = self.hash_resource_slice(&file, offset, size, cache);
+            digests.push(StreamDigest {
+                path_id: object.path_id,
+                file,
+                offset,
+                size,
+                sha256,
+            });
+        }
+        digests.sort_by_key(|d| d.path_id);
+        digests
+    }
+
+    fn hash_resource_slice(
+        &self,
+        file: &str,
+        offset: u64,
+        size: u64,
+        cache: &dyn BlockCache,
+    ) -> Option<[u8; 32]> {
+        let entry = self.bundle.entries().iter().position(|e| e.path == file)?;
+        let len = usize::try_from(size).ok()?;
+        let source = self.bundle.entry(entry, cache);
+        let chunk = source.read(offset, len).ok()?;
+        Some(Sha256::digest(&*chunk).into())
     }
 
     /// The SHA-256 of each resource entry that can be read, in directory order.
@@ -86,6 +131,78 @@ impl Opened {
                 Some(Sha256::digest(&*chunk).into())
             })
             .collect()
+    }
+}
+
+#[derive(Default)]
+struct StreamVisitor {
+    depth: usize,
+    in_stream: bool,
+    path: Option<String>,
+    offset: Option<u64>,
+    size: Option<u64>,
+}
+
+impl StreamVisitor {
+    fn finish(self) -> Option<(String, u64, u64)> {
+        let path = self.path.filter(|p| !p.is_empty())?;
+        let file = path.rsplit('/').next().unwrap_or(&path).to_owned();
+        Some((file, self.offset?, self.size?))
+    }
+}
+
+impl Visitor for StreamVisitor {
+    fn begin_struct(&mut self, field: &Field<'_>) -> sekai_unity::Result<()> {
+        self.depth += 1;
+        if self.depth == 2 && matches!(field.name, "m_StreamData" | "m_Resource") {
+            self.in_stream = true;
+        }
+        Ok(())
+    }
+
+    fn end_struct(&mut self) -> sekai_unity::Result<()> {
+        if self.depth == 2 {
+            self.in_stream = false;
+        }
+        self.depth -= 1;
+        Ok(())
+    }
+
+    fn begin_array(
+        &mut self,
+        _field: &Field<'_>,
+        _len: usize,
+        _map: bool,
+    ) -> sekai_unity::Result<bool> {
+        Ok(false)
+    }
+
+    fn string(&mut self, field: &Field<'_>, bytes: &[u8]) -> sekai_unity::Result<()> {
+        if self.in_stream && self.depth == 2 && matches!(field.name, "path" | "m_Source") {
+            self.path = Some(String::from_utf8_lossy(bytes).into_owned());
+        }
+        Ok(())
+    }
+
+    fn scalar(&mut self, field: &Field<'_>, value: Scalar) -> sekai_unity::Result<()> {
+        if !self.in_stream || self.depth != 2 {
+            return Ok(());
+        }
+        let unsigned = match value {
+            Scalar::U64(v) => Some(v),
+            Scalar::U32(v) => Some(u64::from(v)),
+            Scalar::I64(v) => u64::try_from(v).ok(),
+            Scalar::I32(v) => u64::try_from(v).ok(),
+            _ => None,
+        };
+        if let Some(v) = unsigned {
+            match field.name {
+                "offset" | "m_Offset" => self.offset = Some(v),
+                "size" | "m_Size" => self.size = Some(v),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -206,6 +323,7 @@ impl Recent {
 pub(crate) struct Parsed {
     limit: u64,
     recent: Mutex<Recent>,
+    opening: Flights<[u8; 32], Result<Arc<Opened>, ConvertError>>,
 }
 
 impl Parsed {
@@ -214,11 +332,33 @@ impl Parsed {
         Self {
             limit,
             recent: Mutex::default(),
+            opening: Flights::default(),
         }
     }
 
     fn get(&self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
         self.recent.lock().unwrap().get(bundle)
+    }
+
+    /// The parsed bundle whose bytes hash to `bundle`: the one held, or the one `open` returns,
+    /// which is held from then on. Callers that miss it at the same time open it once.
+    fn get_or_open(
+        &self,
+        bundle: [u8; 32],
+        open: impl FnOnce() -> Result<Opened, ConvertError>,
+    ) -> Result<Arc<Opened>, ConvertError> {
+        if let Some(opened) = self.get(&bundle) {
+            return Ok(opened);
+        }
+        self.opening.run(&bundle, || {
+            // A caller that has just opened the bundle may hold it since.
+            if let Some(opened) = self.get(&bundle) {
+                return Ok(opened);
+            }
+            let opened = Arc::new(open()?);
+            self.insert(bundle, opened.clone());
+            Ok(opened)
+        })
     }
 
     fn insert(&self, bundle: [u8; 32], opened: Arc<Opened>) {
@@ -270,6 +410,8 @@ pub struct Version<'c> {
     bundles: Vec<(Arc<dyn ByteSource>, [u8; 32])>,
     /// The hashes of the resource entries of each bundle.
     resources: Vec<Vec<[u8; 32]>>,
+    /// The streamed resource slices of each serialized file of each bundle.
+    streams: Vec<Vec<Vec<StreamDigest>>>,
     parsed: Arc<Parsed>,
     index: VersionIndex,
     cache: &'c dyn BlockCache,
@@ -290,11 +432,24 @@ impl<'c> Version<'c> {
     /// it is there and adding it when it is not. The result does not depend on `threads` or on
     /// what `indexes` holds. Fails only if `indexes` does.
     pub fn open_indexed(
-        mut inputs: Vec<BundleInput>,
+        inputs: Vec<BundleInput>,
         cache: &'c dyn BlockCache,
         classes: &'c dyn ClassLayouts,
         indexes: &dyn BundleIndexes,
         threads: usize,
+    ) -> io::Result<(Self, Vec<BundleError>)> {
+        let scheduler = Scheduler::new(Limits::threads(threads));
+        Self::open_on(inputs, cache, classes, indexes, &scheduler)
+    }
+
+    /// Opens and indexes `inputs` as [`Version::open_indexed`] does, indexing each bundle on a
+    /// CPU slot of `scheduler`, which other work may share.
+    pub fn open_on(
+        mut inputs: Vec<BundleInput>,
+        cache: &'c dyn BlockCache,
+        classes: &'c dyn ClassLayouts,
+        indexes: &dyn BundleIndexes,
+        scheduler: &Scheduler,
     ) -> io::Result<(Self, Vec<BundleError>)> {
         // The version index orders bundles by name; opening them in that order keeps the two
         // lists aligned.
@@ -306,14 +461,15 @@ impl<'c> Version<'c> {
                     || inputs.get(i + 1).is_some_and(|next| next.name == *name)
             })
             .collect();
-        let records = parallel(inputs.len(), threads, |i| {
+        let records = scheduler.run(&vec![Need::default(); inputs.len()], |i, slots| {
             (!shared[i])
-                .then(|| record(&inputs[i], cache, classes, indexes))
+                .then(|| slots.cpu(1, || record(&inputs[i], cache, classes, indexes)))
                 .transpose()
         });
         indexes.flush()?;
         let mut bundles = Vec::new();
         let mut resources = Vec::new();
+        let mut streams = Vec::new();
         let mut bundle_indexes = Vec::new();
         let mut errors = Vec::new();
         for (input, record) in inputs.into_iter().zip(records) {
@@ -332,6 +488,7 @@ impl<'c> Version<'c> {
                         files: record.files,
                     });
                     resources.push(record.resources);
+                    streams.push(record.streams);
                     bundles.push((input.source, input.sha256));
                 }
                 Err(e) => errors.push(BundleError {
@@ -344,6 +501,7 @@ impl<'c> Version<'c> {
         let version = Self {
             bundles,
             resources,
+            streams,
             parsed: Arc::new(Parsed::new(PARSED_BYTES)),
             index: VersionIndex::new(bundle_indexes),
             cache,
@@ -362,17 +520,14 @@ impl<'c> Version<'c> {
     /// The parsed form of a bundle.
     fn opened(&self, bundle: usize) -> Result<Arc<Opened>, ConvertError> {
         let (source, sha256) = &self.bundles[bundle];
-        if let Some(opened) = self.parsed.get(sha256) {
-            return Ok(opened);
-        }
-        let opened = Arc::new(Opened::open(
-            source.clone(),
-            *sha256,
-            self.cache,
-            self.classes,
-        )?);
-        self.parsed.insert(*sha256, opened.clone());
-        Ok(opened)
+        self.parsed.get_or_open(*sha256, || {
+            Ok(Opened::open(
+                source.clone(),
+                *sha256,
+                self.cache,
+                self.classes,
+            )?)
+        })
     }
 
     fn missing(&self, id: ObjectId) -> ConvertError {
@@ -389,6 +544,11 @@ impl<'c> Version<'c> {
     /// The SHA-256 of each resource entry of a bundle that can be read, in directory order.
     pub fn resource_hashes(&self, bundle: usize) -> Vec<[u8; 32]> {
         self.resources[bundle].clone()
+    }
+
+    /// The streamed resource slice digests of every bundle of the version.
+    pub(crate) fn all_streams(&self) -> &[Vec<Vec<StreamDigest>>] {
+        &self.streams
     }
 
     /// The index of the version.

@@ -53,7 +53,7 @@
 
 ## S3 兼容存储桶
 
-启用 `s3` feature 时，若配置文件有 `publish.s3` 一节，`sekai-exporter update` 还会把 `index` 布局发布到 S3 兼容的存储桶：
+启用 `s3` feature 时，若配置文件有 `publish.s3` 一节，`sekai-exporter update` 还会把产物发布到 S3 兼容的存储桶：
 
 ```json
 {
@@ -63,6 +63,7 @@
       "endpoint": "https://s3.example.invalid/bucket",
       "region": "us-east-1",
       "prefix": "sekai/",
+      "layout": "sqlite",
       "connections": 8,
       "secrets": { "access_key_id": "SEKAI_S3_ACCESS_KEY_ID", "secret_access_key": "SEKAI_S3_SECRET_ACCESS_KEY" }
     }
@@ -75,12 +76,14 @@
 | `endpoint` | 存储桶地址，路径式（`https://<主机>/<存储桶>`）或虚拟主机式（`https://<存储桶>.<主机>`） |
 | `region` | 请求签名所用的区域 |
 | `prefix` | 可选。加在每个对象名前面；为空或以 `/` 结尾 |
+| `layout` | 可选，默认 `"sqlite"`（`"sqlite"` 或 `"index"`）。`"sqlite"` 上传三层浏览器布局（`index.sqlite` + `.tar` 复合归档 + 独立媒体），避免海量小 JSON 对象；`"index"` 上传传统 JSON 分片布局 |
+| `pack_forms` | 可选字符串数组，指定在 `"sqlite"` 布局下将多成员资产打包为 `.tar` 的资产形式（默认为 `costume-model`、`emoticon`、`fixture-model`、`live2d-model`、`live2d-motions`、`site-model`） |
 | `connections` | 可选，默认 8。同时进行的请求数 |
 | `secrets` | 存放访问密钥 ID 和私有访问密钥的密钥名。每个值从同名环境变量读取，或从 `--secrets` 目录中的同名文件读取 |
 
-存储桶的结构与本地输出相同：store 的每个对象位于 `<prefix>store/<aa>/<sha256>.<extension>`，指针位于 `<prefix>published/<区服>/<视图>/current.json`。请求用 AWS Signature Version 4 签名，密钥需要在该前缀下读、列出和写对象的权限。
+存储桶的结构与本地输出相同：store 的每个对象位于 `<prefix>store/<aa>/<sha256>.<extension>`，指针位于 `<prefix>published/<区服>/<视图>/current.json`。`store/` 下的不可变对象附带 `Cache-Control: public, max-age=31536000, immutable`，指针附带 `Cache-Control: no-cache`。请求用 AWS Signature Version 4 签名，密钥需要在该前缀下读、列出和写对象的权限。
 
-发布先向存储桶查询它引用的每个对象，只上传存储桶没有、或大小不同的对象。每次上传都用字节的 SHA-256 签名，这也是对象的名字，因此存储桶不会存下不匹配的字节。所有对象都在存储桶里之后才写指针，且只在指针改变时写，所以同一版本第二次发布不上传任何东西。失败时发布停止并报告失败的阶段名，旧指针保持不变；再运行一次只上传仍缺少的部分。
+发布首先读取存储桶当前的 `current.json` 指针。若它已指向本次发布，则不发起任何对象请求。否则，本地 store 所描述的线上发布中的对象视为已存在，其余每个对象用一次 `HEAD` 请求查询；当这样需要的请求更多时，改为列出 store 的 256 个目录（`ListObjectsV2`，每个连接一个目录）来查找。`update --verify` 既不信任指针也不信任本地 store：它列出整个 store，上传存储桶缺少或大小不符的每个对象，并且在版本未变时也会运行。每次上传都用字节的 SHA-256 签名，这也是对象的名字，因此存储桶不会存下不匹配的字节。所有对象都在存储桶里之后才写指针，且只在指针改变时写。失败时发布停止并报告失败的阶段名，旧指针保持不变；再运行一次只上传仍缺少的部分。
 
 ## 求值与发布的组合
 

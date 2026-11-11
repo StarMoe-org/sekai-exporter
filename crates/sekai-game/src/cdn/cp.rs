@@ -12,7 +12,7 @@ use super::crypto::{Keys, Secrets};
 use super::discover::{Candidate, first_confirmed};
 use super::http::{self, Failure, Headers, Http};
 use super::manifest::{self, Declared};
-use super::region::{Region, render};
+use super::region::{Region, render, url_path};
 use super::{BundleEntry, Source, SourceError};
 use crate::sink::Sink;
 
@@ -260,7 +260,7 @@ impl Cp {
                 ("asset_version", asset_version),
                 ("asset_hash", asset_hash),
                 ("platform", &self.region.platform),
-                ("bundle", bundle),
+                ("bundle", &url_path(bundle)),
             ],
         )
     }
@@ -302,8 +302,8 @@ impl Source for Cp {
                 }
                 other => other?,
             };
-            let expected = http::content_length(&response);
-            http::copy(&url, response, sink, expected)
+            let expected = response.content_length();
+            self.http.copy(&url, response, sink, expected)
         })
     }
 }

@@ -172,4 +172,4 @@ Tests on synthetic tables and assets cover the roles and their defaults, the col
 
 ## 6. Version
 
-`costume-model`, `costume-motion`, `costume-role` and `costume`: version 1. A change to any of the above, or to a format they use, changes the version.
+`costume-model`: version 2, for version 2 of [model files](model.md). `costume-motion`, `costume-role` and `costume`: version 1. A change to any of the above, or to a format they use, changes the version.

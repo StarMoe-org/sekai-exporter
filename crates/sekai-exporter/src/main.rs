@@ -1,5 +1,10 @@
 //! The command-line program of the exporter.
 
+/// Conversions allocate and free large buffers on every thread. mimalloc keeps freed memory for
+/// the next allocation instead of returning it to the system and faulting it in again.
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod budget;
 #[cfg(feature = "client")]
 mod client;
@@ -32,7 +37,7 @@ mod storage {
     use sekai_catalog::{Derivations, LocalStore};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
-    use sekai_pipeline::Evaluation;
+    use sekai_publish::Plan;
 
     use crate::monitor::Monitor;
 
@@ -57,7 +62,7 @@ mod storage {
 
     /// Refuses to publish a view that this build does not have.
     pub(crate) fn publish(
-        _evaluation: &Evaluation,
+        _index: &Plan,
         _version: &str,
         _root: &Path,
         _store: &LocalStore,
@@ -95,11 +100,12 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
-         [--plain] [--force]
+         [--plain] [--force] [--verify]
       Bring <output> up to the current version of a region of the configuration.
       Bundles go to <output>/inputs, which holds game data and must stay private.
       A version that matches the last complete run is left alone unless --force
-      is given. --only selects bundles by name prefix, with their dependencies.
+      or --verify is given. --verify checks the bucket against a listing of its
+      store and uploads what it lacks, whatever its pointer says. --only selects bundles by name prefix, with their dependencies.
       A selection is neither recorded as a version nor sent to a bucket; it needs
       an <output> without a complete run and empty --tree and --storage folders.
   account <region> --config <file> --secrets <dir>

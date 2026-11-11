@@ -54,7 +54,7 @@
 
 ## 4. 容器
 
-`image` 成员是已解码内容，由求值器按 `texture` 形式编码其图像的方式编码：8 位图像用无损 WebP，HDR 图像用 OpenEXR。`sprite` 成员是成品字节，即 JSON 文件。
+`image` 成员是已解码内容，由求值器按 `texture` 形式编码其图像的方式编码：8 位图像用 PNG，HDR 图像用 OpenEXR。`sprite` 成员是成品字节，即 JSON 文件。
 
 ## 5. 正确性
 

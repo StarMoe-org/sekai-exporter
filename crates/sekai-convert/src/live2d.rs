@@ -36,6 +36,10 @@ impl Converter for Model {
         2
     }
 
+    fn encoders(&self) -> crate::Encoders {
+        crate::Encoders::IMAGE
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

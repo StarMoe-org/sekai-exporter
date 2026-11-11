@@ -1,0 +1,16 @@
+[package]
+name = "rusty_mp3"
+version = "0.6.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs"
+authors = ["Mata Network <https://www.mata.network>"]
+homepage = "https://github.com/Remade-With-Rust/remade_ffmpeg_rs"
+description = "Pure-Rust MP3 (MPEG-1/2/2.5 Layer III) decoder + encoder, no C/FFI. Decoder bit-exact vs FFmpeg; the first pure-Rust MP3 encoder (CBR/VBR, joint stereo, bit reservoir)."
+readme = "README.md"
+keywords = ["mp3", "audio", "codec", "decoder", "encoder"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+rust-version = "1.85"
+
+[dependencies]
+libm = "0.2"

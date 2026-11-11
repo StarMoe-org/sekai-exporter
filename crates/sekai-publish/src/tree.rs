@@ -13,6 +13,7 @@ use sekai_catalog::LocalStore;
 use sekai_format::publication::{TreeEntry, TreeListing, VERSION};
 use serde::{Deserialize, Serialize};
 
+use crate::parallel;
 use crate::plan::{Plan, PublishError, hex};
 
 const LISTING: &str = "_listing.json";
@@ -52,9 +53,14 @@ pub struct TreeReport {
     pub deleted: usize,
 }
 
-/// Publishes `plan` as a tree at `root`. The files of an asset that could not be produced keep
-/// their previous bytes until a conversion succeeds.
-pub fn publish(store: &LocalStore, root: &Path, plan: &Plan) -> Result<TreeReport, PublishError> {
+/// Publishes `plan` as a tree at `root`, writing files on up to `threads` threads. The files of
+/// an asset that could not be produced keep their previous bytes until a conversion succeeds.
+pub fn publish(
+    store: &LocalStore,
+    root: &Path,
+    plan: &Plan,
+    threads: usize,
+) -> Result<TreeReport, PublishError> {
     let wrap = PublishError::wrap("files");
     std::fs::create_dir_all(root).map_err(&wrap)?;
     let previous: Option<TreeListing> = read_json(&root.join(LISTING)).map_err(&wrap)?;
@@ -91,6 +97,7 @@ pub fn publish(store: &LocalStore, root: &Path, plan: &Plan) -> Result<TreeRepor
         .map(|e| (e.path.as_str(), e.sha256.as_str()))
         .collect();
     let mut report = TreeReport::default();
+    let mut writes = Vec::new();
     for file in &plan.files {
         let Some(entry) = entries.get(&file.path) else {
             continue;
@@ -103,12 +110,15 @@ pub fn publish(store: &LocalStore, root: &Path, plan: &Plan) -> Result<TreeRepor
             report.unchanged += 1;
             continue;
         }
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(&wrap)?;
-        }
-        store.materialize(&file.key, &destination).map_err(&wrap)?;
-        report.written += 1;
+        writes.push((&file.key, destination));
     }
+    parallel::map(&writes, threads, |(key, destination)| {
+        store.materialize(key, destination)
+    })
+    .into_iter()
+    .collect::<io::Result<()>>()
+    .map_err(&wrap)?;
+    report.written = writes.len();
 
     let listing = TreeListing {
         format: "tree-listing".to_owned(),

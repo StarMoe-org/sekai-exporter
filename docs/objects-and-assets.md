@@ -68,7 +68,7 @@ The container differs as well. One user wants FBX, another glTF, another USD. Ev
 - If that runtime reproduces the game, the game defines the asset, because the runtime needs the game's meaning: what the shader parameters do, how the state machine runs, which value a script treats as its default. The exporter then has to reproduce the game's semantics faithfully.
 - If that runtime is a viewer or an editor, the program defines the asset. What it can render, import and play is what the asset should contain, and the game's semantics matter only as far as they change what you see.
 
-Open standards (PNG, WebP, FLAC, glTF, JSON) define the container and its rules, such as glTF's right-handed coordinates and top-down texture rows. They say nothing about which content goes inside.
+Open standards (PNG, WebP, MP3, glTF, JSON) define the container and its rules, such as glTF's right-handed coordinates and top-down texture rows. They say nothing about which content goes inside.
 
 So an asset form is a decision: *this* closure of objects, interpreted *this* way, written in *this* container, for *this* runtime. Every asset form in this repository is written down as a specification that states what is exported, for which use, and why the result is correct for it.
 

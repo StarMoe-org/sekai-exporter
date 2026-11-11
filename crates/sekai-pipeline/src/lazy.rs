@@ -4,15 +4,19 @@
 //! streaming evaluator computes them: the bundle with every bundle it depends on. A request opens
 //! only that window and converts and encodes one asset. It uses no threads of its own.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use sekai_catalog::Derived;
 
+use crate::canonical::Files;
 use crate::eval::{self, Output};
 use crate::stream::{Entry, Inputs, PARSED_BYTES, Root, Stream, Units, plan_unit};
 use crate::version::{BundleError, Parsed, Version};
+
+/// Maximum number of unit windows kept open in the LRU cache.
+const MAX_OPEN_WINDOWS: usize = 16;
 
 #[derive(Default)]
 struct State {
@@ -20,6 +24,14 @@ struct State {
     running: BTreeSet<[u8; 32]>,
     /// The assets that failed: they are not recorded, so they are remembered here.
     failed: BTreeMap<[u8; 32], (Derived, String)>,
+}
+
+#[derive(Default)]
+struct Windows<'a> {
+    /// Most-recently-used windows, newest at the back.
+    recent: VecDeque<Arc<Opened<'a>>>,
+    /// Units currently being opened by a thread.
+    opening: BTreeSet<usize>,
 }
 
 /// The window of a unit, opened, with the assets of its bundle.
@@ -38,10 +50,30 @@ pub struct Lazy<'a> {
     inputs: &'a dyn Inputs,
     stream: Stream<'a>,
     parsed: Arc<Parsed>,
-    /// The unit opened last.
-    recent: Mutex<Option<Arc<Opened<'a>>>>,
+    windows: Mutex<Windows<'a>>,
+    window_ready: Condvar,
     state: Mutex<State>,
     finished: Condvar,
+}
+
+impl Drop for Lazy<'_> {
+    fn drop(&mut self) {
+        let _ = self.stream.derivations.flush();
+    }
+}
+
+/// A unit window being opened; released when dropped.
+struct Opening<'l, 'a> {
+    unit: usize,
+    windows: &'l Mutex<Windows<'a>>,
+    ready: &'l Condvar,
+}
+
+impl Drop for Opening<'_, '_> {
+    fn drop(&mut self) {
+        lock(self.windows).opening.remove(&self.unit);
+        self.ready.notify_all();
+    }
 }
 
 /// A fingerprint being computed; it is released when this is dropped.
@@ -65,17 +97,23 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 impl<'a> Lazy<'a> {
     /// Prepares the bundles of `manifest`, whose bytes come from `inputs`, for requests. Nothing
     /// is read before the first request. Of `stream`, the converters, naming, store, records,
-    /// indexes, block cache, recorder and memory limit are used.
+    /// indexes, block cache, classes, fusion, recorder and memory limit are used.
     pub fn new(manifest: &'a [Entry], inputs: &'a dyn Inputs, stream: Stream<'a>) -> Self {
         Self {
             units: Units::new(manifest),
             inputs,
             stream,
             parsed: Arc::new(Parsed::new(PARSED_BYTES)),
-            recent: Mutex::default(),
+            windows: Mutex::default(),
+            window_ready: Condvar::new(),
             state: Mutex::default(),
             finished: Condvar::new(),
         }
+    }
+
+    /// Flushes any buffered derivation records to persistent storage.
+    pub fn flush(&self) -> io::Result<()> {
+        self.stream.derivations.flush()
     }
 
     /// Manifest entries that cannot be evaluated, in order of name.
@@ -161,9 +199,28 @@ impl<'a> Lazy<'a> {
 
     /// Opens the window of `unit` and plans the assets of its bundle.
     fn open(&self, unit: usize) -> io::Result<Arc<Opened<'a>>> {
-        if let Some(opened) = lock(&self.recent).as_ref().filter(|o| o.unit == unit) {
-            return Ok(opened.clone());
+        let mut windows = lock(&self.windows);
+        loop {
+            if let Some(idx) = windows.recent.iter().position(|o| o.unit == unit) {
+                let opened = windows.recent.remove(idx).expect("index came from recent");
+                windows.recent.push_back(opened.clone());
+                return Ok(opened);
+            }
+            if windows.opening.insert(unit) {
+                break;
+            }
+            windows = self
+                .window_ready
+                .wait(windows)
+                .unwrap_or_else(PoisonError::into_inner);
         }
+        drop(windows);
+        let _opening = Opening {
+            unit,
+            windows: &self.windows,
+            ready: &self.window_ready,
+        };
+
         let mut errors = Vec::new();
         let mut inputs = Vec::new();
         for &entry in &self.units.windows[unit] {
@@ -203,14 +260,10 @@ impl<'a> Lazy<'a> {
                     .iter()
                     .filter_map(|&entry| position(entry))
                     .collect();
-                let resources: Vec<Vec<[u8; 32]>> = (0..index.bundles().len())
-                    .map(|b| version.resource_hashes(b))
-                    .collect();
                 plan_unit(
                     &version,
                     bundle,
                     &window,
-                    &resources,
                     &self.stream,
                     None,
                     &mut roots,
@@ -228,7 +281,11 @@ impl<'a> Lazy<'a> {
             unnamed,
             errors,
         });
-        *lock(&self.recent) = Some(opened.clone());
+        let mut windows = lock(&self.windows);
+        if windows.recent.len() >= MAX_OPEN_WINDOWS {
+            windows.recent.pop_front();
+        }
+        windows.recent.push_back(opened.clone());
         Ok(opened)
     }
 
@@ -278,25 +335,26 @@ impl<'a> Lazy<'a> {
             state: &self.state,
             finished: &self.finished,
         };
-        let (derived, error) = match root.refusal(&opened.version, self.stream.limit) {
-            Some(error) => {
-                let code = error.code.clone();
-                let document = eval::document(
-                    &root.planned,
-                    &opened.version,
-                    self.stream.store,
-                    Vec::new(),
-                    error,
-                )?;
-                (Derived::Document(document), Some(code))
-            }
-            None => eval::derive(
+        let stored = match root.refusal(&opened.version, self.stream.limit) {
+            Some(error) => Some(eval::document(
                 &root.planned,
                 &opened.version,
                 self.stream.store,
-                self.stream.recorder,
+                Vec::new(),
+                error,
+            )?),
+            None => eval::derive(
+                &root.planned,
+                &opened.version,
+                Files {
+                    store: self.stream.store,
+                    records: Some(self.stream.derivations),
+                    recorder: self.stream.recorder,
+                },
+                self.stream.fusion,
             )?,
         };
+        let (derived, error) = eval::outcome(stored.as_ref());
         match &error {
             Some(code) => {
                 lock(&self.state)
@@ -305,7 +363,6 @@ impl<'a> Lazy<'a> {
             }
             None => {
                 self.stream.derivations.put(fingerprint, derived.clone())?;
-                self.stream.derivations.flush()?;
             }
         }
         Ok((derived, error))

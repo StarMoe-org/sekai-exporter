@@ -342,3 +342,101 @@ fn a_request_reads_only_the_bundles_of_its_closure() {
         "{touched:?} is outside {closure:?}"
     );
 }
+
+#[test]
+fn alternating_bundles_reuse_cached_windows_and_forward_fusion_and_batched_flush() {
+    use sekai_catalog::{Derivations, Derived};
+    use sekai_convert::Asset;
+    use sekai_pipeline::Fusion;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct OpenCounter(AtomicUsize);
+    impl Inputs for OpenCounter {
+        fn open(&self, name: &str) -> io::Result<BundleInput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(input(name))
+        }
+    }
+
+    struct FlushCounter {
+        inner: MemoryDerivations,
+        flushes: AtomicUsize,
+    }
+    impl Derivations for FlushCounter {
+        fn get(&self, fp: &[u8; 32]) -> io::Result<Option<Derived>> {
+            self.inner.get(fp)
+        }
+        fn put(&self, fp: [u8; 32], d: Derived) -> io::Result<()> {
+            self.inner.put(fp, d)
+        }
+        fn flush(&self) -> io::Result<()> {
+            self.flushes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    struct CountFusion(AtomicUsize);
+    impl Fusion for CountFusion {
+        fn extra(&self, _asset: &Asset, _document: &AssetDocument) -> io::Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let open_counter = OpenCounter(AtomicUsize::new(0));
+    let derivations = FlushCounter {
+        inner: MemoryDerivations::default(),
+        flushes: AtomicUsize::new(0),
+    };
+    let fusion = CountFusion(AtomicUsize::new(0));
+    let converters = converters();
+    let manifest = manifest();
+    let memory = MemoryStore::default();
+    let mut ctx = context(
+        &converters,
+        &memory,
+        &derivations.inner,
+        &NoBundleIndexes,
+        &NoRecorder,
+    );
+    ctx.derivations = &derivations;
+    ctx.fusion = Some(&fusion);
+    let lazy = Lazy::new(&manifest, &open_counter, ctx);
+
+    let bundle_list: Vec<String> = lazy.bundles().map(str::to_owned).collect();
+    assert!(bundle_list.len() >= 2);
+    // Warm the window cache across bundles, then alternate repeatedly without re-opening inputs.
+    for b in &bundle_list {
+        let _ = lazy.names(b).unwrap();
+    }
+    let opens_after_warm = open_counter.0.load(Ordering::SeqCst);
+    for _ in 0..4 {
+        for b in &bundle_list {
+            let _ = lazy.names(b).unwrap();
+        }
+    }
+    assert_eq!(
+        open_counter.0.load(Ordering::SeqCst),
+        opens_after_warm,
+        "cached windows must not reopen inputs on alternating bundle requests"
+    );
+
+    let all_names = names(&lazy);
+    assert!(!all_names.is_empty());
+    let out = lazy.asset(&all_names[0]).unwrap().unwrap();
+    assert!(out.error.is_none());
+    assert_eq!(
+        fusion.0.load(Ordering::SeqCst),
+        1,
+        "Lazy must forward Fusion"
+    );
+    assert_eq!(
+        derivations.flushes.load(Ordering::SeqCst),
+        0,
+        "Lazy must not flush per asset"
+    );
+    lazy.flush().unwrap();
+    assert_eq!(derivations.flushes.load(Ordering::SeqCst), 1);
+    drop(lazy);
+    assert_eq!(derivations.flushes.load(Ordering::SeqCst), 2);
+}

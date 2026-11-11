@@ -179,6 +179,20 @@ pub(super) fn render(template: &str, values: &[(&str, &str)]) -> String {
     text
 }
 
+/// `path` as it is written in a URL: every byte except `/` and the unreserved characters of
+/// RFC 3986 becomes `%XX`, so that a name with a space or a non-ASCII character is a valid URI.
+pub(super) fn url_path(path: &str) -> String {
+    let mut text = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~/".contains(&byte) {
+            text.push(char::from(byte));
+        } else {
+            text.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,5 +231,11 @@ mod tests {
     #[test]
     fn templates_replace_every_name() {
         assert_eq!(render("{a}/{b}/{a}", &[("a", "1"), ("b", "2")]), "1/2/1");
+    }
+
+    #[test]
+    fn url_paths_escape_what_a_uri_does_not_allow() {
+        assert_eq!(url_path("effect/material 1"), "effect/material%201");
+        assert_eq!(url_path("a-b_c.d~e/é"), "a-b_c.d~e/%C3%A9");
     }
 }

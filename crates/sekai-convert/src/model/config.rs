@@ -12,10 +12,6 @@ pub struct ModelConfig<'a> {
     /// Whether texture coordinates are written with `v` flipped, for images stored from their
     /// first row.
     pub flip_uv: bool,
-    /// Whether [`EXT_TEXTURE_WEBP`](sekai_format::gltf::EXT_TEXTURE_WEBP) is declared as an
-    /// extension the file uses and requires. When it is not, each texture names its image
-    /// directly.
-    pub declare_webp: bool,
     /// The keys the form adds to the extras of each node, when it adds any.
     pub node_keys: Option<&'a dyn NodeKeys>,
     /// The keys the form adds to the extras of each material, when it adds any.

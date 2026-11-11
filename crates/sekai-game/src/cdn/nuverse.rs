@@ -6,7 +6,7 @@ use super::crypto::{Keys, Secrets};
 use super::discover::{Candidate, first_confirmed};
 use super::http::{self, Headers, Http};
 use super::manifest::{self, Declared};
-use super::region::{Region, render};
+use super::region::{Region, render, url_path};
 use super::{BundleEntry, Source, SourceError};
 use crate::sink::Sink;
 
@@ -100,7 +100,7 @@ impl Nuverse {
                 ("platform", &self.region.platform),
                 ("value", value),
                 ("download_path", download_path),
-                ("bundle", bundle),
+                ("bundle", &url_path(bundle)),
             ],
         )
     }
@@ -137,7 +137,8 @@ impl Source for Nuverse {
                 Some(entry),
             );
             let response = self.http.get(&url, &Headers::new())?;
-            http::copy(&url, response, sink, Some(entry.size + MARKER_LEN))
+            self.http
+                .copy(&url, response, sink, Some(entry.size + MARKER_LEN))
         })
     }
 }

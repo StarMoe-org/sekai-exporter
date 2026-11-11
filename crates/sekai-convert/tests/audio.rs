@@ -2,11 +2,11 @@
 
 #![cfg(feature = "audio")]
 
-use sekai_codec::cri::{HcaKey, decode_hca, hca_info};
+use sekai_codec::cri::{HcaKey, decode_hca};
 use sekai_convert::audio::Audio;
 use sekai_convert::{
     Asset, Chunk, Content, Context, ConvertError, Converter, Cost, CostClass, Object, ObjectId,
-    ObjectIndex, PPtr, Pcm, Value,
+    ObjectIndex, PPtr, Pcm, Sound, Value,
 };
 use sekai_format::audio::CueTable;
 
@@ -233,13 +233,23 @@ fn convert(audio: Audio, data: Vec<u8>) -> Result<Option<Asset>, ConvertError> {
     audio.convert(ROOT, &Bundle(data))
 }
 
-fn members(asset: &Asset) -> Vec<(&str, &Pcm)> {
+/// The samples a sound decodes to.
+fn decoded(sound: &Sound) -> Pcm {
+    let mut samples = Vec::new();
+    sound
+        .decode_each(|block| samples.extend_from_slice(block))
+        .unwrap();
+    Pcm::new(sound.sample_rate(), sound.channels(), samples).unwrap()
+}
+
+/// Each member but the cue table, with the samples it decodes to.
+fn members(asset: &Asset) -> Vec<(&str, Pcm)> {
     asset
         .members
         .iter()
         .filter(|m| m.role != "cues")
         .map(|m| match &m.content {
-            Content::Audio(pcm) => (m.role.as_str(), pcm),
+            Content::Audio(sound) => (m.role.as_str(), decoded(sound)),
             other => panic!("not audio: {other:?}"),
         })
         .collect()
@@ -292,10 +302,10 @@ fn each_cue_is_a_member_and_each_variation_has_a_number() {
     assert_eq!(
         members(&asset),
         [
-            ("cue/mono", &mono),
-            ("cue/variations/1", &stereo),
-            ("cue/variations/2", &mono),
-            ("cue/stereo", &stereo),
+            ("cue/mono", mono.clone()),
+            ("cue/variations/1", stereo.clone()),
+            ("cue/variations/2", mono),
+            ("cue/stereo", stereo),
         ]
     );
 }
@@ -359,7 +369,7 @@ fn an_encrypted_stream_is_decrypted_with_the_key_and_the_bank_subkey() {
             subkey: SUBKEY,
         }),
     );
-    assert_eq!(members(&asset), [("cue/locked", &expected)]);
+    assert_eq!(members(&asset), [("cue/locked", expected.clone())]);
     assert_eq!(expected, plain("sine_stereo.hca", None));
 
     let e = convert(Audio::new(None), data).unwrap_err();
@@ -385,23 +395,15 @@ fn a_damaged_sheet_is_an_error() {
 }
 
 #[test]
-fn the_cost_counts_the_samples_of_every_member() {
-    let bytes = |name: &str| {
-        let info = hca_info(&hca(name)).unwrap();
-        info.frames * u64::from(info.channels) * 2
-    };
-    // The members are mono, stereo and mono again, and stereo.
-    let samples = 2 * (bytes("sine_mono.hca") + bytes("sine_stereo.hca"));
-    let data = sheet(&[(1, 0, "mono"), (2, 0, "variations"), (1, 1, "stereo")], 0);
+fn the_cost_is_five_times_the_sheet() {
     let mut object = index(49);
     object.size = 1000;
+    let data = sheet(&[(1, 0, "mono")], 0);
     assert_eq!(
         Audio::new(None).cost(ROOT, &object, &Bundle(data)),
         Cost {
             class: CostClass::Heavy,
-            memory: 2 * 1000 + samples + samples / 2,
+            memory: 5 * 1000,
         }
     );
-    let damaged = Audio::new(None).cost(ROOT, &object, &Bundle(b"not a sheet".to_vec()));
-    assert_eq!(damaged.memory, 4 * 1000);
 }

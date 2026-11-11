@@ -12,7 +12,16 @@
 
 读取方从 `<区服>/<视图>/current.json` 开始，沿 `root` 找到索引根，再沿某目录的分片找到该目录的条目。索引根、分片与列表都是 store 中的对象，以其 SHA-256 命名。
 
-**指针**包含键 `format`（`"pointer"`）、`version`、`published_version`、`revision` 与 `root`。
+**指针**包含键 `format`（`"pointer"`）、`version`、`published_version`、`revision`、`root`，以及可选的 `sqlite`（`store/<aa>/<sha256>.sqlite` 的小写十六进制 SHA-256）。
+
+**`index.sqlite` 数据库**（`store/<aa>/<sha256>.sqlite`）是一份不可变、内容寻址的 SQLite 3 数据库（`page_size = 4096`、UTF-8、schema format 4、`user_version = 1`），自底向上紧凑构建、无空闲列表页，使静态 HTTP `Range`（`206 Partial Content`）客户端（`sql.js-httpvfs`、`wa-sqlite`）在 1–3 次页读取内即可完成目录展开、精确路径查找、按资源包/形式筛选及完整资产溯源查询：
+
+- `meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID`：`format`（`"sqlite-index"`）、`published_version`、`revision`、`schema_version`（`"1"`）。
+- `bundles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, asset_count INTEGER NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL)`（`idx_bundles_name`）。
+- `forms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, form_version INTEGER NOT NULL, asset_count INTEGER NOT NULL, total_size INTEGER NOT NULL)`（`idx_forms_name`）。
+- `directories (parent TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL, PRIMARY KEY (parent, name)) WITHOUT ROWID`：各目录子树的递归文件数与总字节数。
+- `assets (id INTEGER PRIMARY KEY, bundle_id INTEGER NOT NULL, name TEXT NOT NULL, form_id INTEGER NOT NULL, fingerprint BLOB NOT NULL, total_size INTEGER NOT NULL, error_code TEXT, error_message TEXT, sources_json TEXT NOT NULL, resources_json TEXT NOT NULL, references_json TEXT NOT NULL)`（`idx_assets_name`、`idx_assets_bundle`、`idx_assets_form`、`idx_assets_error`）。
+- `files (dir TEXT NOT NULL, file_name TEXT NOT NULL, path TEXT NOT NULL, bundle_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, role TEXT NOT NULL, sha256 BLOB NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL, archive_sha256 BLOB, archive_offset INTEGER, PRIMARY KEY (dir, file_name)) WITHOUT ROWID`（`idx_files_path`、`idx_files_asset`）。独立媒体文件（`texture`、`sprite`、`audio`、`video`、`font`、`text`）保持 `archive_sha256 IS NULL`，直接存于 `store/<aa>/<sha256>.<extension>`；位于 `pack_forms`（`live2d-model`、`live2d-motions`、`costume-model`、`fixture-model`、`site-model`、`emoticon`）中的多成员复合资产打包为确定性无压缩 POSIX `ustar` 归档 `store/<aa>/<archive_sha256>.tar`，记录 512 字节对齐的载荷字节区间 `(archive_offset, size)`，同时支持单次 `GET` 整包加载与单次 `Range` 成员预览。
 
 **索引根**包含键 `format`（`"index-root"`）、`version`、`published_version`、`revision`、`shards`、`listings` 与 `failures`。`shards` 按目录顺序列出 `{ "directory", "sha256" }`，`listings` 按形式顺序列出 `{ "form", "sha256" }`。`failures` 为每个无法生成的资产列出 `{ "name", "code" }`。
 

@@ -1,6 +1,7 @@
 //! The resources of a run: CPU slots and the memory budget of the evaluation.
 
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
 
 use sekai_pipeline::Options;
 use sekai_pipeline::sched::Resident;
@@ -29,37 +30,69 @@ pub(crate) fn parse_bytes(text: &str) -> Result<u64, String> {
     value.checked_mul(1 << shift).ok_or_else(invalid)
 }
 
+/// How long one reading of the resident memory serves. The scheduler asks before it starts a
+/// job, and on some systems a reading walks every process of the system.
+const READING_LIFETIME: Duration = Duration::from_millis(50);
+
 /// The system information of this process, kept between reads.
-fn system() -> Option<&'static Mutex<(System, Pid)>> {
-    static SYSTEM: OnceLock<Option<Mutex<(System, Pid)>>> = OnceLock::new();
-    SYSTEM
-        .get_or_init(|| {
-            let pid = sysinfo::get_current_pid().ok()?;
-            Some(Mutex::new((System::new().ok()?, pid)))
-        })
-        .as_ref()
+struct Probe {
+    system: System,
+    pid: Pid,
+    /// The last reading of the resident memory and when it was taken.
+    reading: Option<(Instant, u64)>,
+}
+
+impl Probe {
+    fn get() -> Option<MutexGuard<'static, Self>> {
+        static PROBE: OnceLock<Option<Mutex<Probe>>> = OnceLock::new();
+        let probe = PROBE.get_or_init(|| {
+            Some(Mutex::new(Probe {
+                system: System::new().ok()?,
+                pid: sysinfo::get_current_pid().ok()?,
+                reading: None,
+            }))
+        });
+        Some(
+            probe
+                .as_ref()?
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// The resident memory, read again when the last reading is too old.
+    fn resident(&mut self) -> u64 {
+        match self.reading {
+            Some((taken, bytes)) if taken.elapsed() < READING_LIFETIME => bytes,
+            _ => {
+                let kind = ProcessRefreshKind::nothing().with_memory();
+                let pid = self.pid;
+                self.system.refresh_processes_specifics(
+                    ProcessesToUpdate::Some(&[pid]),
+                    true,
+                    kind,
+                );
+                let bytes = self
+                    .system
+                    .process(pid)
+                    .map_or(0, |process| process.memory());
+                self.reading = Some((Instant::now(), bytes));
+                bytes
+            }
+        }
+    }
 }
 
 /// The resident memory of this process, or 0 when it cannot be read.
 fn resident() -> u64 {
-    let Some(system) = system() else {
-        return 0;
-    };
-    let mut guard = system.lock().unwrap_or_else(PoisonError::into_inner);
-    let (system, pid) = &mut *guard;
-    let kind = ProcessRefreshKind::nothing().with_memory();
-    system.refresh_processes_specifics(ProcessesToUpdate::Some(&[*pid]), true, kind);
-    system.process(*pid).map_or(0, |process| process.memory())
+    Probe::get().map_or(0, |mut probe| probe.resident())
 }
 
 /// The physical memory of the machine and the resident memory of this process, when known.
 fn memory_now() -> Option<(u64, u64)> {
-    let total = {
-        let mut guard = system()?.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.0.refresh_memory();
-        guard.0.total_memory()
-    };
-    Some((total, resident()))
+    let mut probe = Probe::get()?;
+    probe.system.refresh_memory();
+    Some((probe.system.total_memory(), probe.resident()))
 }
 
 /// The memory left to the derivations of a process that may use `process` bytes in all, of which

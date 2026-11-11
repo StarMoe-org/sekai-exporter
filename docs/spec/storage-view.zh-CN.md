@@ -1,6 +1,6 @@
 # storage 视图
 
-`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update --storage <目录>` 发布该视图。视图版本：1。
+`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update --storage <目录>` 发布该视图。视图版本：2。
 
 ## 1. 运行时
 
@@ -10,7 +10,7 @@
 
 | 资产形式 | 文件 |
 |---|---|
-| `texture`、`sprite` | 图像的 `<file>.webp` 与 `<file>.png` |
+| `texture`、`sprite` | 图像的 `<file>.png` 与 `<file>.webp` |
 | `audio` | 每个 cue 一个 `<cue>.mp3`；有多个波形的 cue，其余为 `<cue>_2.mp3` 等 |
 | `video` | `<base>.mp4` |
 | `scenario` | `<file>.json` |
@@ -31,9 +31,9 @@
 
 | 文件 | 参数 |
 |---|---|
-| WebP | 规范层的无损成员，不作改动 |
-| PNG | WebP 成员的像素，8 位 RGBA，`png` 编码器 |
-| MP3 | FLAC 成员的采样，320 kb/s 恒定码率，LAME，带记录编码延迟与补齐的标签帧 |
+| PNG | 规范层成员，不作改动 |
+| WebP | PNG 成员的像素，有损，libwebp 质量因子 75、方法 5，`webp` 编码器 |
+| MP3 | 规范成员，原样不变；见[音频](audio.zh-CN.md) |
 | MP4 | 规范层成员，不作改动；见[视频](video.zh-CN.md) |
 | JSON 与文本 | 规范层成员，不作改动 |
 
@@ -50,3 +50,4 @@
 | 版本 | 变更 |
 |---|---|
 | 1 | 第一版 |
+| 2 | 图片为规范 PNG 及由其生成的 WebP；声音为规范 MP3 |

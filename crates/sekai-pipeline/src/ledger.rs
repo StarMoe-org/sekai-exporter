@@ -105,6 +105,20 @@ impl Tally {
         }
     }
 
+    /// Adds what `other`, the account of the same bundle that another segment kept, counted.
+    pub(crate) fn absorb(&mut self, other: Tally) {
+        let Tally {
+            ledger,
+            rest,
+            read,
+            resources_read,
+        } = other;
+        self.ledger = self.ledger.take().or(ledger);
+        self.rest.extend(rest);
+        self.read.extend(read);
+        self.resources_read.extend(resources_read);
+    }
+
     /// The ledger of the bundle, once no conversion can read from it any more. `None` if its
     /// objects were never counted.
     pub(crate) fn settle(self) -> Option<BundleLedger> {

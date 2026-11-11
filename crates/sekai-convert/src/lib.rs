@@ -4,13 +4,13 @@
 //! an asset. It does not read files, choose output paths or write to the catalog: it reads
 //! through a [`Context`] and returns an [`Asset`], and the evaluator does the rest.
 //!
-//! An asset is a list of members. A member is decoded content (a [`Surface`] or [`Pcm`]),
-//! which the evaluator encodes in the forms the run needs, or finished bytes such as a JSON
-//! document or a GLB file.
+//! An asset is a list of members. A member is decoded content (a [`Surface`], or a [`Sound`]
+//! that decodes while it is encoded), which the evaluator encodes in the forms the run needs, or
+//! finished bytes such as a JSON document or a GLB file.
 
 use std::fmt;
 
-pub use sekai_codec::{DecodeError, HdrSurface, Movie, Pcm, Surface};
+pub use sekai_codec::{DecodeError, HdrSurface, Movie, Pcm, Sound, Surface};
 pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
 pub use sekai_unity::{Chunk, Value};
 
@@ -45,6 +45,15 @@ pub trait Converter: Send + Sync {
 
     /// The converter version. It changes only when the converter's output changes.
     fn version(&self) -> u32;
+
+    /// Which canonical media encoders this converter's members may use.
+    ///
+    /// A declared encoder that loses information, the video encoder, is part of the fingerprints
+    /// of the form. Producing a member whose encoder was not declared fails the asset with
+    /// `undeclared_encoder`.
+    fn encoders(&self) -> Encoders {
+        Encoders::NONE
+    }
 
     /// Whether `object` is the root of an asset of this form. `script` is the script the object
     /// refers to, as in [`Object::script`]: `"<assembly>/<namespace>.<class>"`, or `None` when
@@ -84,6 +93,50 @@ pub trait Converter: Send + Sync {
         let _ = (root, cx);
         Cost::light(u64::from(object.size))
     }
+}
+
+/// Which canonical media encoders a [`Converter`] may rely on when encoding its members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Encoders {
+    /// PNG (`Content::Image`).
+    pub image: bool,
+    /// OpenEXR (`Content::HdrImage`).
+    pub hdr_image: bool,
+    /// MP3 (`Content::Audio`).
+    pub audio: bool,
+    /// MP4 (`Content::Video`).
+    pub video: bool,
+}
+
+impl Encoders {
+    /// No media encoders (`Content::File` only).
+    pub const NONE: Self = Self {
+        image: false,
+        hdr_image: false,
+        audio: false,
+        video: false,
+    };
+    /// PNG (`Content::Image`).
+    pub const IMAGE: Self = Self {
+        image: true,
+        ..Self::NONE
+    };
+    /// PNG and OpenEXR (`Content::Image` and `Content::HdrImage`).
+    pub const TEXTURE: Self = Self {
+        image: true,
+        hdr_image: true,
+        ..Self::NONE
+    };
+    /// MP3 (`Content::Audio`).
+    pub const AUDIO: Self = Self {
+        audio: true,
+        ..Self::NONE
+    };
+    /// MP4 (`Content::Video`).
+    pub const VIDEO: Self = Self {
+        video: true,
+        ..Self::NONE
+    };
 }
 
 /// How converting and encoding an asset uses the processor.
@@ -212,7 +265,7 @@ pub enum Content {
     /// An HDR image, encoded by the evaluator.
     HdrImage(HdrSurface),
     /// Audio, encoded by the evaluator.
-    Audio(Pcm),
+    Audio(Sound),
     /// A video, encoded by the evaluator.
     Video(Movie),
     /// Finished bytes, written as they are.

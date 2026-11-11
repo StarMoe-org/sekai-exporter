@@ -30,6 +30,7 @@ lexopt = "0.3.2"
 serde_json = "1"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }
 cpu-time = "1.0.0"
+mimalloc = { version = "0.1", default-features = false }
 
 [features]
 image = ["sekai-convert/image"]
@@ -48,7 +49,6 @@ virtual-live = ["sekai-moesekai/virtual-live"]
 costume = ["sekai-moesekai/costume"]
 storage-view = ["sekai-moesekai/storage-view"]
 webp = ["sekai-encode/webp"]
-mp3 = ["sekai-encode/mp3"]
 aac = ["sekai-encode/aac"]
 cdn = ["sekai-game/cdn", "catalog-db"]
 client = ["sekai-game/client", "dep:sekai-layouts"]
@@ -56,7 +56,7 @@ s3 = ["sekai-publish/s3"]
 catalog-db = ["sekai-catalog/catalog-db"]
 mysekai = ["dep:sekai-mysekai"]
 serve = []
-default = ["cdn", "catalog-db", "image", "audio", "video", "model", "animation", "live2d", "text", "scenario", "episode", "virtual-live", "costume", "storage-view", "webp", "mp3", "aac"]
+default = ["cdn", "catalog-db", "image", "audio", "video", "model", "animation", "live2d", "text", "scenario", "episode", "virtual-live", "costume", "storage-view", "webp", "aac"]
 preset-mysekai = ["default", "mysekai"]
 preset-client = ["default", "client"]
 full = ["default", "mysekai", "client", "s3", "serve"]

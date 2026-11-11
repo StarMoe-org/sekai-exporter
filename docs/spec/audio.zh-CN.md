@@ -2,7 +2,7 @@
 
 [English](audio.md)
 
-`audio` 形式是 CRI cue sheet（ACB）中每个 cue 的声音，以 PCM 保存。转换器：`sekai-convert` 中的 `audio`（feature `audio`）。形式版本：3。
+`audio` 形式是 CRI cue sheet（ACB）中每个 cue 的声音，以 MP3 保存。转换器：`sekai-convert` 中的 `audio`（feature `audio`）。形式版本：5。
 
 ## 1. 运行时
 
@@ -19,7 +19,7 @@
 
 一个 cue 的波形即其引用所到达的波形（直接到达，或经由合成器、序列或块序列到达），按 cue sheet 列出的顺序排列。cue 多次列出的同一波形只计一次，位置取其第一次出现处。
 
-这些成员都是 16 位 PCM，交错存放，采样率与声道数同流，且不含 HCA 头所声明的编码延迟与末尾填充。
+这些成员都是波形本身，采样率与声道数同流，且不含 HCA 头所声明的编码延迟与末尾填充。其文件是 MP3（见[容器](#4-容器)）；流相同的波形共用一个文件。
 
 最后一个成员是 cue 表：
 
@@ -76,7 +76,7 @@
 
 **读取的字段：** `m_Script`，其中保存 cue sheet。
 
-**Cue sheet。** 表从其 `Header` 表读取：`CueTable`、`CueNameTable`、`WaveformTable`、`WaveformExtensionDataTable`，以及 cue 的引用所到达的表（`SynthTable`、`SequenceTable`、`BlockSequenceTable`、`BlockTable`、`TrackTable`、`TrackEventTable`）。每个波形是表内存库（`AwbFile`，一个 AFS2 归档）中的 HCA 流，以其 `MemoryAwbId` 找到。
+**Cue sheet。** 表从其 `Header` 表读取：`CueTable`、`CueNameTable`、`WaveformTable`、`WaveformExtensionDataTable`，以及 cue 的引用所到达的表（`SynthTable`、`SequenceTable`、`BlockSequenceTable`、`BlockTable`、`TrackTable`、`TrackEventTable`）。每个波形是表内存库（`AwbFile`，一个 AFS2 归档）中的 HCA 流，以其 `MemoryAwbId` 找到。`WaveformTable` 为空的表没有波形。
 
 **循环。** 波形的循环来自其 HCA 头的 `loop` 块：它从采样 `起始帧 × 1024 + 起始延迟` 开始，在采样 `(结束帧 + 1) × 1024 − 结束填充` 之前结束，两者都减去编码延迟。在成员之内不给出范围的块不给出循环。
 
@@ -99,13 +99,27 @@
 
 ## 4. 容器
 
-波形成员是已解码内容，由求值器编码。规范文件是带 16 位采样的 FLAC，由 `flac` 编码器（版本 1）以该编码器的固定参数写出。需要其他容器的视图，例如 MP3 或 AAC，由同一批采样经其自身的编码器产生。cue 表是成品字节：UTF-8 JSON，无多余空白，键的顺序如上，缺省时省略 `loop`；音量写为能读回同一 32 位浮点数的最短十进制形式。
+转换器把每个波形交为它的 HCA 流，由求值器编码：`mp3` 编码器（版本 3）逐帧解码流，每解出一块采样就编码一块，因此一个波形的采样从不同时全部留在内存中。同一资产中流与密钥都相同的成员只编码一次。
+
+文件是固定码率的 MPEG 音频第三层：32、44.1 与 48 kHz 用 MPEG-1，更低的采样率用 MPEG-2 或 MPEG-2.5。码率是 HCA 流码率（帧大小 × 8 × 采样率 / 1024）的一倍半，向上取到该 MPEG 版本的一档码率，且不超过其最高档：MPEG-1 为 320 kb/s，MPEG-2 与 MPEG-2.5 为 160 kb/s。没有有损来源的采样取最高档。
+
+第一帧是 Info 帧，带 LAME 格式的标签，记录帧数、编码延迟（528 个采样，另加解码器的 529 个）与末尾填充。读取该标签的解码器，例如 ffmpeg 与 Symphonia，给出的正是波形的采样，因此 cue 表中的 `frames` 与 `loop` 数的就是解码后文件的采样。解码器只在标签的编码器字符串以其认识的名称开头时才采用标签，因此该字符串是 `LAME` 后接零字节。
+
+编码器是纯 Rust（见[第三方来源](../third-party.zh-CN.md)），所用函数的结果不随目标平台变化，因此同一波形在原生与 WebAssembly 构建中编码为相同字节。
+
+**为什么是 MP3。** HCA 是有损变换编码：参考解码器给出的采样就是流所含的全部内容。把这些采样存为无损文件（WAV 或 FLAC），只是原样保留一次解码的结果，并不增加任何解码器不能从流中重新得到的东西；而其大小取决于采样率与时长，而非流本身：48 kHz 16 位立体声的 WAV 为 1536 kb/s，FLAC 对有损编码留下的噪声压缩效果很差，所以文件是其来源流的数倍。HCA 流本身只能在有 CRI 解码器的地方播放。MP3 在所有浏览器与播放器中都能播放，记录了无缝播放所需的延迟与填充，并有输出固定的纯 Rust 编码器。导出器能用的 AAC 编码器是原生构建在运行时加载的 C 库，AAC 文件会随所装的库而变，也无法在 WebAssembly 中写出；Opus 只工作在 48 kHz，44.1 kHz 的波形需要重采样。
+
+把有损流再编码一次，会叠加第二种编码的误差。码率定在来源之上，使第二次损失相对第一次很小；码率又跟随来源，因此低码率的流不会变成很大的文件。需要波形精确采样的程序，可以用 `sekai-codec` 从资源包中解码其 HCA 流。
+
+cue 表是成品字节：UTF-8 JSON，无多余空白，键的顺序如上，缺省时省略 `loop`；音量写为能读回同一 32 位浮点数的最短十进制形式。
 
 ## 5. 正确性
 
 HCA 解码遵循参考解码器：相同的反量化、相同的强度与立体声重建、相同的逆变换，以及相同的 16 位转换（`(int)(f * 32767)`，截断）。cue sheet 读取器按参考播放器的方式跟随 cue 引用。
 
-解码器在专为测试制作的 HCA 文件上，与 vgmstream 逐采样比对，包括带与不带子密钥的加密文件（`crates/sekai-codec/tests`）；转换器在测试中构建的 cue sheet 上比对（`crates/sekai-convert/tests/audio.rs`）。在真实资源包上，读取器找到的流与 cue 名称用 `tools/compare-audio` 中的脚本与 vgmstream 比对，并且形式的每个成员都与 vgmstream 为同一波形解码出的流比对，同时比对 vgmstream 赋予该流的 cue 名称。
+解码器在专为测试制作的 HCA 文件上，与 vgmstream 逐采样比对，包括带与不带子密钥的加密文件（`crates/sekai-codec/tests`）；转换器在测试中构建的 cue sheet 上比对（`crates/sekai-convert/tests/audio.rs`）。在真实资源包上，读取器找到的流与 cue 名称用 `tools/compare-audio` 中的脚本与 vgmstream 比对，并且读取器找到的每个波形都经解码，与 vgmstream 为其解码出的流比对，同时比对 vgmstream 赋予该流的 cue 名称。
+
+MP3 编码器在 `crates/sekai-encode/tests/canonical.rs` 中检验：文件用 Symphonia 解码后的采样数与编码时完全相同且与原采样接近，码率符合上述规则，字节固定。`crates/sekai-codec/tests/cri.rs` 检验逐帧解码一个流与整体解码得到相同的采样。
 
 ## 6. 版本
 
@@ -114,3 +128,5 @@ HCA 解码遵循参考解码器：相同的反量化、相同的强度与立体�
 | 1 | 第一版 |
 | 2 | cue 表 |
 | 3 | 由轨道构成的 cue 的编配，以及块轨道在其层之下的音量 |
+| 4 | 波形为 MP3 文件，码率跟随流 |
+| 5 | 波形表为空的表没有波形，因此其 cue 都不播放任何声音的表不产生资产 |

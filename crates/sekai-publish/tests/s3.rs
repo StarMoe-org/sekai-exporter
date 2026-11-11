@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
-use sekai_publish::s3::{Bucket, Credentials, S3, publish};
+use sekai_publish::s3::{Bucket, Check, Credentials, S3, S3Layout, publish, publish_with};
 use sekai_publish::{Binding, Plan, plan};
 use sha2::{Digest, Sha256};
 
@@ -47,8 +47,40 @@ fn hmac(key: &[u8], message: &[u8]) -> Vec<u8> {
 struct Request {
     method: String,
     path: String,
+    /// The query parameters, decoded, in name order.
+    query: BTreeMap<String, String>,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
+}
+
+/// `text` with every `%XX` replaced by its byte.
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            out.push(u8::from_str_radix(&text[i + 1..i + 3], 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
+/// Every byte of `text` except unreserved characters as `%XX`.
+fn encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                char::from(b).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
 }
 
 impl Request {
@@ -74,7 +106,12 @@ impl Request {
             return false;
         }
         let payload = self.headers["x-amz-content-sha256"].as_str();
-        let mut canonical = format!("{}\n{}\n\n", self.method, self.path);
+        let query: Vec<String> = self
+            .query
+            .iter()
+            .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
+            .collect();
+        let mut canonical = format!("{}\n{}\n{}\n", self.method, self.path, query.join("&"));
         for name in signed.split(';') {
             canonical.push_str(&format!("{name}:{}\n", self.headers[name].trim()));
         }
@@ -97,7 +134,10 @@ impl Request {
 #[derive(Default)]
 struct State {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
+    cache_controls: Mutex<BTreeMap<String, String>>,
+    heads: AtomicUsize,
     puts: AtomicUsize,
+    lists: AtomicUsize,
     /// Uploads of objects other than pointers are refused once this many have been accepted.
     refuse_after: Mutex<Option<usize>>,
 }
@@ -145,6 +185,39 @@ impl Server {
     fn refuse_after(&self, uploads: Option<usize>) {
         *self.state.refuse_after.lock().unwrap() = uploads;
     }
+
+    fn remove(&self, name: &str) {
+        self.state.objects.lock().unwrap().remove(name);
+    }
+}
+
+/// The names in a listing page.
+const PAGE: usize = 2;
+
+/// A `ListObjectsV2` page of the names under `prefix` after the continuation token `after`.
+fn list(state: &State, prefix: &str, after: Option<&String>) -> Vec<u8> {
+    let objects = state.objects.lock().unwrap();
+    let mut names = objects
+        .range(prefix.to_owned()..)
+        .take_while(|(name, _)| name.starts_with(prefix))
+        .filter(|(name, _)| after.is_none_or(|after| *name > after));
+    let page: Vec<_> = names.by_ref().take(PAGE).collect();
+    let mut xml = String::from("<ListBucketResult>");
+    for (name, bytes) in &page {
+        xml.push_str(&format!(
+            "<Contents><Key>{}</Key><Size>{}</Size></Contents>",
+            name.replace('&', "&amp;"),
+            bytes.len()
+        ));
+    }
+    match (names.next(), page.last()) {
+        (Some(_), Some((last, _))) => xml.push_str(&format!(
+            "<IsTruncated>true</IsTruncated><NextContinuationToken>{last}</NextContinuationToken>"
+        )),
+        _ => xml.push_str("<IsTruncated>false</IsTruncated>"),
+    }
+    xml.push_str("</ListBucketResult>");
+    xml.into_bytes()
 }
 
 fn read_request(stream: &TcpStream) -> Option<Request> {
@@ -153,7 +226,15 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     reader.read_line(&mut line).ok()?;
     let mut parts = line.split_whitespace();
     let method = parts.next()?.to_owned();
-    let path = parts.next()?.to_owned();
+    let target = parts.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let path = path.to_owned();
+    let query = query
+        .split('&')
+        .filter(|parameter| !parameter.is_empty())
+        .filter_map(|parameter| parameter.split_once('='))
+        .map(|(name, value)| (decode(name), decode(value)))
+        .collect();
     let mut headers = BTreeMap::new();
     loop {
         let mut line = String::new();
@@ -173,6 +254,7 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     Some(Request {
         method,
         path,
+        query,
         headers,
         body,
     })
@@ -191,7 +273,22 @@ fn serve(state: &State, mut stream: TcpStream) {
         (403, Vec::new())
     } else {
         match request.method.as_str() {
-            "HEAD" | "GET" => match state.objects.lock().unwrap().get(&name) {
+            "HEAD" => {
+                state.heads.fetch_add(1, Ordering::SeqCst);
+                match state.objects.lock().unwrap().get(&name) {
+                    Some(bytes) => (200, bytes.clone()),
+                    None => (404, Vec::new()),
+                }
+            }
+            "GET" if request.query.get("list-type").is_some_and(|t| t == "2") => {
+                state.lists.fetch_add(1, Ordering::SeqCst);
+                let prefix = request.query.get("prefix").cloned().unwrap_or_default();
+                (
+                    200,
+                    list(state, &prefix, request.query.get("continuation-token")),
+                )
+            }
+            "GET" => match state.objects.lock().unwrap().get(&name) {
                 Some(bytes) => (200, bytes.clone()),
                 None => (404, Vec::new()),
             },
@@ -208,6 +305,13 @@ fn serve(state: &State, mut stream: TcpStream) {
                     (400, Vec::new())
                 } else {
                     state.puts.fetch_add(1, Ordering::SeqCst);
+                    if let Some(cc) = request.headers.get("cache-control") {
+                        state
+                            .cache_controls
+                            .lock()
+                            .unwrap()
+                            .insert(name.clone(), cc.clone());
+                    }
                     state.objects.lock().unwrap().insert(name, request.body);
                     (200, Vec::new())
                 }
@@ -286,7 +390,7 @@ fn sample(store: &LocalStore, version: &str, extra: &[u8]) -> Plan {
         asset(store, "a/two", &[("base", b"two"), ("mask", extra)]),
         asset(store, "b/three", &[("image", b"three")]),
     ];
-    plan(version, &bindings, store).unwrap()
+    plan(version, &bindings, store, 2).unwrap()
 }
 
 fn object_name(key: &Key) -> String {
@@ -303,7 +407,7 @@ fn a_second_publication_uploads_nothing() {
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan).unwrap();
+    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
     // Seven files, plus three shards, one listing and the root.
     assert_eq!((report.uploaded, report.present), (12, 0));
     assert!(report.pointer_written);
@@ -326,7 +430,7 @@ fn a_second_publication_uploads_nothing() {
     assert!(server.object(&object_name(&root)).is_some());
 
     let puts = server.state.puts.load(Ordering::SeqCst);
-    let (again, report) = publish(&store, &s3, "jp/canonical", &plan).unwrap();
+    let (again, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(again, pointer);
     assert_eq!((report.uploaded, report.present), (0, 12));
     assert!(!report.pointer_written);
@@ -339,9 +443,11 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
     let store = s.store();
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
-    let e = publish(&store, &server.client("wrong"), "jp/canonical", &plan).unwrap_err();
-    assert_eq!(e.stage, "files");
+    let e = publish(&store, &server.client("wrong"), "jp/canonical", &plan, 2).unwrap_err();
+    // Reading the live pointer is the first signed request, and its refusal stops the publication.
+    assert_eq!(e.stage, "pointer");
     assert!(server.object(POINTER).is_none());
+    assert_eq!(server.state.puts.load(Ordering::SeqCst), 0);
 }
 
 #[test]
@@ -353,12 +459,12 @@ fn an_interrupted_publication_converges() {
     let plan = sample(&store, "v1", b"mask");
 
     server.refuse_after(Some(4));
-    let e = publish(&store, &s3, "jp/canonical", &plan).unwrap_err();
+    let e = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap_err();
     assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
 
     server.refuse_after(None);
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan).unwrap();
+    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(report.uploaded + report.present, 12);
     assert!(report.present >= 4);
     assert_eq!(
@@ -373,11 +479,25 @@ fn a_failed_publication_keeps_the_previous_pointer() {
     let store = s.store();
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
-    publish(&store, &s3, "jp/canonical", &sample(&store, "v1", b"mask")).unwrap();
+    publish(
+        &store,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v1", b"mask"),
+        2,
+    )
+    .unwrap();
     let previous = server.object(POINTER).unwrap();
 
     server.refuse_after(Some(0));
-    let e = publish(&store, &s3, "jp/canonical", &sample(&store, "v2", b"new")).unwrap_err();
+    let e = publish(
+        &store,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v2", b"new"),
+        2,
+    )
+    .unwrap_err();
     assert_eq!(e.stage, "files");
     assert_eq!(server.object(POINTER), Some(previous));
 }
@@ -394,7 +514,185 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
-    let e = publish(&store, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
+    let e = publish(&store, &server.client(SECRET_KEY), "jp/canonical", &plan, 2).unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
+}
+
+#[test]
+fn incremental_publication_skips_head_for_live_objects() {
+    let s = Scratch::new("incremental");
+    let store = s.store();
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+
+    publish(
+        &store,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v1", b"mask"),
+        2,
+    )
+    .unwrap();
+    server.state.heads.store(0, Ordering::SeqCst);
+
+    // Identical publication sends 0 HEADs and 0 PUTs.
+    publish(
+        &store,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v1", b"mask"),
+        2,
+    )
+    .unwrap();
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+
+    // Changing one member checks only the 6 changed objects (1 member + 1 doc + 2 shards ("a" and
+    // "a/two") + 1 listing + 1 root), skipping HEAD on all 6 unchanged objects from v1.
+    let (_, report) = publish(
+        &store,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v2", b"mask2"),
+        2,
+    )
+    .unwrap();
+    assert_eq!((report.uploaded, report.present), (6, 6));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 6);
+}
+
+#[test]
+fn verifying_lists_the_store_and_restores_lost_objects() {
+    let s = Scratch::new("verify");
+    let store = s.store();
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let plan = sample(&store, "v1", b"mask");
+    publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    let lost = object_name(&plan.files[0].key);
+    server.remove(&lost);
+
+    // The pointer names the publication, so a plain publication trusts it.
+    let (_, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    assert_eq!(report.uploaded, 0);
+    assert!(server.object(&lost).is_none());
+
+    server.state.heads.store(0, Ordering::SeqCst);
+    let (_, report) = publish_with(
+        &store,
+        &s3,
+        "jp/canonical",
+        &plan,
+        &S3Layout::Index,
+        Check::Listing,
+        2,
+    )
+    .unwrap();
+    assert_eq!((report.uploaded, report.present), (1, 11));
+    assert!(!report.pointer_written);
+    assert_eq!(
+        server.object(&lost),
+        Some(store.read(&plan.files[0].key).unwrap())
+    );
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+    // One request for each empty store directory, and more where a directory fills pages.
+    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
+}
+
+#[test]
+fn sqlite_layout_packs_composite_forms_sets_cache_control_and_skips_unchanged_heads() {
+    let s = Scratch::new("sqlite-s3");
+    let store = s.store();
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+
+    let l2d_members: Vec<MemberFile> = [
+        (
+            "model",
+            "json",
+            "application/json",
+            br#"{"v":3}"#.as_slice(),
+        ),
+        (
+            "moc3",
+            "moc3",
+            "application/octet-stream",
+            b"MOC3".as_slice(),
+        ),
+    ]
+    .into_iter()
+    .map(|(role, ext, mime, bytes)| {
+        let key = store.put(bytes, ext).unwrap();
+        MemberFile {
+            role: role.to_owned(),
+            sha256: hex(&key.sha256),
+            size: bytes.len() as u64,
+            extension: ext.to_owned(),
+            media_type: mime.to_owned(),
+        }
+    })
+    .collect();
+    let l2d_doc = AssetDocument {
+        format: FORMAT.to_owned(),
+        version: VERSION,
+        name: "chara/miku".to_owned(),
+        form: "live2d-model".to_owned(),
+        form_version: 2,
+        fingerprint: "aa".to_owned(),
+        sources: Vec::new(),
+        members: l2d_members,
+        resources: Vec::new(),
+        references: Vec::new(),
+        error: None,
+    };
+    let l2d_binding = Binding {
+        name: "chara/miku".to_owned(),
+        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
+    };
+    let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
+
+    let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
+    let (pointer, report) = publish_with(
+        &store,
+        &s3,
+        "jp/canonical",
+        &v1,
+        &S3Layout::default(),
+        Check::Pointer,
+        2,
+    )
+    .unwrap();
+    // 1 sqlite + 1 root.json + 1 packed .tar + 1 standalone .webp = 4 store objects.
+    assert_eq!((report.uploaded, report.present), (4, 0));
+    assert!(pointer.sqlite.is_some());
+
+    let sqlite_key = Key {
+        sha256: sekai_catalog::store::parse_hex(pointer.sqlite.as_deref().unwrap()).unwrap(),
+        extension: "sqlite".to_owned(),
+    };
+    let sqlite_name = object_name(&sqlite_key);
+    assert!(server.object(&sqlite_name).is_some());
+    let ccs = server.state.cache_controls.lock().unwrap().clone();
+    assert_eq!(
+        ccs.get(&sqlite_name).map(String::as_str),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
+
+    // Incremental v2 adding one texture skips HEAD on the existing `.tar` and `.webp`.
+    server.state.heads.store(0, Ordering::SeqCst);
+    let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
+    let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
+    let (_, report2) = publish_with(
+        &store,
+        &s3,
+        "jp/canonical",
+        &v2,
+        &S3Layout::default(),
+        Check::Pointer,
+        2,
+    )
+    .unwrap();
+    assert_eq!((report2.uploaded, report2.present), (3, 2));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 3);
 }

@@ -54,7 +54,7 @@ The pixels of the rectangle that the sprite's mesh does not cover are kept as st
 
 ## 4. Container
 
-The `image` member is decoded content, which the evaluator encodes as the `texture` form encodes its images: lossless WebP for 8-bit images and OpenEXR for HDR images. The `sprite` member is finished bytes, a JSON file.
+The `image` member is decoded content, which the evaluator encodes as the `texture` form encodes its images: PNG for 8-bit images and OpenEXR for HDR images. The `sprite` member is finished bytes, a JSON file.
 
 ## 5. Correctness
 

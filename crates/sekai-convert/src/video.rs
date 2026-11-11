@@ -120,6 +120,10 @@ impl Converter for Video {
         1
     }
 
+    fn encoders(&self) -> crate::Encoders {
+        crate::Encoders::VIDEO
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

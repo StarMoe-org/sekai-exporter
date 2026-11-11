@@ -195,7 +195,7 @@ impl LocalStore {
     pub fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
         let key = Key::of(bytes, extension);
         let path = self.path(&key);
-        if path.is_file() {
+        if holds(&path, bytes.len() as u64) {
             return Ok(key);
         }
         let temporary = self.beside(&path)?;
@@ -329,16 +329,17 @@ impl LocalStore {
         format!("{}-{n}", std::process::id())
     }
 
-    /// Names the complete file `temporary` as `path`, where nothing or the same content may be
-    /// stored already. A hard link names it at once, as a rename would, and it is cheaper than
-    /// a rename across directories; the temporary name is left for the caller to remove.
-    fn place(&self, temporary: &Path, path: &Path) -> io::Result<()> {
+    /// Names the complete file `temporary` of `size` bytes as `path`, replacing what is there
+    /// unless another writer has just placed the same content. A hard link to a new name appears
+    /// at once, as a rename would, and it is cheaper than a rename across directories; the
+    /// temporary name is left for the caller to remove.
+    fn place(&self, temporary: &Path, path: &Path, size: u64) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         match std::fs::hard_link(temporary, path) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && holds(path, size) => Ok(()),
             Err(_) => std::fs::rename(temporary, path),
         }
     }
@@ -356,6 +357,12 @@ fn link_new(source: &Path, destination: &Path) -> bool {
         }
         linked => linked.is_ok(),
     }
+}
+
+/// Whether `path` is a file of `size` bytes. An object under its name with another size is the
+/// remains of an interrupted write, and is written again.
+fn holds(path: &Path, size: u64) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() == size)
 }
 
 /// Renames `temporary` to `path`, removing it when that fails.
@@ -413,8 +420,8 @@ impl ObjectWriter<'_> {
             extension,
         };
         let path = store.path(&key);
-        if !path.is_file() {
-            store.place(&temporary.0, &path)?;
+        if !holds(&path, size) {
+            store.place(&temporary.0, &path, size)?;
         }
         Ok((key, size))
     }
@@ -455,6 +462,21 @@ mod tests {
         assert!(store.verify(&key).unwrap());
         assert_eq!(store.put(b"abc", "txt").unwrap(), key);
         assert!(!store.contains(&Key::of(b"abd", "txt")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_object_cut_short_is_written_again() {
+        let (root, store) = store("cut");
+        let key = store.put(b"abc", "txt").unwrap();
+        std::fs::write(store.path(&key), b"").unwrap();
+        assert_eq!(store.put(b"abc", "txt").unwrap(), key);
+        assert_eq!(store.read(&key).unwrap(), b"abc");
+        std::fs::write(store.path(&key), b"a").unwrap();
+        let mut writer = store.writer("txt").unwrap();
+        writer.write_all(b"abc").unwrap();
+        assert_eq!(writer.finish().unwrap(), (key.clone(), 3));
+        assert_eq!(store.read(&key).unwrap(), b"abc");
         std::fs::remove_dir_all(root).unwrap();
     }
 

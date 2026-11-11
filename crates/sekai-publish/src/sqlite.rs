@@ -10,7 +10,7 @@ use sekai_catalog::LocalStore;
 use sekai_catalog::store::parse_hex;
 
 use crate::layout::Object;
-use crate::plan::{File, Plan, PublishError};
+use crate::plan::{File, Plan, PublishError, PublishedAsset};
 
 const PAGE_SIZE: usize = 4096;
 const USABLE_OVERFLOW: usize = PAGE_SIZE - 4;
@@ -30,603 +30,731 @@ enum SqlValue {
 /// Builds the `index.sqlite` database of `plan` and writes it to `store`.
 pub(crate) fn build(store: &LocalStore, plan: &Plan) -> Result<Object, PublishError> {
     let wrap_doc = PublishError::wrap("documents");
+    let rows = prepare_rows(plan);
 
-    let member_files: Vec<&File> = plan
-        .files
-        .iter()
-        .filter(|file| file.role != "document")
-        .collect();
-
-    // Group published member files by owning asset name (already in path order).
-    let mut files_by_asset: BTreeMap<&str, Vec<&File>> = BTreeMap::new();
-    for file in &member_files {
-        files_by_asset
-            .entry(file.asset.as_str())
-            .or_default()
-            .push(file);
-    }
-
-    // Build normalized bundle and form dictionaries in deterministic sorted order.
-    let mut bundle_names = BTreeSet::new();
-    let mut form_versions: BTreeMap<String, i64> = BTreeMap::new();
-    if !plan.assets.is_empty() {
-        for asset in &plan.assets {
-            bundle_names.insert(asset.bundle.clone());
-            form_versions
-                .entry(asset.metadata.form.clone())
-                .or_insert(i64::from(asset.metadata.form_version));
-        }
-    } else {
-        bundle_names.insert(String::new());
-        form_versions.insert(String::new(), 0);
-    }
-
-    let bundle_list: Vec<String> = bundle_names.into_iter().collect();
-    let bundle_ids: BTreeMap<&str, i64> = bundle_list
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| (name.as_str(), (idx + 1) as i64))
-        .collect();
-    let form_list: Vec<(String, i64)> = form_versions.into_iter().collect();
-    let form_ids: BTreeMap<&str, i64> = form_list
-        .iter()
-        .enumerate()
-        .map(|(idx, (name, _))| (name.as_str(), (idx + 1) as i64))
-        .collect();
-
-    let mut bundle_stats: Vec<(i64, i64, i64)> = vec![(0, 0, 0); bundle_list.len()];
-    let mut form_stats: Vec<(i64, i64)> = vec![(0, 0); form_list.len()];
-
-    struct AssetRow {
-        id: i64,
-        bundle_id: i64,
-        name: String,
-        form_id: i64,
-        fingerprint: Vec<u8>,
-        total_size: i64,
-        error_code: Option<String>,
-        error_message: Option<String>,
-        sources_json: String,
-        resources_json: String,
-        references_json: String,
-    }
-
-    struct FileRow {
-        dir: String,
-        file_name: String,
-        path: String,
-        bundle_id: i64,
-        asset_id: i64,
-        role: String,
-        sha256: [u8; 32],
-        extension: String,
-        size: i64,
-        media_type: String,
-    }
-
-    let mut asset_rows = Vec::new();
-    let mut file_rows = Vec::new();
-
-    if !plan.assets.is_empty() {
-        for (idx, asset) in plan.assets.iter().enumerate() {
-            let asset_id = (idx + 1) as i64;
-            let bundle_id = bundle_ids[asset.bundle.as_str()];
-            let form_id = form_ids[asset.metadata.form.as_str()];
-            let owned_files = files_by_asset
-                .get(asset.name.as_str())
-                .map(Vec::as_slice)
-                .unwrap_or(&[]);
-            let total_u64: u64 = owned_files.iter().map(|f| f.size).sum();
-            let total_size = i64::try_from(total_u64).unwrap_or(i64::MAX);
-
-            let b_slot = &mut bundle_stats[(bundle_id - 1) as usize];
-            b_slot.0 += 1;
-            b_slot.1 += owned_files.len() as i64;
-            b_slot.2 = b_slot.2.saturating_add(total_size);
-
-            if asset.metadata.error.is_none() {
-                let f_slot = &mut form_stats[(form_id - 1) as usize];
-                f_slot.0 += 1;
-                f_slot.1 = f_slot.1.saturating_add(total_size);
-            }
-
-            for f in owned_files {
-                let (dir, file_name) = split_dir_file(&f.path);
-                file_rows.push(FileRow {
-                    dir: dir.to_owned(),
-                    file_name: file_name.to_owned(),
-                    path: f.path.clone(),
-                    bundle_id,
-                    asset_id,
-                    role: f.role.clone(),
-                    sha256: f.key.sha256,
-                    extension: f.key.extension.clone(),
-                    size: i64::try_from(f.size).unwrap_or(i64::MAX),
-                    media_type: f.media_type.clone(),
-                });
-            }
-
-            let fp_bytes = parse_hex(&asset.metadata.fingerprint)
-                .map(|arr| arr.to_vec())
-                .unwrap_or_else(|| asset.metadata.fingerprint.as_bytes().to_vec());
-            let (error_code, error_message) = match &asset.metadata.error {
-                Some(err) => (Some(err.code.clone()), Some(err.message.clone())),
-                None => (None, None),
-            };
-            let sources_json =
-                serde_json::to_string(&asset.metadata.sources).unwrap_or_else(|_| "[]".to_owned());
-            let resources_json = serde_json::to_string(&asset.metadata.resources)
-                .unwrap_or_else(|_| "[]".to_owned());
-            let references_json = serde_json::to_string(&asset.metadata.references)
-                .unwrap_or_else(|_| "[]".to_owned());
-
-            asset_rows.push(AssetRow {
-                id: asset_id,
-                bundle_id,
-                name: asset.name.clone(),
-                form_id,
-                fingerprint: fp_bytes,
-                total_size,
-                error_code,
-                error_message,
-                sources_json,
-                resources_json,
-                references_json,
-            });
-        }
-    } else {
-        // Fallback for plans constructed without asset documents (such as materialized views).
-        let mut names = BTreeSet::new();
-        for f in &member_files {
-            names.insert(f.asset.as_str());
-        }
-        for fail in &plan.failures {
-            names.insert(fail.name.as_str());
-        }
-        let failure_map: BTreeMap<&str, &str> = plan
-            .failures
-            .iter()
-            .map(|f| (f.name.as_str(), f.code.as_str()))
-            .collect();
-        for (idx, name) in names.into_iter().enumerate() {
-            let asset_id = (idx + 1) as i64;
-            let owned = files_by_asset.get(name).map(Vec::as_slice).unwrap_or(&[]);
-            let total_size = owned
-                .iter()
-                .map(|f| i64::try_from(f.size).unwrap_or(i64::MAX))
-                .fold(0i64, i64::saturating_add);
-            bundle_stats[0].0 += 1;
-            bundle_stats[0].1 += owned.len() as i64;
-            bundle_stats[0].2 = bundle_stats[0].2.saturating_add(total_size);
-            for f in owned {
-                let (dir, file_name) = split_dir_file(&f.path);
-                file_rows.push(FileRow {
-                    dir: dir.to_owned(),
-                    file_name: file_name.to_owned(),
-                    path: f.path.clone(),
-                    bundle_id: 1,
-                    asset_id,
-                    role: f.role.clone(),
-                    sha256: f.key.sha256,
-                    extension: f.key.extension.clone(),
-                    size: i64::try_from(f.size).unwrap_or(i64::MAX),
-                    media_type: f.media_type.clone(),
-                });
-            }
-            let error_code = failure_map.get(name).map(|c| (*c).to_owned());
-            asset_rows.push(AssetRow {
-                id: asset_id,
-                bundle_id: 1,
-                name: name.to_owned(),
-                form_id: 1,
-                fingerprint: Vec::new(),
-                total_size,
-                error_code,
-                error_message: None,
-                sources_json: "[]".to_owned(),
-                resources_json: "[]".to_owned(),
-                references_json: "[]".to_owned(),
-            });
-        }
-    }
-
-    // Build recursive directory summary rows keyed by (parent, name).
-    let mut dir_totals: BTreeMap<(String, String), (String, i64, i64)> = BTreeMap::new();
-    for f in &file_rows {
-        if f.dir.is_empty() {
-            continue;
-        }
-        let mut cursor = f.dir.as_str();
-        loop {
-            let (parent, name) = split_dir_file(cursor);
-            let entry = dir_totals
-                .entry((parent.to_owned(), name.to_owned()))
-                .or_insert_with(|| (cursor.to_owned(), 0, 0));
-            entry.1 += 1;
-            entry.2 = entry.2.saturating_add(f.size);
-            if parent.is_empty() {
-                break;
-            }
-            cursor = parent;
-        }
-    }
-
-    // Sort `files` by WITHOUT ROWID PK `(dir, file_name)`.
-    file_rows.sort_by(|a, b| {
-        a.dir
-            .cmp(&b.dir)
-            .then_with(|| a.file_name.cmp(&b.file_name))
-    });
-
-    // Assemble SQLite 3 B-trees on 4096-byte pages.
     let mut db = DbWriter::new();
-
-    // 1. `meta` (WITHOUT ROWID, PK `key`)
-    let mut meta_entries = vec![
-        ("format", "sqlite-index".to_owned()),
-        ("published_version", plan.version.clone()),
-        ("revision", plan.revision.clone()),
-        ("schema_version", SCHEMA_VERSION.to_string()),
-    ];
-    meta_entries.sort_by(|a, b| a.0.cmp(b.0));
-    let meta_root = db.build_index_btree(
-        &meta_entries
-            .into_iter()
-            .map(|(k, v)| encode_record(&[SqlValue::Text(k.to_owned()), SqlValue::Text(v)]))
-            .collect::<Vec<_>>(),
-    );
-
-    // 2. `bundles` + `idx_bundles_name`
-    let bundles_table_rows: Vec<(i64, Vec<u8>)> = bundle_list
-        .iter()
-        .enumerate()
-        .map(|(idx, name)| {
-            let id = (idx + 1) as i64;
-            let (ac, fc, ts) = bundle_stats[idx];
-            (
-                id,
-                encode_record(&[
-                    SqlValue::Null,
-                    SqlValue::Text(name.clone()),
-                    SqlValue::Int(ac),
-                    SqlValue::Int(fc),
-                    SqlValue::Int(ts),
-                ]),
-            )
-        })
-        .collect();
-    let bundles_root = db.build_table_btree(&bundles_table_rows, None);
-    let idx_bundles_name_root = db.build_index_btree(
-        &bundle_list
-            .iter()
-            .enumerate()
-            .map(|(idx, name)| {
-                encode_record(&[
-                    SqlValue::Text(name.clone()),
-                    SqlValue::Int((idx + 1) as i64),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    // 3. `forms` + `idx_forms_name`
-    let forms_table_rows: Vec<(i64, Vec<u8>)> = form_list
-        .iter()
-        .enumerate()
-        .map(|(idx, (name, ver))| {
-            let id = (idx + 1) as i64;
-            let (ac, ts) = form_stats[idx];
-            (
-                id,
-                encode_record(&[
-                    SqlValue::Null,
-                    SqlValue::Text(name.clone()),
-                    SqlValue::Int(*ver),
-                    SqlValue::Int(ac),
-                    SqlValue::Int(ts),
-                ]),
-            )
-        })
-        .collect();
-    let forms_root = db.build_table_btree(&forms_table_rows, None);
-    let idx_forms_name_root = db.build_index_btree(
-        &form_list
-            .iter()
-            .enumerate()
-            .map(|(idx, (name, _))| {
-                encode_record(&[
-                    SqlValue::Text(name.clone()),
-                    SqlValue::Int((idx + 1) as i64),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    // 4. `directories` (WITHOUT ROWID, PK `(parent, name)`)
-    let directories_root = db.build_index_btree(
-        &dir_totals
-            .into_iter()
-            .map(|((parent, name), (path, fc, ts))| {
-                encode_record(&[
-                    SqlValue::Text(parent),
-                    SqlValue::Text(name),
-                    SqlValue::Text(path),
-                    SqlValue::Int(fc),
-                    SqlValue::Int(ts),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    // 5. `assets` + secondary indexes (`idx_assets_name`, `idx_assets_bundle`, `idx_assets_form`, `idx_assets_error`)
-    let assets_table_rows: Vec<(i64, Vec<u8>)> = asset_rows
-        .iter()
-        .map(|row| {
-            (
-                row.id,
-                encode_record(&[
-                    SqlValue::Null,
-                    SqlValue::Int(row.bundle_id),
-                    SqlValue::Text(row.name.clone()),
-                    SqlValue::Int(row.form_id),
-                    SqlValue::Blob(row.fingerprint.clone()),
-                    SqlValue::Int(row.total_size),
-                    row.error_code
-                        .as_ref()
-                        .map_or(SqlValue::Null, |s| SqlValue::Text(s.clone())),
-                    row.error_message
-                        .as_ref()
-                        .map_or(SqlValue::Null, |s| SqlValue::Text(s.clone())),
-                    SqlValue::Text(row.sources_json.clone()),
-                    SqlValue::Text(row.resources_json.clone()),
-                    SqlValue::Text(row.references_json.clone()),
-                ]),
-            )
-        })
-        .collect();
-    let assets_root = db.build_table_btree(&assets_table_rows, None);
-
-    // `asset_rows` are already sorted by `name`.
-    let idx_assets_name_root = db.build_index_btree(
-        &asset_rows
-            .iter()
-            .map(|row| encode_record(&[SqlValue::Text(row.name.clone()), SqlValue::Int(row.id)]))
-            .collect::<Vec<_>>(),
-    );
-
-    let mut by_bundle: Vec<&AssetRow> = asset_rows.iter().collect();
-    by_bundle.sort_by(|a, b| {
-        a.bundle_id
-            .cmp(&b.bundle_id)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let idx_assets_bundle_root = db.build_index_btree(
-        &by_bundle
-            .into_iter()
-            .map(|row| {
-                encode_record(&[
-                    SqlValue::Int(row.bundle_id),
-                    SqlValue::Text(row.name.clone()),
-                    SqlValue::Int(row.id),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut by_form: Vec<&AssetRow> = asset_rows.iter().collect();
-    by_form.sort_by(|a, b| {
-        a.form_id
-            .cmp(&b.form_id)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let idx_assets_form_root = db.build_index_btree(
-        &by_form
-            .into_iter()
-            .map(|row| {
-                encode_record(&[
-                    SqlValue::Int(row.form_id),
-                    SqlValue::Text(row.name.clone()),
-                    SqlValue::Int(row.id),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut by_error: Vec<&AssetRow> = asset_rows.iter().collect();
-    by_error.sort_by(|a, b| {
-        a.error_code
-            .cmp(&b.error_code)
-            .then_with(|| a.name.cmp(&b.name))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-    let idx_assets_error_root = db.build_index_btree(
-        &by_error
-            .into_iter()
-            .map(|row| {
-                encode_record(&[
-                    row.error_code
-                        .as_ref()
-                        .map_or(SqlValue::Null, |s| SqlValue::Text(s.clone())),
-                    SqlValue::Text(row.name.clone()),
-                    SqlValue::Int(row.id),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    // 6. `files` (WITHOUT ROWID, PK `(dir, file_name)`) + `idx_files_path` + `idx_files_asset`
-    let files_root = db.build_index_btree(
-        &file_rows
-            .iter()
-            .map(|row| {
-                encode_record(&[
-                    SqlValue::Text(row.dir.clone()),
-                    SqlValue::Text(row.file_name.clone()),
-                    SqlValue::Text(row.path.clone()),
-                    SqlValue::Int(row.bundle_id),
-                    SqlValue::Int(row.asset_id),
-                    SqlValue::Text(row.role.clone()),
-                    SqlValue::Blob(row.sha256.to_vec()),
-                    SqlValue::Text(row.extension.clone()),
-                    SqlValue::Int(row.size),
-                    SqlValue::Text(row.media_type.clone()),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut by_path: Vec<&FileRow> = file_rows.iter().collect();
-    by_path.sort_by(|a, b| {
-        a.path
-            .cmp(&b.path)
-            .then_with(|| a.dir.cmp(&b.dir))
-            .then_with(|| a.file_name.cmp(&b.file_name))
-    });
-    let idx_files_path_root = db.build_index_btree(
-        &by_path
-            .into_iter()
-            .map(|row| {
-                encode_record(&[
-                    SqlValue::Text(row.path.clone()),
-                    SqlValue::Text(row.dir.clone()),
-                    SqlValue::Text(row.file_name.clone()),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let mut by_asset: Vec<&FileRow> = file_rows.iter().collect();
-    by_asset.sort_by(|a, b| {
-        a.asset_id
-            .cmp(&b.asset_id)
-            .then_with(|| a.role.cmp(&b.role))
-            .then_with(|| a.dir.cmp(&b.dir))
-            .then_with(|| a.file_name.cmp(&b.file_name))
-    });
-    let idx_files_asset_root = db.build_index_btree(
-        &by_asset
-            .into_iter()
-            .map(|row| {
-                encode_record(&[
-                    SqlValue::Int(row.asset_id),
-                    SqlValue::Text(row.role.clone()),
-                    SqlValue::Text(row.dir.clone()),
-                    SqlValue::Text(row.file_name.clone()),
-                ])
-            })
-            .collect::<Vec<_>>(),
-    );
-
-    let schema = vec![
-        (
-            "table",
-            "meta",
-            "meta",
-            meta_root,
-            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
-        ),
-        (
-            "table",
-            "bundles",
-            "bundles",
-            bundles_root,
-            "CREATE TABLE bundles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, asset_count INTEGER NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL)",
-        ),
-        (
-            "index",
-            "idx_bundles_name",
-            "bundles",
-            idx_bundles_name_root,
-            "CREATE UNIQUE INDEX idx_bundles_name ON bundles (name)",
-        ),
-        (
-            "table",
-            "forms",
-            "forms",
-            forms_root,
-            "CREATE TABLE forms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, form_version INTEGER NOT NULL, asset_count INTEGER NOT NULL, total_size INTEGER NOT NULL)",
-        ),
-        (
-            "index",
-            "idx_forms_name",
-            "forms",
-            idx_forms_name_root,
-            "CREATE UNIQUE INDEX idx_forms_name ON forms (name)",
-        ),
-        (
-            "table",
-            "directories",
-            "directories",
-            directories_root,
-            "CREATE TABLE directories (parent TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL, PRIMARY KEY (parent, name)) WITHOUT ROWID",
-        ),
-        (
-            "table",
-            "assets",
-            "assets",
-            assets_root,
-            "CREATE TABLE assets (id INTEGER PRIMARY KEY, bundle_id INTEGER NOT NULL, name TEXT NOT NULL, form_id INTEGER NOT NULL, fingerprint BLOB NOT NULL, total_size INTEGER NOT NULL, error_code TEXT, error_message TEXT, sources_json TEXT NOT NULL, resources_json TEXT NOT NULL, references_json TEXT NOT NULL)",
-        ),
-        (
-            "index",
-            "idx_assets_name",
-            "assets",
-            idx_assets_name_root,
-            "CREATE UNIQUE INDEX idx_assets_name ON assets (name)",
-        ),
-        (
-            "index",
-            "idx_assets_bundle",
-            "assets",
-            idx_assets_bundle_root,
-            "CREATE INDEX idx_assets_bundle ON assets (bundle_id, name)",
-        ),
-        (
-            "index",
-            "idx_assets_form",
-            "assets",
-            idx_assets_form_root,
-            "CREATE INDEX idx_assets_form ON assets (form_id, name)",
-        ),
-        (
-            "index",
-            "idx_assets_error",
-            "assets",
-            idx_assets_error_root,
-            "CREATE INDEX idx_assets_error ON assets (error_code, name)",
-        ),
-        (
-            "table",
-            "files",
-            "files",
-            files_root,
-            "CREATE TABLE files (dir TEXT NOT NULL, file_name TEXT NOT NULL, path TEXT NOT NULL, bundle_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, role TEXT NOT NULL, sha256 BLOB NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL, PRIMARY KEY (dir, file_name)) WITHOUT ROWID",
-        ),
-        (
-            "index",
-            "idx_files_path",
-            "files",
-            idx_files_path_root,
-            "CREATE UNIQUE INDEX idx_files_path ON files (path)",
-        ),
-        (
-            "index",
-            "idx_files_asset",
-            "files",
-            idx_files_asset_root,
-            "CREATE INDEX idx_files_asset ON files (asset_id, role)",
-        ),
-    ];
-
-    let sqlite_bytes = db.finalize(&schema);
+    let roots = Roots {
+        meta: write_meta(&mut db, plan),
+        bundles: write_bundles(&mut db, &rows.bundles),
+        forms: write_forms(&mut db, &rows.forms),
+        directories: write_directories(&mut db, &rows.directories),
+        assets: write_assets(&mut db, &rows.assets),
+        files: write_files(&mut db, &rows.files),
+    };
+    let sqlite_bytes = db.finalize(&schema_entries(&roots));
     let key = store.put(&sqlite_bytes, "sqlite").map_err(&wrap_doc)?;
     Ok(Object {
         key,
         size: sqlite_bytes.len() as u64,
         media_type: "application/vnd.sqlite3".to_owned(),
     })
+}
+
+/// The rows of every table and index, each in the order it is written.
+struct Rows {
+    bundles: Vec<BundleRow>,
+    forms: Vec<FormRow>,
+    directories: Vec<DirectoryRow>,
+    assets: Vec<AssetRow>,
+    /// Sorted by the primary key `(dir, file_name)`.
+    files: Vec<FileRow>,
+}
+
+/// The bundle, form, asset and file rows of a plan.
+struct Catalog {
+    bundles: Vec<BundleRow>,
+    forms: Vec<FormRow>,
+    assets: Vec<AssetRow>,
+    files: Vec<FileRow>,
+}
+
+struct BundleRow {
+    id: i64,
+    name: String,
+    asset_count: i64,
+    file_count: i64,
+    total_size: i64,
+}
+
+struct FormRow {
+    id: i64,
+    name: String,
+    form_version: i64,
+    asset_count: i64,
+    total_size: i64,
+}
+
+struct DirectoryRow {
+    parent: String,
+    name: String,
+    path: String,
+    file_count: i64,
+    total_size: i64,
+}
+
+struct AssetRow {
+    id: i64,
+    bundle_id: i64,
+    name: String,
+    form_id: i64,
+    fingerprint: Vec<u8>,
+    total_size: i64,
+    error_code: Option<String>,
+    error_message: Option<String>,
+    sources_json: String,
+    resources_json: String,
+    references_json: String,
+}
+
+struct FileRow {
+    dir: String,
+    file_name: String,
+    path: String,
+    bundle_id: i64,
+    asset_id: i64,
+    role: String,
+    sha256: [u8; 32],
+    extension: String,
+    size: i64,
+    media_type: String,
+}
+
+/// Root pages of every table and index, as the schema lists them.
+struct Roots {
+    meta: u32,
+    bundles: NamedRoots,
+    forms: NamedRoots,
+    directories: u32,
+    assets: AssetRoots,
+    files: FileRoots,
+}
+
+/// Root pages of a dictionary table and its unique name index.
+struct NamedRoots {
+    table: u32,
+    name_index: u32,
+}
+
+/// Root pages of the `assets` table and its indexes.
+struct AssetRoots {
+    table: u32,
+    name_index: u32,
+    bundle_index: u32,
+    form_index: u32,
+    error_index: u32,
+}
+
+/// Root pages of the `files` table and its indexes.
+struct FileRoots {
+    table: u32,
+    path_index: u32,
+    asset_index: u32,
+}
+
+/// Asset, file and size totals of the assets in one bundle or form.
+#[derive(Default)]
+struct Tally {
+    assets: i64,
+    files: i64,
+    size: i64,
+}
+
+impl Tally {
+    /// Counts one asset that owns `files`.
+    fn add_asset(&mut self, files: &[&File]) {
+        self.assets += 1;
+        self.files += files.len() as i64;
+        self.size = self.size.saturating_add(files_size(files));
+    }
+}
+
+/// Derives the rows of every table from the plan's member files and assets.
+fn prepare_rows(plan: &Plan) -> Rows {
+    let member_files: Vec<&File> = plan
+        .files
+        .iter()
+        .filter(|file| file.role != "document")
+        .collect();
+    let files_by_asset = group_by_asset(&member_files);
+    let catalog = if plan.assets.is_empty() {
+        fallback_catalog(plan, &member_files, &files_by_asset)
+    } else {
+        asset_catalog(plan, &files_by_asset)
+    };
+
+    let directories = directory_rows(&catalog.files);
+    let mut files = catalog.files;
+    files.sort_by(|a, b| {
+        a.dir
+            .cmp(&b.dir)
+            .then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    Rows {
+        bundles: catalog.bundles,
+        forms: catalog.forms,
+        directories,
+        assets: catalog.assets,
+        files,
+    }
+}
+
+/// Groups the member files by the name of their asset, keeping their path order.
+fn group_by_asset<'a>(member_files: &[&'a File]) -> BTreeMap<&'a str, Vec<&'a File>> {
+    let mut grouped: BTreeMap<&'a str, Vec<&'a File>> = BTreeMap::new();
+    for &file in member_files {
+        grouped.entry(file.asset.as_str()).or_default().push(file);
+    }
+    grouped
+}
+
+/// Rows for a plan that lists asset documents, with bundles and forms numbered by name.
+fn asset_catalog(plan: &Plan, files_by_asset: &BTreeMap<&str, Vec<&File>>) -> Catalog {
+    let mut bundle_tallies: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut form_tallies: BTreeMap<&str, (i64, Tally)> = BTreeMap::new();
+    for asset in &plan.assets {
+        let owned = owned_files(files_by_asset, &asset.name);
+        bundle_tallies
+            .entry(asset.bundle.as_str())
+            .or_default()
+            .add_asset(owned);
+        let (_, form) = form_tallies
+            .entry(asset.metadata.form.as_str())
+            .or_insert((i64::from(asset.metadata.form_version), Tally::default()));
+        if asset.metadata.error.is_none() {
+            form.add_asset(owned);
+        }
+    }
+
+    let bundle_ids = row_ids(bundle_tallies.keys().copied());
+    let form_ids = row_ids(form_tallies.keys().copied());
+    let bundles: Vec<BundleRow> = bundle_tallies
+        .into_iter()
+        .enumerate()
+        .map(|(position, (name, tally))| BundleRow {
+            id: row_id(position),
+            name: name.to_owned(),
+            asset_count: tally.assets,
+            file_count: tally.files,
+            total_size: tally.size,
+        })
+        .collect();
+    let forms: Vec<FormRow> = form_tallies
+        .into_iter()
+        .enumerate()
+        .map(|(position, (name, (form_version, tally)))| FormRow {
+            id: row_id(position),
+            name: name.to_owned(),
+            form_version,
+            asset_count: tally.assets,
+            total_size: tally.size,
+        })
+        .collect();
+
+    let mut assets = Vec::with_capacity(plan.assets.len());
+    let mut files: Vec<FileRow> = Vec::new();
+    for (position, asset) in plan.assets.iter().enumerate() {
+        let asset_id = row_id(position);
+        let owned = owned_files(files_by_asset, &asset.name);
+        let bundle_id = bundle_ids[asset.bundle.as_str()];
+        let form_id = form_ids[asset.metadata.form.as_str()];
+        files.extend(
+            owned
+                .iter()
+                .map(|&file| file_row(file, bundle_id, asset_id)),
+        );
+        assets.push(asset_row(
+            asset,
+            asset_id,
+            bundle_id,
+            form_id,
+            files_size(owned),
+        ));
+    }
+    Catalog {
+        bundles,
+        forms,
+        assets,
+        files,
+    }
+}
+
+/// Rows for a plan without asset documents, such as a materialized view. Every asset sits in
+/// the empty bundle and form, and the form totals stay zero.
+fn fallback_catalog(
+    plan: &Plan,
+    member_files: &[&File],
+    files_by_asset: &BTreeMap<&str, Vec<&File>>,
+) -> Catalog {
+    let names: BTreeSet<&str> = member_files
+        .iter()
+        .map(|&file| file.asset.as_str())
+        .chain(plan.failures.iter().map(|failure| failure.name.as_str()))
+        .collect();
+    let failure_codes: BTreeMap<&str, &str> = plan
+        .failures
+        .iter()
+        .map(|failure| (failure.name.as_str(), failure.code.as_str()))
+        .collect();
+
+    let mut bundle = Tally::default();
+    let mut assets = Vec::with_capacity(names.len());
+    let mut files: Vec<FileRow> = Vec::new();
+    for (position, name) in names.into_iter().enumerate() {
+        let asset_id = row_id(position);
+        let owned = owned_files(files_by_asset, name);
+        bundle.add_asset(owned);
+        files.extend(owned.iter().map(|&file| file_row(file, 1, asset_id)));
+        assets.push(AssetRow {
+            id: asset_id,
+            bundle_id: 1,
+            name: name.to_owned(),
+            form_id: 1,
+            fingerprint: Vec::new(),
+            total_size: files_size(owned),
+            error_code: failure_codes.get(name).map(|code| (*code).to_owned()),
+            error_message: None,
+            sources_json: "[]".to_owned(),
+            resources_json: "[]".to_owned(),
+            references_json: "[]".to_owned(),
+        });
+    }
+    Catalog {
+        bundles: vec![BundleRow {
+            id: 1,
+            name: String::new(),
+            asset_count: bundle.assets,
+            file_count: bundle.files,
+            total_size: bundle.size,
+        }],
+        forms: vec![FormRow {
+            id: 1,
+            name: String::new(),
+            form_version: 0,
+            asset_count: 0,
+            total_size: 0,
+        }],
+        assets,
+        files,
+    }
+}
+
+/// The `assets` row of an asset document, with the ids of its bundle and form.
+fn asset_row(asset: &PublishedAsset, id: i64, bundle_id: i64, form_id: i64, size: i64) -> AssetRow {
+    let metadata = &asset.metadata;
+    let (error_code, error_message) = match &metadata.error {
+        Some(error) => (Some(error.code.clone()), Some(error.message.clone())),
+        None => (None, None),
+    };
+    AssetRow {
+        id,
+        bundle_id,
+        name: asset.name.clone(),
+        form_id,
+        fingerprint: parse_hex(&metadata.fingerprint)
+            .map(|arr| arr.to_vec())
+            .unwrap_or_else(|| metadata.fingerprint.as_bytes().to_vec()),
+        total_size: size,
+        error_code,
+        error_message,
+        sources_json: json_array(serde_json::to_string(&metadata.sources)),
+        resources_json: json_array(serde_json::to_string(&metadata.resources)),
+        references_json: json_array(serde_json::to_string(&metadata.references)),
+    }
+}
+
+/// The JSON text of a list, or `[]` when it cannot be encoded.
+fn json_array(encoded: serde_json::Result<String>) -> String {
+    encoded.unwrap_or_else(|_| "[]".to_owned())
+}
+
+/// The `files` row of a member file that belongs to an asset.
+fn file_row(file: &File, bundle_id: i64, asset_id: i64) -> FileRow {
+    let (dir, file_name) = split_dir_file(&file.path);
+    FileRow {
+        dir: dir.to_owned(),
+        file_name: file_name.to_owned(),
+        path: file.path.clone(),
+        bundle_id,
+        asset_id,
+        role: file.role.clone(),
+        sha256: file.key.sha256,
+        extension: file.key.extension.clone(),
+        size: sql_size(file.size),
+        media_type: file.media_type.clone(),
+    }
+}
+
+/// The member files of the asset `name`, in path order.
+fn owned_files<'a>(
+    files_by_asset: &'a BTreeMap<&str, Vec<&'a File>>,
+    name: &str,
+) -> &'a [&'a File] {
+    files_by_asset.get(name).map(Vec::as_slice).unwrap_or(&[])
+}
+
+/// The total size of `files` as an SQLite integer.
+fn files_size(files: &[&File]) -> i64 {
+    files
+        .iter()
+        .map(|file| sql_size(file.size))
+        .fold(0, i64::saturating_add)
+}
+
+/// A byte count as an SQLite integer, saturating at `i64::MAX`.
+fn sql_size(size: u64) -> i64 {
+    i64::try_from(size).unwrap_or(i64::MAX)
+}
+
+/// The row id of the entry at `position` in a sorted dictionary. Ids start at 1.
+fn row_id(position: usize) -> i64 {
+    (position + 1) as i64
+}
+
+/// The row id of each name, numbered in the order given.
+fn row_ids<'a>(names: impl Iterator<Item = &'a str>) -> BTreeMap<&'a str, i64> {
+    names
+        .enumerate()
+        .map(|(position, name)| (name, row_id(position)))
+        .collect()
+}
+
+/// One summary row for each directory that holds a file, counting the files below it.
+fn directory_rows(files: &[FileRow]) -> Vec<DirectoryRow> {
+    let mut totals: BTreeMap<(String, String), DirectoryRow> = BTreeMap::new();
+    for file in files.iter().filter(|file| !file.dir.is_empty()) {
+        for dir in ancestor_dirs(&file.dir) {
+            let (parent, name) = split_dir_file(dir);
+            let row = totals
+                .entry((parent.to_owned(), name.to_owned()))
+                .or_insert_with(|| DirectoryRow {
+                    parent: parent.to_owned(),
+                    name: name.to_owned(),
+                    path: dir.to_owned(),
+                    file_count: 0,
+                    total_size: 0,
+                });
+            row.file_count += 1;
+            row.total_size = row.total_size.saturating_add(file.size);
+        }
+    }
+    totals.into_values().collect()
+}
+
+/// The directory `dir` followed by each of its ancestors, up to the top-level directory.
+fn ancestor_dirs(dir: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(Some(dir), |cursor| {
+        let (parent, _) = split_dir_file(cursor);
+        (!parent.is_empty()).then_some(parent)
+    })
+}
+
+/// The references to `rows`, ordered by `key`.
+fn sorted_refs<'a, T, K: Ord>(rows: &'a [T], key: impl Fn(&'a T) -> K) -> Vec<&'a T> {
+    let mut refs: Vec<&T> = rows.iter().collect();
+    refs.sort_by_key(|row| key(*row));
+    refs
+}
+
+/// Writes a rowid table with one row per item, keyed by `rowid` and encoded by `encode`.
+fn write_table<T>(
+    db: &mut DbWriter,
+    rows: &[T],
+    rowid: impl Fn(&T) -> i64,
+    encode: impl Fn(&T) -> Vec<u8>,
+) -> u32 {
+    let payloads: Vec<(i64, Vec<u8>)> = rows.iter().map(|row| (rowid(row), encode(row))).collect();
+    db.build_table_btree(&payloads, None)
+}
+
+/// Writes an index with one entry per item, encoded by `encode`.
+fn write_index<T>(db: &mut DbWriter, rows: &[T], encode: impl Fn(&T) -> Vec<u8>) -> u32 {
+    let payloads: Vec<Vec<u8>> = rows.iter().map(encode).collect();
+    db.build_index_btree(&payloads)
+}
+
+/// Writes the `meta` table, whose rows are in key order.
+fn write_meta(db: &mut DbWriter, plan: &Plan) -> u32 {
+    let mut entries = vec![
+        ("format", "sqlite-index".to_owned()),
+        ("published_version", plan.version.clone()),
+        ("revision", plan.revision.clone()),
+        ("schema_version", SCHEMA_VERSION.to_string()),
+    ];
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let payloads: Vec<Vec<u8>> = entries
+        .into_iter()
+        .map(|(key, value)| encode_record(&[SqlValue::Text(key.to_owned()), SqlValue::Text(value)]))
+        .collect();
+    db.build_index_btree(&payloads)
+}
+
+/// Writes the `bundles` table and its unique name index.
+fn write_bundles(db: &mut DbWriter, bundles: &[BundleRow]) -> NamedRoots {
+    let table = write_table(
+        db,
+        bundles,
+        |row| row.id,
+        |row| {
+            encode_record(&[
+                SqlValue::Null,
+                SqlValue::Text(row.name.clone()),
+                SqlValue::Int(row.asset_count),
+                SqlValue::Int(row.file_count),
+                SqlValue::Int(row.total_size),
+            ])
+        },
+    );
+    let name_index = write_index(db, bundles, |row| {
+        encode_record(&[SqlValue::Text(row.name.clone()), SqlValue::Int(row.id)])
+    });
+    NamedRoots { table, name_index }
+}
+
+/// Writes the `forms` table and its unique name index.
+fn write_forms(db: &mut DbWriter, forms: &[FormRow]) -> NamedRoots {
+    let table = write_table(
+        db,
+        forms,
+        |row| row.id,
+        |row| {
+            encode_record(&[
+                SqlValue::Null,
+                SqlValue::Text(row.name.clone()),
+                SqlValue::Int(row.form_version),
+                SqlValue::Int(row.asset_count),
+                SqlValue::Int(row.total_size),
+            ])
+        },
+    );
+    let name_index = write_index(db, forms, |row| {
+        encode_record(&[SqlValue::Text(row.name.clone()), SqlValue::Int(row.id)])
+    });
+    NamedRoots { table, name_index }
+}
+
+/// Writes the `directories` table, keyed by `(parent, name)`.
+fn write_directories(db: &mut DbWriter, directories: &[DirectoryRow]) -> u32 {
+    write_index(db, directories, |row| {
+        encode_record(&[
+            SqlValue::Text(row.parent.clone()),
+            SqlValue::Text(row.name.clone()),
+            SqlValue::Text(row.path.clone()),
+            SqlValue::Int(row.file_count),
+            SqlValue::Int(row.total_size),
+        ])
+    })
+}
+
+/// Writes the `assets` table and its name, bundle, form and error indexes.
+fn write_assets(db: &mut DbWriter, assets: &[AssetRow]) -> AssetRoots {
+    let table = write_table(db, assets, |row| row.id, asset_record);
+    // The asset rows are already in name order.
+    let name_index = write_index(db, assets, |row| {
+        encode_record(&[SqlValue::Text(row.name.clone()), SqlValue::Int(row.id)])
+    });
+    let by_bundle = sorted_refs(assets, |row| (row.bundle_id, &row.name, row.id));
+    let bundle_index = write_index(db, &by_bundle, |row| {
+        encode_record(&[
+            SqlValue::Int(row.bundle_id),
+            SqlValue::Text(row.name.clone()),
+            SqlValue::Int(row.id),
+        ])
+    });
+    let by_form = sorted_refs(assets, |row| (row.form_id, &row.name, row.id));
+    let form_index = write_index(db, &by_form, |row| {
+        encode_record(&[
+            SqlValue::Int(row.form_id),
+            SqlValue::Text(row.name.clone()),
+            SqlValue::Int(row.id),
+        ])
+    });
+    let by_error = sorted_refs(assets, |row| (row.error_code.as_deref(), &row.name, row.id));
+    let error_index = write_index(db, &by_error, |row| {
+        encode_record(&[
+            nullable_text(&row.error_code),
+            SqlValue::Text(row.name.clone()),
+            SqlValue::Int(row.id),
+        ])
+    });
+    AssetRoots {
+        table,
+        name_index,
+        bundle_index,
+        form_index,
+        error_index,
+    }
+}
+
+/// The record of an `assets` row.
+fn asset_record(row: &AssetRow) -> Vec<u8> {
+    encode_record(&[
+        SqlValue::Null,
+        SqlValue::Int(row.bundle_id),
+        SqlValue::Text(row.name.clone()),
+        SqlValue::Int(row.form_id),
+        SqlValue::Blob(row.fingerprint.clone()),
+        SqlValue::Int(row.total_size),
+        nullable_text(&row.error_code),
+        nullable_text(&row.error_message),
+        SqlValue::Text(row.sources_json.clone()),
+        SqlValue::Text(row.resources_json.clone()),
+        SqlValue::Text(row.references_json.clone()),
+    ])
+}
+
+/// A text column that is `NULL` when the value is absent.
+fn nullable_text(value: &Option<String>) -> SqlValue {
+    value
+        .as_ref()
+        .map_or(SqlValue::Null, |text| SqlValue::Text(text.clone()))
+}
+
+/// Writes the `files` table and its path and asset indexes.
+fn write_files(db: &mut DbWriter, files: &[FileRow]) -> FileRoots {
+    let table = write_index(db, files, |row| {
+        encode_record(&[
+            SqlValue::Text(row.dir.clone()),
+            SqlValue::Text(row.file_name.clone()),
+            SqlValue::Text(row.path.clone()),
+            SqlValue::Int(row.bundle_id),
+            SqlValue::Int(row.asset_id),
+            SqlValue::Text(row.role.clone()),
+            SqlValue::Blob(row.sha256.to_vec()),
+            SqlValue::Text(row.extension.clone()),
+            SqlValue::Int(row.size),
+            SqlValue::Text(row.media_type.clone()),
+        ])
+    });
+    let by_path = sorted_refs(files, |row| (&row.path, &row.dir, &row.file_name));
+    let path_index = write_index(db, &by_path, |row| {
+        encode_record(&[
+            SqlValue::Text(row.path.clone()),
+            SqlValue::Text(row.dir.clone()),
+            SqlValue::Text(row.file_name.clone()),
+        ])
+    });
+    let by_asset = sorted_refs(files, |row| {
+        (row.asset_id, &row.role, &row.dir, &row.file_name)
+    });
+    let asset_index = write_index(db, &by_asset, |row| {
+        encode_record(&[
+            SqlValue::Int(row.asset_id),
+            SqlValue::Text(row.role.clone()),
+            SqlValue::Text(row.dir.clone()),
+            SqlValue::Text(row.file_name.clone()),
+        ])
+    });
+    FileRoots {
+        table,
+        path_index,
+        asset_index,
+    }
+}
+
+/// The `sqlite_schema` entries: kind, name, table name, root page and `CREATE` statement.
+fn schema_entries(
+    roots: &Roots,
+) -> Vec<(&'static str, &'static str, &'static str, u32, &'static str)> {
+    vec![
+        (
+            "table",
+            "meta",
+            "meta",
+            roots.meta,
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID",
+        ),
+        (
+            "table",
+            "bundles",
+            "bundles",
+            roots.bundles.table,
+            "CREATE TABLE bundles (id INTEGER PRIMARY KEY, name TEXT NOT NULL, asset_count INTEGER NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL)",
+        ),
+        (
+            "index",
+            "idx_bundles_name",
+            "bundles",
+            roots.bundles.name_index,
+            "CREATE UNIQUE INDEX idx_bundles_name ON bundles (name)",
+        ),
+        (
+            "table",
+            "forms",
+            "forms",
+            roots.forms.table,
+            "CREATE TABLE forms (id INTEGER PRIMARY KEY, name TEXT NOT NULL, form_version INTEGER NOT NULL, asset_count INTEGER NOT NULL, total_size INTEGER NOT NULL)",
+        ),
+        (
+            "index",
+            "idx_forms_name",
+            "forms",
+            roots.forms.name_index,
+            "CREATE UNIQUE INDEX idx_forms_name ON forms (name)",
+        ),
+        (
+            "table",
+            "directories",
+            "directories",
+            roots.directories,
+            "CREATE TABLE directories (parent TEXT NOT NULL, name TEXT NOT NULL, path TEXT NOT NULL, file_count INTEGER NOT NULL, total_size INTEGER NOT NULL, PRIMARY KEY (parent, name)) WITHOUT ROWID",
+        ),
+        (
+            "table",
+            "assets",
+            "assets",
+            roots.assets.table,
+            "CREATE TABLE assets (id INTEGER PRIMARY KEY, bundle_id INTEGER NOT NULL, name TEXT NOT NULL, form_id INTEGER NOT NULL, fingerprint BLOB NOT NULL, total_size INTEGER NOT NULL, error_code TEXT, error_message TEXT, sources_json TEXT NOT NULL, resources_json TEXT NOT NULL, references_json TEXT NOT NULL)",
+        ),
+        (
+            "index",
+            "idx_assets_name",
+            "assets",
+            roots.assets.name_index,
+            "CREATE UNIQUE INDEX idx_assets_name ON assets (name)",
+        ),
+        (
+            "index",
+            "idx_assets_bundle",
+            "assets",
+            roots.assets.bundle_index,
+            "CREATE INDEX idx_assets_bundle ON assets (bundle_id, name)",
+        ),
+        (
+            "index",
+            "idx_assets_form",
+            "assets",
+            roots.assets.form_index,
+            "CREATE INDEX idx_assets_form ON assets (form_id, name)",
+        ),
+        (
+            "index",
+            "idx_assets_error",
+            "assets",
+            roots.assets.error_index,
+            "CREATE INDEX idx_assets_error ON assets (error_code, name)",
+        ),
+        (
+            "table",
+            "files",
+            "files",
+            roots.files.table,
+            "CREATE TABLE files (dir TEXT NOT NULL, file_name TEXT NOT NULL, path TEXT NOT NULL, bundle_id INTEGER NOT NULL, asset_id INTEGER NOT NULL, role TEXT NOT NULL, sha256 BLOB NOT NULL, extension TEXT NOT NULL, size INTEGER NOT NULL, media_type TEXT NOT NULL, PRIMARY KEY (dir, file_name)) WITHOUT ROWID",
+        ),
+        (
+            "index",
+            "idx_files_path",
+            "files",
+            roots.files.path_index,
+            "CREATE UNIQUE INDEX idx_files_path ON files (path)",
+        ),
+        (
+            "index",
+            "idx_files_asset",
+            "files",
+            roots.files.asset_index,
+            "CREATE INDEX idx_files_asset ON files (asset_id, role)",
+        ),
+    ]
 }
 
 fn split_dir_file(path: &str) -> (&str, &str) {
@@ -706,6 +834,12 @@ impl DbWriter {
     ) {
         let buf = &mut self.pages[(pg - 1) as usize];
         let hdr_len = if right_child.is_some() { 12 } else { 8 };
+        let used: usize = cells.iter().map(|cell| 2 + cell.len()).sum();
+        assert!(
+            header_offset + hdr_len + used <= PAGE_SIZE,
+            "{} cells of {used} bytes overflow page {pg}",
+            cells.len()
+        );
         let mut content = PAGE_SIZE;
         let mut ptrs = Vec::with_capacity(cells.len());
         for cell in cells {
@@ -713,7 +847,6 @@ impl DbWriter {
             buf[content..content + cell.len()].copy_from_slice(cell);
             ptrs.push(u16::try_from(content).expect("page size is 4096"));
         }
-        debug_assert!(header_offset + hdr_len + 2 * cells.len() <= content);
 
         buf[header_offset] = flag;
         buf[header_offset + 1..header_offset + 3].copy_from_slice(&0u16.to_be_bytes());
@@ -1120,4 +1253,3 @@ fn encode_record(cols: &[SqlValue]) -> Vec<u8> {
     out.extend_from_slice(&body);
     out
 }
-

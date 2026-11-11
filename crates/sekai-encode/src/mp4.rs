@@ -7,7 +7,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sekai_codec::{Movie, Pcm};
@@ -215,10 +215,22 @@ pub fn encode_with(program: &OsStr, movie: &Movie) -> Result<Vec<u8>, EncodeErro
     );
     let result = run(program, args, &movie.stream)?;
     if !result.status.success() {
-        let text = String::from_utf8_lossy(&result.stderr);
-        return Err(failed(text.chars().take(MESSAGE_LEN).collect::<String>()));
+        return Err(failed(failure(&result)));
     }
     std::fs::read(&output).map_err(failed)
+}
+
+/// Why the program failed: its error output, or its exit status when it wrote none, as when it
+/// was stopped from outside.
+fn failure(output: &Output) -> String {
+    let text = String::from_utf8_lossy(&output.stderr);
+    match text.trim() {
+        "" => format!(
+            "the program ended with {} and wrote no error",
+            output.status
+        ),
+        text => text.chars().take(MESSAGE_LEN).collect(),
+    }
 }
 
 /// Runs `program` with `args`, writes `input` to its standard input and waits for it.

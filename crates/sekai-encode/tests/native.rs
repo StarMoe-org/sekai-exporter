@@ -3,7 +3,7 @@
 
 use std::process::{Command, Stdio};
 
-use sekai_codec::{Pcm, Surface};
+use sekai_codec::Pcm;
 use sekai_encode::EncodeError;
 
 fn tone(channels: u16, length: usize) -> Pcm {
@@ -17,20 +17,20 @@ fn tone(channels: u16, length: usize) -> Pcm {
     Pcm::new(44100, channels, samples).expect("valid audio")
 }
 
-fn image(width: u32, height: u32) -> Surface {
-    let mut pixels = Vec::new();
-    for y in 0..height {
-        for x in 0..width {
-            pixels.extend([(x * 3) as u8, (y * 5) as u8, ((x ^ y) * 7) as u8, 255]);
-        }
-    }
-    Surface::new(width, height, pixels).expect("valid image")
-}
-
 #[cfg(feature = "webp")]
 mod lossy_webp {
-    use super::image;
+    use sekai_codec::Surface;
     use sekai_encode::webp;
+
+    fn image(width: u32, height: u32) -> Surface {
+        let mut pixels = Vec::new();
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend([(x * 3) as u8, (y * 5) as u8, ((x ^ y) * 7) as u8, 255]);
+            }
+        }
+        Surface::new(width, height, pixels).expect("valid image")
+    }
 
     #[test]
     fn output_is_the_same_on_every_run_and_decodes_to_the_size() {

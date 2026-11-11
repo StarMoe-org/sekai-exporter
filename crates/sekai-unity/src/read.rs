@@ -120,6 +120,7 @@ pub fn read_object(
         r: Reader::new(data, endian, "object"),
         references,
         in_registry: false,
+        in_referenced: false,
     };
     run.value(layout, 0, true, None, visitor)?;
     if run.r.pos() != data.len() {
@@ -135,6 +136,8 @@ struct Run<'d, 'r> {
     r: Reader<'d>,
     references: &'r dyn ReferenceTypes,
     in_registry: bool,
+    /// Whether the data of a referenced object is being read.
+    in_referenced: bool,
 }
 
 impl<'d> Run<'d, '_> {
@@ -167,7 +170,7 @@ impl<'d> Run<'d, '_> {
     }
 
     /// Reads op `i` of `layout`. Array elements pass `align_self = false`: the element node's
-    /// own alignment flag does not apply between elements.
+    /// own alignment flag applies once after the array, whose op carries it.
     fn value(
         &mut self,
         layout: &Layout,
@@ -292,6 +295,13 @@ impl<'d> Run<'d, '_> {
         if name.class.is_empty() {
             return Ok(());
         }
+        // The referenced objects of an object are stored side by side in its registry, so the
+        // data of one never holds another. Refusing it bounds the depth of the reader.
+        if self.in_referenced {
+            return Err(Error::invalid_layout(
+                "a referenced object is stored in the data of another",
+            ));
+        }
         let references = self.references;
         let layout = references
             .layout(name)
@@ -300,7 +310,10 @@ impl<'d> Run<'d, '_> {
                 namespace: name.namespace.clone(),
                 assembly: name.assembly.clone(),
             })?;
-        self.value(layout, 0, true, Some(field), v)
+        self.in_referenced = true;
+        let read = self.value(layout, 0, true, Some(field), v);
+        self.in_referenced = false;
+        read
     }
 
     fn scalar(&mut self, kind: ScalarKind) -> Result<Scalar> {
@@ -420,6 +433,33 @@ mod tests {
         b.extend_from_slice(&1i32.to_le_bytes());
         b.extend_from_slice(&(-7i64).to_le_bytes());
         b
+    }
+
+    #[test]
+    fn an_aligned_element_aligns_once_after_its_array() {
+        let layout = Layout::compile(&tree(&[
+            (0, "Thing", "Base", false),
+            (1, "vector", "m_Flags", false),
+            (2, "Array", "Array", false),
+            (3, "int", "size", false),
+            (3, "bool", "data", true),
+            (1, "int", "m_Count", false),
+        ]))
+        .unwrap();
+        let mut b = 3i32.to_le_bytes().to_vec();
+        b.extend_from_slice(&[1, 0, 1, 0]);
+        b.extend_from_slice(&9i32.to_le_bytes());
+        let mut c = Collect::default();
+        read_object(&layout, &b, Endian::Little, &(), &mut c).unwrap();
+        assert_eq!(
+            c.0,
+            [
+                "data=Bool(1)",
+                "data=Bool(0)",
+                "data=Bool(1)",
+                "m_Count=I32(9)"
+            ]
+        );
     }
 
     #[test]

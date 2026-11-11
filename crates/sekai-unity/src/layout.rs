@@ -204,7 +204,9 @@ fn compile_node(nodes: &[TypeTreeNode], i: usize, ops: &mut Vec<Op>) -> Result<u
         let [_, element] = parts[..] else {
             return Err(invalid("the array has no size and element"));
         };
-        ops[at].align |= nodes[array].aligned();
+        // Elements are stored packed. An alignment flag on the `Array` node or on the element
+        // node aligns once, after the last element.
+        ops[at].align |= nodes[array].aligned() || nodes[element].aligned();
         if matches!(
             ScalarKind::from_type(&nodes[element].type_name),
             Some(ScalarKind::U8 | ScalarKind::I8)

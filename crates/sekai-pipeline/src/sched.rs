@@ -1,16 +1,15 @@
-//! The scheduler: runs jobs on standard library threads within three resources, CPU slots, a
-//! memory budget and the connections of each remote.
+//! The scheduler: runs jobs on standard library threads within two resources, CPU slots and a
+//! memory budget.
 //!
-//! A job declares the memory it holds from start to end and, optionally, one connection to a
-//! remote. Inside, it takes CPU slots for each part of its work with [`Slots::cpu`] or
-//! [`Slots::hold`], so a job can convert on one slot and encode on two. Jobs start in the order
-//! given while they fit. A job that does not fit waits, and lets at most [`BACKFILL`] jobs that
-//! do fit, from the [`BACKFILL`] after it, start ahead of it; one that needs more than the whole
-//! budget runs alone. With one CPU slot every job runs on the calling thread, in order, and no
-//! thread is created.
+//! A job declares the memory it holds from start to end. Inside, it takes CPU slots for each part
+//! of its work with [`Slots::cpu`] or [`Slots::hold`], so a job can convert on one slot and encode
+//! on two. Jobs start in the order given while they fit. A job that does not fit waits, and lets at
+//! most [`BACKFILL`] jobs that do fit, from the [`BACKFILL`] after it, start ahead of it; one that
+//! needs more than the whole budget runs alone. With one CPU slot every job runs on the calling
+//! thread, in order, and no thread is created.
 //!
 //! Several runs may share one scheduler at once, each from its own thread. Each keeps its own
-//! order, and all of them draw on the same CPU slots, memory budget and connections.
+//! order, and all of them draw on the same CPU slots and memory budget.
 //!
 //! Declared needs are estimates. With [`Limits::resident`], a job also waits while the memory the
 //! process holds, the needs of the running jobs and its own need together exceed a limit, so
@@ -31,8 +30,6 @@ pub struct Limits {
     pub cpu: usize,
     /// The memory budget of the needs of running jobs, in bytes.
     pub memory: u64,
-    /// The connections each remote allows at once, by remote number.
-    pub connections: Vec<usize>,
     /// A limit on the memory of the whole process, if any.
     pub resident: Option<Resident>,
 }
@@ -47,12 +44,11 @@ pub struct Resident {
 }
 
 impl Limits {
-    /// `cpu` CPU slots, with no memory budget and no remotes.
+    /// `cpu` CPU slots, with no memory budget.
     pub fn threads(cpu: usize) -> Self {
         Self {
             cpu,
             memory: u64::MAX,
-            connections: Vec::new(),
             resident: None,
         }
     }
@@ -63,8 +59,6 @@ impl Limits {
 pub struct Need {
     /// The estimated peak memory, in bytes.
     pub memory: u64,
-    /// The remote the job connects to, by number in [`Limits::connections`].
-    pub remote: Option<usize>,
 }
 
 #[derive(Debug, Default)]
@@ -73,8 +67,6 @@ struct State {
     cpu: usize,
     /// The memory held by running jobs.
     memory: u64,
-    /// The connections in use, by remote.
-    connections: Vec<usize>,
 }
 
 /// The jobs of one run that have not started.
@@ -165,13 +157,9 @@ fn wait<'a>(condition: &Condvar, state: MutexGuard<'a, State>) -> MutexGuard<'a,
 impl Scheduler {
     /// A scheduler for `limits`.
     pub fn new(limits: Limits) -> Self {
-        let state = State {
-            connections: vec![0; limits.connections.len()],
-            ..State::default()
-        };
         Self {
             limits,
-            state: Mutex::new(state),
+            state: Mutex::default(),
             changed: Condvar::new(),
             freed: Condvar::new(),
         }
@@ -197,9 +185,6 @@ impl Scheduler {
     fn fits(&self, state: &State, need: &Need, probed: &OnceCell<u64>) -> bool {
         let held = self.held(need);
         let memory = state.memory + held <= self.limits.memory;
-        let connection = need.remote.is_none_or(|remote| {
-            state.connections[remote] < self.limits.connections[remote].max(1)
-        });
         // The running jobs count with their whole needs, whether or not they have allocated yet.
         let resident = || match self.limits.resident {
             Some(resident) if held > 0 && state.memory > 0 => {
@@ -211,7 +196,7 @@ impl Scheduler {
             }
             _ => true,
         };
-        memory && connection && resident()
+        memory && resident()
     }
 
     /// Runs `job(i, slots)` for each `i` in `0..needs.len()` and returns the results in that
@@ -220,21 +205,12 @@ impl Scheduler {
     ///
     /// # Panics
     ///
-    /// Panics when a need names a remote that [`Limits::connections`] does not have, or when a
-    /// job panics.
+    /// Panics when a job panics.
     pub fn run<T: Send>(
         &self,
         needs: &[Need],
         job: impl Fn(usize, &Slots<'_>) -> T + Sync,
     ) -> Vec<T> {
-        for need in needs {
-            if let Some(remote) = need.remote {
-                assert!(
-                    remote < self.limits.connections.len(),
-                    "unknown remote {remote}"
-                );
-            }
-        }
         let slots = Slots { scheduler: self };
         if self.limits.cpu <= 1 {
             return (0..needs.len()).map(|i| job(i, &slots)).collect();
@@ -281,9 +257,6 @@ impl Scheduler {
                     queue.overtaken + 1
                 };
                 state.memory += self.held(need);
-                if let Some(remote) = need.remote {
-                    state.connections[remote] += 1;
-                }
                 drop(state);
                 // The next first job may be passed over anew, and without one the run ends.
                 if position == 0 {
@@ -314,9 +287,6 @@ impl Scheduler {
     fn release(&self, need: &Need) {
         let mut state = self.lock();
         state.memory -= self.held(need);
-        if let Some(remote) = need.remote {
-            state.connections[remote] -= 1;
-        }
         drop(state);
         self.changed.notify_all();
     }
@@ -356,7 +326,6 @@ mod tests {
         Limits {
             cpu,
             memory,
-            connections: vec![2],
             resident: None,
         }
     }
@@ -371,7 +340,6 @@ mod tests {
         let needs: Vec<Need> = (0..200)
             .map(|i| Need {
                 memory: [10, 30, 60, 5][i % 4],
-                remote: None,
             })
             .collect();
         let (memory, cpu) = (Peak::default(), Peak::default());
@@ -402,7 +370,6 @@ mod tests {
         let needs: Vec<Need> = (0..40)
             .map(|i| Need {
                 memory: if i % 10 == 5 { 500 } else { 20 },
-                remote: None,
             })
             .collect();
         let running = Peak::default();
@@ -419,13 +386,8 @@ mod tests {
         assert_eq!(alone.load(Ordering::SeqCst), 4);
     }
 
-    /// Memory needs as jobs without connections.
     fn memory_needs(memory: impl IntoIterator<Item = u64>) -> Vec<Need> {
-        let need = |memory| Need {
-            memory,
-            remote: None,
-        };
-        memory.into_iter().map(need).collect()
+        memory.into_iter().map(|memory| Need { memory }).collect()
     }
 
     #[test]
@@ -461,35 +423,9 @@ mod tests {
     }
 
     #[test]
-    fn connections_of_a_remote_are_limited() {
-        let scheduler = Scheduler::new(limits(6, u64::MAX));
-        let needs: Vec<Need> = (0..60)
-            .map(|i| Need {
-                memory: 0,
-                remote: (i % 2 == 0).then_some(0),
-            })
-            .collect();
-        let open = Peak::default();
-        scheduler.run(&needs, |i, _| {
-            if needs[i].remote.is_some() {
-                open.add(1);
-                pause();
-                open.sub(1);
-            }
-        });
-        assert_eq!(open.most(), 2);
-    }
-
-    #[test]
     fn one_slot_runs_on_the_calling_thread_in_order() {
         let scheduler = Scheduler::new(limits(1, 10));
-        let needs = vec![
-            Need {
-                memory: 50,
-                remote: Some(0),
-            };
-            5
-        ];
+        let needs = vec![Need { memory: 50 }; 5];
         let caller = std::thread::current().id();
         let threads: Vec<(usize, ThreadId)> = scheduler.run(&needs, |i, slots| {
             slots.cpu(2, || (i, std::thread::current().id()))
@@ -503,17 +439,11 @@ mod tests {
             let scheduler = Scheduler::new(Limits {
                 cpu,
                 memory: 64,
-                connections: vec![1, 3],
                 resident: None,
             });
             let needs: Vec<Need> = (0..500u64)
                 .map(|i| Need {
                     memory: (i * 37) % 90,
-                    remote: match i % 5 {
-                        0 => Some(0),
-                        1 => Some(1),
-                        _ => None,
-                    },
                 })
                 .collect();
             let sum: u64 = scheduler
@@ -541,19 +471,12 @@ mod tests {
         let scheduler = Scheduler::new(Limits {
             cpu: 8,
             memory: 1000,
-            connections: Vec::new(),
             resident: Some(Resident {
                 limit: 100,
                 probe: resident,
             }),
         });
-        let needs = vec![
-            Need {
-                memory: 10,
-                remote: None,
-            };
-            300
-        ];
+        let needs = vec![Need { memory: 10 }; 300];
         let (peak, together) = (Peak::default(), Peak::default());
         scheduler.run(&needs, |_, slots| {
             together.add(1);
@@ -573,13 +496,7 @@ mod tests {
     #[test]
     fn resources_are_returned_when_a_job_panics() {
         let scheduler = Scheduler::new(limits(2, 100));
-        let needs = vec![
-            Need {
-                memory: 100,
-                remote: Some(0),
-            };
-            2
-        ];
+        let needs = vec![Need { memory: 100 }; 2];
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             scheduler.run(&needs, |i, slots| {
                 slots.cpu(1, || assert_ne!(i, 0, "the first job fails"));
@@ -587,6 +504,6 @@ mod tests {
         }));
         assert!(outcome.is_err());
         let state = scheduler.lock();
-        assert_eq!((state.cpu, state.memory, state.connections[0]), (0, 0, 0));
+        assert_eq!((state.cpu, state.memory), (0, 0));
     }
 }

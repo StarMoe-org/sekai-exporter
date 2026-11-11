@@ -341,6 +341,41 @@ fn a_failed_asset_is_recorded_and_evaluated_again() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+struct Panicking;
+
+impl Converter for Panicking {
+    fn name(&self) -> &'static str {
+        "panicking"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn is_root(&self, object: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
+        object.class == "Texture2D"
+    }
+
+    fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        panic!("a bug in the converter")
+    }
+}
+
+#[test]
+fn a_panic_fails_only_its_asset() {
+    let root = scratch("panicking");
+    let evaluation = run_with(Box::new(Panicking), &root, 2, &MemoryDerivations::default());
+    assert!(!evaluation.outputs.is_empty());
+    let store = LocalStore::open(&root).unwrap();
+    for output in &evaluation.outputs {
+        assert_eq!(output.error.as_deref(), Some("panicked"));
+        let document = AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap();
+        let error = document.error.unwrap();
+        assert_eq!(error.message, "a bug in the converter");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 fn run_options(
     converter: Box<dyn Converter>,
     root: &Path,

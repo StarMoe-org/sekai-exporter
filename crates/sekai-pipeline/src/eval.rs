@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::canonical::Files;
 use crate::index_record::StreamDigest;
+use crate::isolate::{PANICKED, isolated};
 use crate::metrics::Recorder;
 use crate::reads::Reads;
 use crate::sched::{Limits, Need, Resident, Scheduler, Slots};
@@ -281,7 +282,14 @@ pub(crate) fn derive_within(
             } else {
                 cpu
             };
-            files.encode(plan.converter, &plan.name, asset)?
+            isolated(|| files.encode(plan.converter, &plan.name, asset)).unwrap_or_else(
+                |message| {
+                    Ok(Err(AssetError {
+                        code: PANICKED.to_owned(),
+                        message,
+                    }))
+                },
+            )?
         }
         Err(e) => {
             drop(cpu);
@@ -295,7 +303,11 @@ pub(crate) fn derive_within(
     let document = build_document(plan, version, &objects, &resources, members, error);
     let stored = Stored::put(files.store, document)?;
     if let (Some(fusion), Ok(asset)) = (fusion, &asset) {
-        slots.cpu(1, || fusion.extra(asset, &stored.document))?;
+        // A panic makes nothing more: the view that the extra files are for makes them again
+        // when it is published, and reports the asset there.
+        slots
+            .cpu(1, || isolated(|| fusion.extra(asset, &stored.document)))
+            .unwrap_or(Ok(()))?;
     }
     Ok(Some(stored))
 }
@@ -308,7 +320,8 @@ fn convert(
     recorder: &dyn Recorder,
 ) -> Result<Option<Asset>, ConvertError> {
     let mut span = recorder.span("convert", plan.converter.name(), &plan.name);
-    let converted = plan.converter.convert(plan.closure[0], reads);
+    let converted = isolated(|| plan.converter.convert(plan.closure[0], reads))
+        .unwrap_or_else(|message| Err(ConvertError::new(PANICKED, message)));
     if let Ok(Some(asset)) = &converted {
         span.memory(cost.memory, decoded_size(asset));
     }
@@ -447,7 +460,6 @@ impl<'a> Runner<'a> {
             scheduler: Scheduler::new(Limits {
                 cpu: if options.plain { 1 } else { options.threads },
                 memory: options.memory,
-                connections: Vec::new(),
                 resident: options.resident,
             }),
         }
@@ -519,7 +531,6 @@ impl<'a> Runner<'a> {
             .iter()
             .map(|&k| Need {
                 memory: pending[k].1.memory,
-                remote: None,
             })
             .collect();
         let files = Files {

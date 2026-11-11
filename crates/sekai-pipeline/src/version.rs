@@ -16,6 +16,7 @@ use sekai_unity::{
 use sha2::{Digest, Sha256};
 
 use crate::index_record::{IndexRecord, StreamDigest};
+use crate::isolate::{PANICKED, isolated};
 use crate::sched::{Limits, Need, Scheduler};
 
 /// The estimated memory of the bundles that stay parsed, in bytes.
@@ -462,9 +463,11 @@ impl<'c> Version<'c> {
             })
             .collect();
         let records = scheduler.run(&vec![Need::default(); inputs.len()], |i, slots| {
-            (!shared[i])
-                .then(|| slots.cpu(1, || record(&inputs[i], cache, classes, indexes)))
-                .transpose()
+            (!shared[i]).then(|| {
+                slots.cpu(1, || {
+                    isolated(|| record(&inputs[i], cache, classes, indexes))
+                })
+            })
         });
         indexes.flush()?;
         let mut bundles = Vec::new();
@@ -473,13 +476,18 @@ impl<'c> Version<'c> {
         let mut bundle_indexes = Vec::new();
         let mut errors = Vec::new();
         for (input, record) in inputs.into_iter().zip(records) {
-            let Some(record) = record? else {
-                errors.push(BundleError {
-                    message: format!("more than one bundle is named {}", input.name),
-                    name: input.name,
-                    code: "duplicate_name",
-                });
-                continue;
+            let failure = |code, message| BundleError {
+                name: input.name.clone(),
+                code,
+                message,
+            };
+            let record = match record {
+                None => Err(failure(
+                    "duplicate_name",
+                    format!("more than one bundle is named {}", input.name),
+                )),
+                Some(Err(message)) => Err(failure(PANICKED, message)),
+                Some(Ok(record)) => record?.map_err(|e| failure(e.code(), e.to_string())),
             };
             match record {
                 Ok(record) => {
@@ -491,11 +499,7 @@ impl<'c> Version<'c> {
                     streams.push(record.streams);
                     bundles.push((input.source, input.sha256));
                 }
-                Err(e) => errors.push(BundleError {
-                    name: input.name,
-                    code: e.code(),
-                    message: e.to_string(),
-                }),
+                Err(error) => errors.push(error),
             }
         }
         let version = Self {

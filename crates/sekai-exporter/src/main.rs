@@ -130,10 +130,14 @@ commands:
       List the costliest kinds of derivation of the runs in <output> and the
       converters whose memory estimates are furthest from their decoded size.
   serve <output> --routes <file> [--listen <address>] [--threads <n>]
+        [--connections <n>] [--cache <bytes>]
       Answer HTTP requests for the files of the views published in <output>,
       by the paths that the routes file maps to them. --listen is
       127.0.0.1:8080 by default. A new publication takes effect within the
-      max_age of the routes file.
+      max_age of the routes file. Here --threads is the number of threads that
+      answer requests. --connections is how many connections are held at once,
+      256 by default, and --cache the memory that decoded path indexes may
+      take, such as 512M, 256M by default. The server only reads <output>.
 
   --threads sets how many conversions and encodings run at once; a video
   encoding counts as two. --memory sets the memory the process may use, such

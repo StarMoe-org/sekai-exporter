@@ -8,10 +8,26 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[[test]]
+name = "server"
+required-features = ["server"]
+
 [dependencies]
 sekai-format.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.11.1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util", "sync", "time"], optional = true }
+tokio-util = { version = "0.7", features = ["io"], optional = true }
+hyper = { version = "1", features = ["server", "http1"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+bytes = { version = "1", optional = true }
+futures-util = { version = "0.3", default-features = false, optional = true }
+
+[features]
+# The HTTP server that answers from an output directory. Without it the crate does no I/O.
+server = ["dep:tokio", "dep:tokio-util", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:futures-util"]
 
 [lints]
 workspace = true

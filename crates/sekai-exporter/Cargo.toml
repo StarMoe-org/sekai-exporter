@@ -40,13 +40,6 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 cpu-time = "1.0.0"
 mimalloc = { version = "0.1", default-features = false }
 sekai-serve = { workspace = true, optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "net", "fs", "io-util"], optional = true }
-tokio-util = { version = "0.7", features = ["io"], optional = true }
-hyper = { version = "1", features = ["server", "http1"], optional = true }
-hyper-util = { version = "0.1", features = ["tokio"], optional = true }
-http-body-util = { version = "0.1", optional = true }
-bytes = { version = "1", optional = true }
-futures-util = { version = "0.3", default-features = false, optional = true }
 
 [features]
 image = ["sekai-convert/image"]
@@ -70,7 +63,7 @@ client = ["sekai-game/client", "dep:sekai-layouts"]
 s3 = ["sekai-publish/s3"]
 catalog-db = ["sekai-catalog/catalog-db"]
 mysekai = ["sekai-mysekai/forms"]
-serve = ["dep:sekai-serve", "dep:tokio", "dep:tokio-util", "dep:hyper", "dep:hyper-util", "dep:http-body-util", "dep:bytes", "dep:futures-util"]
+serve = ["dep:sekai-serve", "sekai-serve/server"]
 default = ["cdn", "catalog-db", "image", "audio", "video", "model", "animation", "live2d", "text", "scenario", "episode", "virtual-live", "costume", "storage-view", "webp"]
 preset-mysekai = ["default", "mysekai"]
 preset-client = ["default", "client"]

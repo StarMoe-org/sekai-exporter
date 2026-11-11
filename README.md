@@ -1,38 +1,74 @@
 # sekai-exporter
 
+[![ci](https://github.com/StarMoe-org/sekai-exporter/actions/workflows/ci.yml/badge.svg)](https://github.com/StarMoe-org/sekai-exporter/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.99+](https://img.shields.io/badge/rust-1.99%2B-orange.svg)](https://www.rust-lang.org)
+
 [中文](README.zh-CN.md)
 
 An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the game's Unity asset bundles and client package and turns their contents into assets in open formats: images, audio, video, models, scenarios, curves and documents. Every output is recorded with the objects it came from, so a consumer can find out what any file is.
 
-Rather than writing out the objects of each bundle one by one, it follows the references of an asset across bundles and writes the whole asset in the form a named runtime reads, such as a GLB model with its skeleton, materials and textures, or a Live2D model with its textures, physics and motions.
+> [!TIP]
+> **Start with [Objects and assets](docs/objects-and-assets.md).** It explains what exporting Unity content means, why this project converts rather than unpacks, and what it produces by default. Reading it first is the quickest way to understand the work in this repository.
+
+## Highlights
+
+- **Whole assets, not loose objects.** It follows the references of an asset across bundles and writes the whole asset in the form a named runtime reads, such as a GLB model with its skeleton, materials and textures, or a Live2D model with its textures, physics and motions.
+- **Traceable output.** Every file is recorded with the bundle, objects and converter it came from.
+- **Rebuilds only what changed.** Every output is a pure function of content-addressed inputs, so unchanged work is skipped, and identical content is shared across regions.
+- **Pure Rust.** Decoders and the canonical encoders are written in Rust without `unsafe` code, and the core builds for WebAssembly with output byte-identical to the native build.
+- **Publishes anywhere.** Results go to a content-addressed store with self-describing indexes, or to a plain path tree, locally or to S3-compatible storage.
+
+## Quick start
+
+Build the command-line program:
+
+```bash
+cargo build --release -p sekai-exporter
+```
+
+Write the object document of every bundle in a directory:
+
+```bash
+sekai-exporter objects <bundles> <output>
+```
+
+Convert every bundle in a directory to assets:
+
+```bash
+sekai-exporter export <bundles> <output>
+```
+
+Bring an output directory up to the current version of a region:
+
+```bash
+sekai-exporter update <region> <output> --config <file> --secrets <dir>
+```
+
+`sekai-exporter` with no arguments lists every command and option. [Sources](docs/sources.md) describes the configuration and credentials of a region, and [Features](docs/features.md) the Cargo features and presets.
 
 ## Status
 
 In development. What works today:
 
-- **Unpacking.** `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration.
-- **Decoding** in pure Rust: Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and ASTC HDR textures (including texture arrays and 3D textures), HCA and ADX audio, ACB and AWB archives, and USM containers.
-- **Encoding**: PNG, lossy WebP, OpenEXR and MP3, and MP4 through the `ffmpeg` program.
-- **Converters** for textures, sprites, fonts, text assets, story scenes, action sets, scenario backgrounds, virtual live scripts, CRI movies, CRI cue sheets, Live2D models and motion sets, costume parts and motions, and MySekai furniture, site models, emoticons, character actions and talks. [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet.
-- **Evaluation and publishing.** `sekai-exporter export` and `update` evaluate bundles into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view, locally or to S3-compatible storage.
-- **WebAssembly.** The core builds for `wasm32`, and continuous integration compares its object documents and its store with those of the native build byte for byte.
+| Area | State |
+|---|---|
+| Unpacking | `objects` writes the [object document](docs/spec/object-documents.md) of every bundle, and its field values are compared with UnityPy in continuous integration |
+| Decoding | Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and ASTC HDR textures (including texture arrays and 3D textures), HCA and ADX audio, ACB and AWB archives, and USM containers |
+| Encoding | PNG, lossy WebP, OpenEXR and MP3, and MP4 through the `ffmpeg` program |
+| Converters | Textures, sprites, fonts, text assets, story scenes, action sets, scenario backgrounds, virtual live scripts, CRI movies, CRI cue sheets, Live2D models and motion sets, costume parts and motions, and MySekai furniture, site models, emoticons, character actions and talks. [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet |
+| Evaluation and publishing | `export` and `update` evaluate bundles into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view, locally or to S3-compatible storage |
+| WebAssembly | The core builds for `wasm32`, and continuous integration compares its object documents and its store with those of the native build byte for byte |
 
-The documents in [`docs/`](docs/) describe the design that the code implements, and the [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
+The [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
 
-## What it does
+## Documentation
 
-- **Unpacks** asset bundles and the client's player data into an exact object graph, with every cross-file reference resolved.
-- **Converts** object closures into assets with one converter per asset form. The default forms are the ones the [Moesekai](https://github.com/StarMoe-org/Moesekai) site and its viewers consume. Further forms are optional features.
-- **Publishes** the results as a content-addressed store with self-describing indexes, or as a plain path tree, locally or to S3-compatible storage.
-- **Rebuilds only what changed.** Every output is the result of a pure function of content-addressed inputs, so unchanged work is skipped, and identical content is shared across regions.
-
-Why the project is built around converting rather than unpacking is explained in [Objects and assets](docs/objects-and-assets.md).
-
-## Documents
+The documents in [`docs/`](docs/) describe the design that the code implements.
 
 | Document | Contents |
 |---|---|
-| [Objects and assets](docs/objects-and-assets.md) | What exporting Unity content means and why this project is an exporter |
+| [Objects and assets](docs/objects-and-assets.md) | **Start here.** What exporting Unity content means and why this project is an exporter |
 | [Architecture](docs/architecture.md) | The derivation model, evaluation strategies and the crate structure |
 | [Pipeline](docs/pipeline.md) | The stages of a run and the invariant each stage keeps |
 | [Performance](docs/performance.md) | How the design avoids work, and where the remaining work runs |

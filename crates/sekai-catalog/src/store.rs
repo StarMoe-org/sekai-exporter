@@ -3,7 +3,7 @@
 //! An object is named `<aa>/<sha256>.<extension>`, where `<aa>` is the first two hexadecimal
 //! digits of the SHA-256 of its bytes. The name carries no other meaning.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
@@ -104,11 +104,21 @@ pub trait Store: Sync {
     fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key>;
     /// The bytes stored under `key`.
     fn read(&self, key: &Key) -> io::Result<Vec<u8>>;
+    /// The size of the bytes stored under `key`, or `None` when nothing is stored under it.
+    fn size(&self, key: &Key) -> io::Result<Option<u64>>;
 }
 
 impl Store for LocalStore {
     fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
         LocalStore::put(self, bytes, extension)
+    }
+
+    fn size(&self, key: &Key) -> io::Result<Option<u64>> {
+        match std::fs::metadata(self.path(key)) {
+            Ok(metadata) => Ok(metadata.is_file().then_some(metadata.len())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
@@ -132,6 +142,11 @@ impl Store for MemoryStore {
 
     fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
         MemoryStore::read(self, key)
+    }
+
+    fn size(&self, key: &Key) -> io::Result<Option<u64>> {
+        let files = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(files.get(key).map(|bytes| bytes.len() as u64))
     }
 }
 
@@ -175,17 +190,17 @@ impl LocalStore {
     }
 
     /// Writes `bytes` and returns their key. Content that is already stored is not written
-    /// again. An object is either absent or complete: it is written under a temporary name and
-    /// then renamed.
+    /// again. An object is either absent or complete: it is written under a temporary name in
+    /// its own directory and then renamed.
     pub fn put(&self, bytes: &[u8], extension: &str) -> io::Result<Key> {
         let key = Key::of(bytes, extension);
         let path = self.path(&key);
         if path.is_file() {
             return Ok(key);
         }
-        let temporary = self.temporary();
+        let temporary = self.beside(&path)?;
         std::fs::write(&temporary, bytes)?;
-        self.place(&temporary, &path)?;
+        rename(&temporary, &path)?;
         Ok(key)
     }
 
@@ -225,6 +240,28 @@ impl LocalStore {
         Ok(keys)
     }
 
+    /// The sizes of the objects whose hashes start with the byte `prefix`, by key. Listing their
+    /// directory opens no object, so it costs far less than asking for each object in turn.
+    pub fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>> {
+        let entries = match std::fs::read_dir(self.root.join(format!("{prefix:02x}"))) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+            entries => entries?,
+        };
+        let mut sizes = HashMap::new();
+        for entry in entries {
+            let entry = entry?;
+            // Temporary files have names that are not keys.
+            let Ok(key) = entry.file_name().to_string_lossy().parse() else {
+                continue;
+            };
+            let metadata = entry.metadata()?;
+            if metadata.is_file() {
+                sizes.insert(key, metadata.len());
+            }
+        }
+        Ok(sizes)
+    }
+
     /// Reads an object.
     pub fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
         std::fs::read(self.path(key))
@@ -242,24 +279,42 @@ impl LocalStore {
     /// Places the object `key` at `destination`, replacing any file there: a hard link when
     /// the file system allows it, otherwise a copy. The replacement is atomic.
     pub fn materialize(&self, key: &Key, destination: &Path) -> io::Result<()> {
-        let source = self.path(key);
-        let parent = destination
+        self.link_or_copy(&self.path(key), destination)
+    }
+
+    /// Stores the file at `source`, whose bytes are those of `key`, under `key`: a hard link
+    /// when the file system allows it, otherwise a copy. An object that is already stored is
+    /// left as it is.
+    pub fn adopt(&self, key: &Key, source: &Path) -> io::Result<()> {
+        let path = self.path(key);
+        if path.is_file() {
+            return Ok(());
+        }
+        self.link_or_copy(source, &path)
+    }
+
+    /// Places `source` at `destination` atomically, as a hard link or a copy.
+    fn link_or_copy(&self, source: &Path, destination: &Path) -> io::Result<()> {
+        if link_new(source, destination) {
+            return Ok(());
+        }
+        let temporary = self.beside(destination)?;
+        if std::fs::hard_link(source, &temporary).is_err() {
+            std::fs::copy(source, &temporary)?;
+        }
+        rename(&temporary, destination)
+    }
+
+    /// A temporary name in the directory of `path`, which is created if it does not exist. A
+    /// rename within one directory never crosses file systems, and it is cheaper than one
+    /// across directories.
+    fn beside(&self, path: &Path) -> io::Result<PathBuf> {
+        let parent = path
             .parent()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent directory"))?;
         std::fs::create_dir_all(parent)?;
-        // The temporary name is in the destination's directory, so the rename does not cross
-        // file systems.
-        let name = destination
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let temporary = parent.join(format!(".{name}.{}.tmp", self.unique()));
-        if std::fs::hard_link(&source, &temporary).is_err() {
-            std::fs::copy(&source, &temporary)?;
-        }
-        std::fs::rename(&temporary, destination).inspect_err(|_| {
-            let _ = std::fs::remove_file(&temporary);
-        })
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        Ok(parent.join(format!(".{name}.{}.tmp", self.unique())))
     }
 
     fn temporary(&self) -> PathBuf {
@@ -274,17 +329,43 @@ impl LocalStore {
         format!("{}-{n}", std::process::id())
     }
 
+    /// Names the complete file `temporary` as `path`, where nothing or the same content may be
+    /// stored already. A hard link names it at once, as a rename would, and it is cheaper than
+    /// a rename across directories; the temporary name is left for the caller to remove.
     fn place(&self, temporary: &Path, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::rename(temporary, path).inspect_err(|_| {
-            let _ = std::fs::remove_file(temporary);
-        })
+        match std::fs::hard_link(temporary, path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(_) => std::fs::rename(temporary, path),
+        }
     }
 }
 
-/// A temporary file, removed unless it was renamed into place.
+/// Whether `source` is now linked at `destination`, a name that did not exist; its directory is
+/// created if needed. A link appears complete at once, so a new name needs no temporary one.
+fn link_new(source: &Path, destination: &Path) -> bool {
+    match std::fs::hard_link(source, destination) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            destination
+                .parent()
+                .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
+                && std::fs::hard_link(source, destination).is_ok()
+        }
+        linked => linked.is_ok(),
+    }
+}
+
+/// Renames `temporary` to `path`, removing it when that fails.
+fn rename(temporary: &Path, path: &Path) -> io::Result<()> {
+    std::fs::rename(temporary, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(temporary);
+    })
+}
+
+/// A temporary file, removed when it is dropped.
 struct Temporary(PathBuf);
 
 impl Drop for Temporary {
@@ -429,6 +510,18 @@ mod tests {
                 .count(),
             1
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sizes_list_the_objects_of_a_directory() {
+        let (root, store) = store("sizes");
+        let key = store.put(b"abc", "txt").unwrap();
+        let directory = root.join(&key.relative_path()[..2]);
+        std::fs::write(directory.join(".partial.1.tmp"), b"partial").unwrap();
+        let sizes = store.sizes(key.sha256[0]).unwrap();
+        assert_eq!(sizes, HashMap::from([(key.clone(), 3)]));
+        assert!(store.sizes(key.sha256[0] ^ 1).unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

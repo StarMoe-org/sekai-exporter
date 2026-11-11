@@ -2,7 +2,7 @@
 
 [中文](audio.zh-CN.md)
 
-The `audio` form is the sound of each cue of a CRI cue sheet (ACB), as PCM. Converter: `audio` in `sekai-convert` (feature `audio`). Form version: 3.
+The `audio` form is the sound of each cue of a CRI cue sheet (ACB), as MP3. Converter: `audio` in `sekai-convert` (feature `audio`). Form version: 5.
 
 ## 1. Runtime
 
@@ -19,7 +19,7 @@ One member per waveform each cue plays, in the order of the cue sheet's `CueTabl
 
 The waveforms of a cue are those its reference reaches (directly, through a synth, a sequence or a block sequence), in the order the cue sheet lists them. A waveform that a cue lists more than once counts once, at its first place.
 
-Each of these members is 16-bit PCM, interleaved, at the sample rate and channel count of the stream, without the encoder delay and the padding at the end that the HCA header declares.
+Each of these members is the waveform at the sample rate and channel count of the stream, without the encoder delay and the padding at the end that the HCA header declares. Its file is an MP3 (see [Container](#4-container)); waveforms with the same stream share one file.
 
 The last member is the cue table:
 
@@ -76,7 +76,7 @@ An arrangement states when each waveform of a cue built of tracks plays. The lay
 
 **Fields read:** `m_Script`, which holds the cue sheet.
 
-**Cue sheet.** The sheet is read from its `Header` table: `CueTable`, `CueNameTable`, `WaveformTable`, `WaveformExtensionDataTable` and the tables a cue's reference reaches (`SynthTable`, `SequenceTable`, `BlockSequenceTable`, `BlockTable`, `TrackTable`, `TrackEventTable`). Each waveform is an HCA stream in the sheet's memory bank (`AwbFile`, an AFS2 archive), found by its `MemoryAwbId`.
+**Cue sheet.** The sheet is read from its `Header` table: `CueTable`, `CueNameTable`, `WaveformTable`, `WaveformExtensionDataTable` and the tables a cue's reference reaches (`SynthTable`, `SequenceTable`, `BlockSequenceTable`, `BlockTable`, `TrackTable`, `TrackEventTable`). Each waveform is an HCA stream in the sheet's memory bank (`AwbFile`, an AFS2 archive), found by its `MemoryAwbId`. A sheet whose `WaveformTable` is empty has no waveforms.
 
 **Loop.** The loop of a waveform comes from the `loop` chunk of its HCA header: it starts at sample `start frame × 1024 + start delay` and ends before sample `(end frame + 1) × 1024 − end padding`, both less the encoder delay. A chunk that gives no range within the member gives no loop.
 
@@ -99,13 +99,27 @@ An arrangement states when each waveform of a cue built of tracks plays. The lay
 
 ## 4. Container
 
-The waveform members are decoded content, which the evaluator encodes. The canonical file is FLAC with 16-bit samples, written by the `flac` encoder (version 1) with the fixed parameters of that encoder. Views that need another container, such as MP3 or AAC, produce it from the same samples with their own encoder. The cue table is finished bytes: UTF-8 JSON without insignificant whitespace, with keys in the order above and `loop` omitted when absent; a volume is the shortest decimal that reads back to the same 32-bit float.
+The converter gives each waveform as its HCA stream, which the evaluator encodes: the `mp3` encoder (version 3) decodes the stream frame by frame and encodes each block of samples as it comes, so the samples of a waveform are never all in memory. Members of one asset with the same stream and key are encoded once.
+
+The file is MPEG audio layer III at a constant bitrate: MPEG-1 for 32, 44.1 and 48 kHz, MPEG-2 or MPEG-2.5 for lower rates. The bitrate is one and a half times the bitrate of the HCA stream (its frame size × 8 × sample rate / 1024), rounded up to a bitrate of that MPEG version and at most its highest, 320 kb/s for MPEG-1 and 160 kb/s for MPEG-2 and MPEG-2.5. Samples without a lossy source take the highest.
+
+The first frame is an Info frame with a tag in the LAME format that gives the frame count, the encoder delay (528 samples, plus the 529 of the decoder) and the padding at the end. Decoders that read the tag, such as ffmpeg and Symphonia, give exactly the samples of the waveform, so `frames` and `loop` in the cue table count the samples of the decoded file. Decoders apply the tag only when its encoder string starts with a name they know, so the string is `LAME` followed by zeros.
+
+The encoder is pure Rust (see [Third-party sources](../third-party.md)) and computes with functions whose results do not depend on the target, so a waveform encodes to the same bytes in native and WebAssembly builds.
+
+**Why MP3.** HCA is a lossy transform codec: the samples the reference decoder gives are all the stream holds. A lossless file of them, WAV or FLAC, keeps one decoding exactly, but adds nothing a decoder of the stream could not give again, and its size follows the sample rate and the length rather than the stream: 16-bit stereo at 48 kHz is 1536 kb/s as WAV, and FLAC compresses the noise a lossy codec leaves poorly, so the file is several times the size of the stream it came from. The HCA stream itself plays only where a CRI decoder is present. MP3 plays in every browser and player, records its delay and padding for gapless playback, and has a pure-Rust encoder whose output is fixed. The AAC encoders the exporter can use are C libraries loaded at run time in native builds, so an AAC file would depend on the library installed and could not be written in WebAssembly, and Opus works at 48 kHz only, so 44.1 kHz waveforms would be resampled.
+
+Encoding a lossy stream again adds the errors of a second codec. The bitrate is set above the source's so that this second loss stays small next to the first, and it stays tied to the source, so a stream encoded at a low bitrate does not become a large file. Programs that need the exact samples of a waveform decode its HCA stream from the bundle with `sekai-codec`.
+
+The cue table is finished bytes: UTF-8 JSON without insignificant whitespace, with keys in the order above and `loop` omitted when absent; a volume is the shortest decimal that reads back to the same 32-bit float.
 
 ## 5. Correctness
 
 HCA decoding follows the reference decoder: the same dequantisation, the same intensity and stereo reconstruction, the same inverse transform, and the same conversion to 16 bits (`(int)(f * 32767)`, truncating). The cue sheet reader follows the cue references the way the reference player does.
 
-The decoders are checked sample for sample against vgmstream on HCA files made for the tests, including encrypted ones with and without a subkey (`crates/sekai-codec/tests`), and the converter on cue sheets built in the tests (`crates/sekai-convert/tests/audio.rs`). On real bundles, the streams and cue names the reader finds are compared with vgmstream with the scripts in `tools/compare-audio`, and every member of the form is compared with the stream vgmstream decodes for the same waveform, together with the cue names vgmstream gives that stream.
+The decoders are checked sample for sample against vgmstream on HCA files made for the tests, including encrypted ones with and without a subkey (`crates/sekai-codec/tests`), and the converter on cue sheets built in the tests (`crates/sekai-convert/tests/audio.rs`). On real bundles, the streams and cue names the reader finds are compared with vgmstream with the scripts in `tools/compare-audio`, and every waveform the reader finds is decoded and compared with the stream vgmstream decodes for it, together with the cue names vgmstream gives that stream.
+
+The MP3 encoder is checked in `crates/sekai-encode/tests/canonical.rs`: a file decodes with Symphonia to exactly as many samples as were encoded and close to them, its bitrate follows the rule above, and its bytes are fixed. `crates/sekai-codec/tests/cri.rs` checks that decoding a stream frame by frame gives the samples of decoding it whole.
 
 ## 6. Version
 
@@ -114,3 +128,5 @@ The decoders are checked sample for sample against vgmstream on HCA files made f
 | 1 | First version |
 | 2 | The cue table |
 | 3 | The arrangement of cues built of tracks, and the volume of a block's track under its layer |
+| 4 | Waveforms are MP3 files at a bitrate that follows the stream |
+| 5 | A sheet with an empty waveform table has no waveforms, so one whose cues play nothing gives no asset |

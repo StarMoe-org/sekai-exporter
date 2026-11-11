@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::OsString;
-use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -22,7 +21,9 @@ use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
 use crate::budget;
-use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, publish, report, write_ledger};
+use crate::export::{
+    BLOCK_CACHE_BYTES, Destination, IGNORED, converters, publish, report, write_ledger,
+};
 use crate::monitor::{self, Monitor};
 
 const INPUT_EXTENSION: &str = "bundle";
@@ -41,6 +42,8 @@ struct Options {
     memory: Option<u64>,
     plain: bool,
     force: bool,
+    /// Whether the bucket is checked against a listing of its store, trusting nothing else.
+    verify: bool,
 }
 
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error> {
@@ -56,6 +59,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut memory = None;
     let mut plain = false;
     let mut force = false;
+    let mut verify = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -67,6 +71,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("memory") => memory = Some(budget::parse_bytes(&parser.value()?.string()?)?),
             Long("plain") => plain = true,
             Long("force") => force = true,
+            Long("verify") => verify = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
         }
@@ -74,6 +79,9 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let [region, output]: [OsString; 2] = positional
         .try_into()
         .map_err(|_| lexopt::Error::from("expected <region> and <output>"))?;
+    if verify && !only.is_empty() {
+        return Err("--verify checks a bucket, and a selection is not sent to one".into());
+    }
     Ok(Options {
         region: region.string()?,
         output: PathBuf::from(output),
@@ -86,6 +94,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         memory,
         plain,
         force,
+        verify,
     })
 }
 
@@ -220,9 +229,8 @@ fn from_earlier_runs(
         let Some(key) = already_stored(&run.catalog, region, entry, &run.inputs)? else {
             continue;
         };
-        let mut writer = inputs.writer(INPUT_EXTENSION)?;
-        io::copy(&mut File::open(run.inputs.path(&key))?, &mut writer)?;
-        return writer.finish().map(|(key, _)| Some(key));
+        inputs.adopt(&key, &run.inputs.path(&key))?;
+        return Ok(Some(key));
     }
     Ok(None)
 }
@@ -383,7 +391,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     };
     identity.tables = tables.as_ref().map(|tables| tables.revision().to_owned());
     let name = identity.name();
-    if !options.force && previous.is_some_and(|p| p.same_content(&identity)) {
+    if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");
         return Ok(true);
     }
@@ -485,26 +493,22 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation,
         &name,
         &target,
-        &options.output,
-        options.tree.as_deref(),
+        &Destination {
+            output: &options.output,
+            tree: options.tree.as_deref(),
+        },
         &store,
+        options.threads,
         monitor,
     )?;
     write_ledger(&streamed.ledgers, &options.output, monitor)?;
     if !selection {
-        publish_bucket(
-            &config,
-            options.secrets.as_deref(),
-            &store,
-            &target,
-            &plan,
-            monitor,
-        )?;
+        publish_bucket(&config, options, &store, &target, &plan, monitor)?;
     }
 
     if let Some(root) = &options.storage {
         crate::storage::publish(
-            evaluation,
+            &plan,
             &name,
             root,
             &store,
@@ -630,17 +634,21 @@ fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
         .ok_or_else(|| format!("the secret {name} is not set").into())
 }
 
-/// Publishes `plan` to the bucket that the `publish.s3` section of the configuration describes.
+/// Publishes `plan` to the bucket that the `publish.s3` section of the configuration describes,
+/// with the secrets of `options`. With `--verify`, what the bucket holds is learned from a listing
+/// of its whole store.
 #[cfg(feature = "s3")]
 fn publish_bucket(
     config: &str,
-    secrets: Option<&Path>,
+    options: &Options,
     store: &LocalStore,
     target: &str,
     plan: &Plan,
     monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
-    use sekai_publish::s3::{self, Bucket, Credentials, S3, S3Layout};
+    use sekai_publish::s3::{self, Bucket, Check, Credentials, S3, S3Layout};
+
+    let secrets = options.secrets.as_deref();
 
     let Some(section) = bucket_section(config)? else {
         return Ok(());
@@ -697,8 +705,13 @@ fn publish_bucket(
     };
     let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
     let _span = monitor.span("publish", "s3", target);
-    let (_, report) =
-        s3::publish_with(store, &s3, target, plan, &layout).map_err(|e| e.to_string())?;
+    let check = if options.verify {
+        Check::Listing
+    } else {
+        Check::Pointer
+    };
+    let (_, report) = s3::publish_with(store, &s3, target, plan, &layout, check, options.threads)
+        .map_err(|e| e.to_string())?;
     println!(
         "bucket uploaded {} present {} pointer {}",
         report.uploaded,
@@ -737,7 +750,7 @@ fn parse_sqlite_options(
 #[cfg(not(feature = "s3"))]
 fn publish_bucket(
     config: &str,
-    _secrets: Option<&Path>,
+    _options: &Options,
     _store: &LocalStore,
     _target: &str,
     _plan: &Plan,

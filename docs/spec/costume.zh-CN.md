@@ -172,4 +172,4 @@ Moesekai 的 3D 服装查看器，以游戏服装界面的方式展示角色穿�
 
 ## 6. 版本
 
-`costume-model`、`costume-motion`、`costume-role` 与 `costume`：版本 1。上述任何内容的改动，或其所用格式的改动，都会改变版本。
+`costume-model`：版本 2，对应[模型文件](model.zh-CN.md)的版本 2。`costume-motion`、`costume-role` 与 `costume`：版本 1。上述任何内容的改动，或其所用格式的改动，都会改变版本。

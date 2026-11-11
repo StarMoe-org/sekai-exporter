@@ -47,7 +47,7 @@ impl Converter for CostumeModel {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
     }
 
     fn encoders(&self) -> sekai_convert::Encoders {
@@ -93,7 +93,6 @@ impl Converter for CostumeModel {
 /// How a part's model file is written.
 const PART: ModelConfig<'static> = ModelConfig {
     flip_uv: true,
-    declare_webp: true,
     node_keys: None,
     material_keys: None,
 };

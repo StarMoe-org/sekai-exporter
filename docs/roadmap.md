@@ -35,7 +35,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 |---|---|---|
 | Textures: Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and HDR | Done | Other formats are reported as unsupported |
 | HCA and ADX audio, ACB and AWB archives, USM containers | Done | |
-| PNG, lossless and lossy WebP, OpenEXR, FLAC, MP3, AAC | Done | [Features](features.md#backends) |
+| PNG, lossy WebP, OpenEXR, MP3, AAC | Done | [Features](features.md#backends) |
 
 ## Pipeline and publishing
 

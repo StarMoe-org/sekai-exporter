@@ -8,7 +8,11 @@ use crate::EncodeError;
 pub const NAME: &str = "png";
 
 /// The encoder version.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 4;
+
+/// The zlib compression level, from 1, the fastest, to 9. Each row takes the filter that suits
+/// it best.
+const LEVEL: u8 = 4;
 
 /// Writes `surface` as an 8-bit RGBA PNG.
 ///
@@ -22,7 +26,7 @@ pub fn encode(surface: &Surface) -> Result<Vec<u8>, EncodeError> {
     let mut encoder = png::Encoder::new(&mut out, surface.width(), surface.height());
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Balanced);
+    encoder.set_deflate_compression(png::DeflateCompression::Level(LEVEL));
     let mut writer = encoder.write_header().map_err(failed)?;
     writer.write_image_data(surface.pixels()).map_err(failed)?;
     writer.finish().map_err(failed)?;

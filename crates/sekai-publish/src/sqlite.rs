@@ -81,29 +81,29 @@ enum SqlValue {
     Blob(Vec<u8>),
 }
 
-/// Builds `index.sqlite` (and any configured `.tar` archives) for `plan` in `store`.
+/// Builds `index.sqlite` (and any configured `.tar` archives) for `plan` in `store`, after
+/// checking on up to `threads` threads that every file of `plan` is in `store`.
 pub fn build(
     store: &LocalStore,
     plan: &Plan,
     options: &SqliteOptions,
+    threads: usize,
 ) -> Result<SqliteBuild, PublishError> {
     let wrap_doc = PublishError::wrap("documents");
     let wrap_read = PublishError::wrap("verify");
 
-    // Verify all member files exist in store before packing or indexing.
+    if let Some(file) = index::missing(store, &plan.files, threads, |file| (&file.key, file.size))?
+    {
+        return Err(PublishError::new(
+            "verify",
+            format!("{} is not in the store as {}", file.path, file.key),
+        ));
+    }
     let member_files: Vec<&File> = plan
         .files
         .iter()
         .filter(|file| file.role != "document")
         .collect();
-    for file in &member_files {
-        if !index::stored(store, &file.key, file.size) {
-            return Err(PublishError::new(
-                "verify",
-                format!("{} is not in the store as {}", file.path, file.key),
-            ));
-        }
-    }
 
     // Group published member files by owning asset name (already in path order).
     let mut files_by_asset: BTreeMap<&str, Vec<&File>> = BTreeMap::new();
@@ -764,32 +764,22 @@ pub fn build(
 }
 
 /// Publishes the JSON index and `index.sqlite` of `plan` to `store`, and writes
-/// `<root>/<target>/current.json` with both `root` and `sqlite` populated.
+/// `<root>/<target>/current.json` with both `root` and `sqlite` populated. The store is written
+/// and checked on up to `threads` threads.
 pub fn publish(
     store: &LocalStore,
     root: &Path,
     target: &str,
     plan: &Plan,
     options: &SqliteOptions,
+    threads: usize,
 ) -> Result<Pointer, PublishError> {
     let index::Documents {
         mut pointer,
         objects,
-    } = index::documents(store, plan)?;
-    if let Some(file) = plan
-        .files
-        .iter()
-        .find(|file| !index::stored(store, &file.key, file.size))
-    {
-        return Err(PublishError::new(
-            "verify",
-            format!("{} is not in the store as {}", file.path, file.key),
-        ));
-    }
-    let built = build(store, plan, options)?;
-    if objects
-        .iter()
-        .any(|(key, size)| !index::stored(store, key, *size))
+    } = index::documents(store, plan, threads)?;
+    let built = build(store, plan, options, threads)?;
+    if index::missing(store, &objects, threads, |(key, size)| (key, *size))?.is_some()
         || !index::stored(store, &built.sqlite, built.sqlite_size)
     {
         return Err(PublishError::new(

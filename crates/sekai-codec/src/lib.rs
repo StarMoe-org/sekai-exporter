@@ -1,11 +1,13 @@
 //! Decoding of platform payloads into neutral forms: decoded image surfaces and PCM samples.
 //!
 //! Every decoder is written in pure Rust and compiles to `wasm32`. Decoders read bytes and
-//! return a [`Surface`] or [`Pcm`]; they know nothing about Unity objects, files or encoders.
+//! return a [`Surface`] or [`Pcm`], or a [`Sound`] that decodes while it is read; they know
+//! nothing about Unity objects, files or encoders.
 
 mod error;
 mod movie;
 mod pcm;
+mod sound;
 mod surface;
 
 #[cfg(feature = "cri")]
@@ -16,4 +18,5 @@ pub mod texture;
 pub use error::DecodeError;
 pub use movie::Movie;
 pub use pcm::Pcm;
+pub use sound::Sound;
 pub use surface::{HdrSurface, Surface};

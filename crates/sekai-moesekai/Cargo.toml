@@ -16,8 +16,7 @@ sekai-encode = { workspace = true, optional = true }
 sekai-format = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
-claxon = { version = "0.4.3", optional = true }
-image-webp = { version = "0.2.4", optional = true }
+png = { version = "0.18.1", optional = true }
 
 [features]
 scenario = []
@@ -34,16 +33,14 @@ storage-view = [
     "sekai-convert/image",
     "sekai-convert/audio",
     "sekai-convert/video",
-    "sekai-encode/mp3",
+    "sekai-encode/webp",
     "dep:sekai-codec",
     "dep:sekai-encode",
     "dep:sekai-format",
-    "dep:claxon",
-    "dep:image-webp",
+    "dep:png",
 ]
 
 [dev-dependencies]
-png = "0.18.1"
 serde_json = "1"
 
 [lints]

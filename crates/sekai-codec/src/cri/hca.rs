@@ -660,6 +660,16 @@ fn channel_kinds(header: &Header) -> [Kind; 2] {
     }
 }
 
+fn check_frame(frame: &[u8]) -> Result<(), DecodeError> {
+    if frame[..2] != [0xFF, 0xFF] {
+        return Err(malformed("frame without sync"));
+    }
+    if crc16(frame) != 0 {
+        return Err(malformed("frame checksum does not match"));
+    }
+    Ok(())
+}
+
 fn decode_frame(
     frame: &[u8],
     plain: &mut [u8],
@@ -668,12 +678,7 @@ fn decode_frame(
     channels: &mut [Channel],
     random: &mut u32,
 ) -> Result<(), DecodeError> {
-    if frame[..2] != [0xFF, 0xFF] {
-        return Err(malformed("frame without sync"));
-    }
-    if crc16(frame) != 0 {
-        return Err(malformed("frame checksum does not match"));
-    }
+    check_frame(frame)?;
     for (out, &stored) in plain.iter_mut().zip(frame) {
         *out = table[usize::from(stored)];
     }
@@ -725,73 +730,124 @@ fn loop_frames(header: &Header, length: usize) -> Option<[u64; 2]> {
 
 /// What the header of a stream says about its audio.
 pub(super) fn info(data: &[u8]) -> Result<super::HcaInfo, DecodeError> {
-    let header = parse_header(data)?;
+    parse_header(data).map(|header| header_info(&header))
+}
+
+fn header_info(header: &Header) -> super::HcaInfo {
     let total = header.frame_count * FRAME_SAMPLES;
     let length = total.saturating_sub(header.delay + header.padding);
-    Ok(super::HcaInfo {
+    super::HcaInfo {
         channels: header.channels as u16,
         sample_rate: header.sample_rate,
         frames: total as u64,
         length: length as u64,
-        loop_frames: loop_frames(&header, length),
-    })
+        loop_frames: loop_frames(header, length),
+        bitrate: (header.frame_size as u64 * 8 * u64::from(header.sample_rate)
+            / FRAME_SAMPLES as u64) as u32,
+    }
+}
+
+/// A stream decoded one frame at a time.
+pub(super) struct Frames<'a> {
+    header: Header,
+    table: [u8; 256],
+    channels: Vec<Channel>,
+    random: u32,
+    plain: Vec<u8>,
+    /// The frames still to decode.
+    frames: std::slice::ChunksExact<'a, u8>,
+    /// The sample of the first frame still to decode, counted from the start of the stream.
+    start: usize,
+    /// The samples kept, `[delay, total - padding)`.
+    kept: std::ops::Range<usize>,
+}
+
+impl<'a> Frames<'a> {
+    /// The frames of the stream `data`, which `key` decrypts.
+    pub(super) fn new(data: &'a [u8], key: Option<HcaKey>) -> Result<Self, DecodeError> {
+        let header = parse_header(data)?;
+        let table = cipher_table(&header, key)?;
+        let needed = header
+            .frame_count
+            .checked_mul(header.frame_size)
+            .and_then(|frames| frames.checked_add(header.size))
+            .ok_or_else(|| malformed("frame count is too large"))?;
+        if data.len() < needed {
+            return Err(DecodeError::Truncated {
+                what: "HCA frames",
+                needed,
+                available: data.len(),
+            });
+        }
+        let total = header.frame_count * FRAME_SAMPLES;
+        if header.delay + header.padding > total {
+            return Err(malformed("delay and padding exceed the stream"));
+        }
+        let kinds = channel_kinds(&header);
+        let channels = (0..header.channels)
+            .map(|i| {
+                let stereo = if kinds[i] == Kind::Secondary {
+                    0
+                } else {
+                    header.stereo_bands
+                };
+                Channel::new(kinds[i], header.base_bands + stereo)
+            })
+            .collect();
+        Ok(Self {
+            table,
+            channels,
+            random: 1,
+            plain: vec![0; header.frame_size],
+            frames: data[header.size..needed].chunks_exact(header.frame_size),
+            start: 0,
+            kept: header.delay..total - header.padding,
+            header,
+        })
+    }
+
+    pub(super) fn info(&self) -> super::HcaInfo {
+        header_info(&self.header)
+    }
+
+    /// Checks the sync word and the checksum of every frame without decoding any.
+    pub(super) fn check(&self) -> Result<(), DecodeError> {
+        self.frames.clone().try_for_each(check_frame)
+    }
+
+    /// Decodes the next frame and appends its samples, interleaved by channel, without the
+    /// encoder delay and padding it holds. `false` once every frame is decoded.
+    pub(super) fn next(&mut self, samples: &mut Vec<i16>) -> Result<bool, DecodeError> {
+        let Some(frame) = self.frames.next() else {
+            return Ok(false);
+        };
+        decode_frame(
+            frame,
+            &mut self.plain,
+            &self.table,
+            &self.header,
+            &mut self.channels,
+            &mut self.random,
+        )?;
+        let start = self.start;
+        self.start += FRAME_SAMPLES;
+        let kept = self.kept.start.max(start)..self.kept.end.min(self.start);
+        for at in kept {
+            let (subframe, band) = ((at - start) / BANDS, (at - start) % BANDS);
+            for channel in &self.channels {
+                let scaled = (channel.wave[subframe][band] * 32767.0) as i32;
+                samples.push(scaled.clamp(-32768, 32767) as i16);
+            }
+        }
+        Ok(true)
+    }
 }
 
 /// Decodes a stream to PCM, without its encoder delay and padding.
 pub(super) fn decode(data: &[u8], key: Option<HcaKey>) -> Result<Pcm, DecodeError> {
-    let header = parse_header(data)?;
-    let table = cipher_table(&header, key)?;
-    let needed = header
-        .frame_count
-        .checked_mul(header.frame_size)
-        .and_then(|frames| frames.checked_add(header.size))
-        .ok_or_else(|| malformed("frame count is too large"))?;
-    if data.len() < needed {
-        return Err(DecodeError::Truncated {
-            what: "HCA frames",
-            needed,
-            available: data.len(),
-        });
-    }
-    let total = header.frame_count * FRAME_SAMPLES;
-    if header.delay + header.padding > total {
-        return Err(malformed("delay and padding exceed the stream"));
-    }
-
-    let kinds = channel_kinds(&header);
-    let mut channels: Vec<Channel> = (0..header.channels)
-        .map(|i| {
-            let stereo = if kinds[i] == Kind::Secondary {
-                0
-            } else {
-                header.stereo_bands
-            };
-            Channel::new(kinds[i], header.base_bands + stereo)
-        })
-        .collect();
-    let mut random = 1;
-    let mut plain = vec![0; header.frame_size];
-    let mut samples = Vec::with_capacity(total * header.channels);
-    for frame in data[header.size..needed].chunks_exact(header.frame_size) {
-        decode_frame(
-            frame,
-            &mut plain,
-            &table,
-            &header,
-            &mut channels,
-            &mut random,
-        )?;
-        for subframe in 0..SUBFRAMES {
-            for band in 0..BANDS {
-                for channel in &channels {
-                    let scaled = (channel.wave[subframe][band] * 32767.0) as i32;
-                    samples.push(scaled.clamp(-32768, 32767) as i16);
-                }
-            }
-        }
-    }
-    let start = header.delay * header.channels;
-    let end = (total - header.padding) * header.channels;
-    let kept = samples[start..end].to_vec();
-    Pcm::new(header.sample_rate, header.channels as u16, kept)
+    let mut frames = Frames::new(data, key)?;
+    let info = frames.info();
+    let mut samples = Vec::with_capacity(info.length as usize * usize::from(info.channels));
+    while frames.next(&mut samples)? {}
+    Pcm::new(info.sample_rate, info.channels, samples)
 }

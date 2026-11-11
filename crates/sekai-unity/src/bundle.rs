@@ -326,26 +326,18 @@ impl Bundle {
             bundle: self.id,
             block: index as u32,
         };
-        if let Some(hit) = cache.get(&key) {
-            let end = <[u8]>::len(&hit);
-            return Ok(Chunk::Shared {
-                block: hit,
-                start: 0,
-                end,
-            });
-        }
-        let stored = read_stored()?;
-        let bytes: Arc<[u8]> = decompress(
-            block.compression,
-            &stored,
-            block.info.uncompressed_size as usize,
-        )
-        .map_err(|message| Error::Decompress {
-            block: index as u32,
-            message,
-        })?
-        .into();
-        cache.insert(key, bytes.clone());
+        let bytes = cache.get_or_insert_with(key, &|| {
+            decompress(
+                block.compression,
+                &read_stored()?,
+                block.info.uncompressed_size as usize,
+            )
+            .map(Arc::from)
+            .map_err(|message| Error::Decompress {
+                block: index as u32,
+                message,
+            })
+        })?;
         let end = <[u8]>::len(&bytes);
         Ok(Chunk::Shared {
             block: bytes,

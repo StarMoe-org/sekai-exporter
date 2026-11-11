@@ -25,8 +25,6 @@ pub const FLOAT: u32 = 5126;
 pub const ARRAY_BUFFER: u32 = 34962;
 /// The buffer view target of indices.
 pub const ELEMENT_ARRAY_BUFFER: u32 = 34963;
-/// The extension for WebP images.
-pub const EXT_TEXTURE_WEBP: &str = "EXT_texture_webp";
 /// The extension for texture coordinate transforms.
 pub const KHR_TEXTURE_TRANSFORM: &str = "KHR_texture_transform";
 
@@ -329,25 +327,6 @@ impl<T: Serialize> Serialize for Named<T> {
 pub struct Texture {
     /// The sampler.
     pub sampler: usize,
-    /// The image, through [`EXT_TEXTURE_WEBP`] or named directly.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub extensions: Option<TextureExtensions>,
-    /// The image, when the file does not use [`EXT_TEXTURE_WEBP`].
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<usize>,
-}
-
-/// The extensions of a texture.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct TextureExtensions {
-    /// The WebP image.
-    #[serde(rename = "EXT_texture_webp")]
-    pub webp: ImageSource,
-}
-
-/// The image of a texture.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct ImageSource {
     /// The image.
     pub source: usize,
 }

@@ -1,12 +1,10 @@
 //! Requests with retries, back-off and a rate limit.
 
-use std::io::Read;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use ureq::http::Response;
-use ureq::typestate::WithBody;
-use ureq::{Agent, Body, Proxy, RequestBuilder};
+use reqwest::{Client, Proxy, RequestBuilder, Response};
+use tokio::runtime::Runtime;
 
 use super::SourceError;
 use super::region::Network;
@@ -22,8 +20,12 @@ pub(super) enum Failure {
     Fatal(SourceError),
 }
 
+/// A client that speaks HTTP/2 to the hosts that offer it, where the requests that run at the
+/// same time share one connection, and HTTP/1.1 to the others. Its methods block the calling
+/// thread; the connections are driven by a thread of the client.
 pub(super) struct Http {
-    agent: Agent,
+    client: Client,
+    runtime: Runtime,
     retries: u32,
     back_off: Duration,
     interval: Option<Duration>,
@@ -32,17 +34,23 @@ pub(super) struct Http {
 
 impl Http {
     pub(super) fn new(network: &Network) -> Result<Self, SourceError> {
-        let mut config = Agent::config_builder()
-            .http_status_as_error(false)
-            .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(60)))
-            .timeout_per_read(Some(Duration::from_secs(60)));
+        // The process has one TLS provider; a client made earlier has installed it already.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let mut client = Client::builder()
+            .connect_timeout(Duration::from_secs(30))
+            .read_timeout(Duration::from_secs(60))
+            .http2_adaptive_window(true);
         if let Some(proxy) = &network.proxy {
-            let proxy = Proxy::new(proxy).map_err(|e| SourceError::new("config", e))?;
-            config = config.proxy(Some(proxy));
+            client = client.proxy(Proxy::all(proxy).map_err(|e| SourceError::new("config", e))?);
         }
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .map_err(|e| SourceError::new("config", e))?;
         Ok(Self {
-            agent: config.build().into(),
+            client: client.build().map_err(|e| SourceError::new("config", e))?,
+            runtime,
             retries: network.retries,
             back_off: Duration::from_millis(network.back_off_ms),
             interval: network
@@ -90,17 +98,54 @@ impl Http {
     }
 
     /// Sends one GET request.
-    pub(super) fn get(&self, url: &str, headers: &Headers) -> Result<Response<Body>, Failure> {
-        let mut request = self.agent.get(url);
-        for (name, value) in headers {
-            request = request.header(*name, value.as_str());
+    pub(super) fn get(&self, url: &str, headers: &Headers) -> Result<Response, Failure> {
+        self.send(url, with(self.client.get(url), headers))
+    }
+
+    /// Sends `request` and returns the response when its status is a success.
+    fn send(&self, url: &str, request: RequestBuilder) -> Result<Response, Failure> {
+        // The request starts its timers when it is sent, which needs the runtime.
+        let response = self
+            .runtime
+            .block_on(async { request.send().await })
+            .map_err(|e| network(url, e))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(response);
         }
-        accepted(url, request.call())
+        let mut error = SourceError::new("status", format!("HTTP {status} for {url}"));
+        error.status = Some(status);
+        Err(if status == 408 || status == 429 || status >= 500 {
+            Failure::Retry(error)
+        } else {
+            Failure::Fatal(error)
+        })
+    }
+
+    /// Reads a whole response.
+    fn whole(&self, url: &str, response: Response) -> Result<Vec<u8>, Failure> {
+        let bytes = self
+            .runtime
+            .block_on(response.bytes())
+            .map_err(|e| network(url, e))?;
+        Ok(bytes.into())
+    }
+
+    /// Sends `request` with `headers` and `body` and reads the response.
+    fn exchange(
+        &self,
+        request: RequestBuilder,
+        url: &str,
+        headers: &Headers,
+        body: &[u8],
+    ) -> Result<Vec<u8>, Failure> {
+        let response = self.send(url, with(request, headers).body(body.to_vec()))?;
+        self.whole(url, response)
     }
 
     /// Reads a whole response.
     pub(super) fn bytes(&self, url: &str, headers: &Headers) -> Result<Vec<u8>, SourceError> {
-        self.attempts(|_| whole(url, self.get(url, headers)?))
+        self.attempts(|_| self.whole(url, self.get(url, headers)?))
     }
 
     /// Sends one POST request with `body`, without retrying it, and reads the response.
@@ -111,7 +156,7 @@ impl Http {
         body: &[u8],
     ) -> Result<Vec<u8>, SourceError> {
         self.pace();
-        send(self.agent.post(url), url, headers, body)
+        self.exchange(self.client.post(url), url, headers, body)
             .map_err(|(Failure::Retry(error) | Failure::Fatal(error))| error)
     }
 
@@ -122,17 +167,13 @@ impl Http {
         headers: &Headers,
         body: &[u8],
     ) -> Result<Vec<u8>, SourceError> {
-        self.attempts(|_| send(self.agent.put(url), url, headers, body))
+        self.attempts(|_| self.exchange(self.client.put(url), url, headers, body))
     }
 
     /// Sends an empty POST request and returns the cookies it sets.
     pub(super) fn cookies(&self, url: &str, headers: &Headers) -> Result<Vec<String>, SourceError> {
         self.attempts(|_| {
-            let mut request = self.agent.post(url);
-            for (name, value) in headers {
-                request = request.header(*name, value.as_str());
-            }
-            let response = accepted(url, request.send_empty())?;
+            let response = self.send(url, with(self.client.post(url), headers))?;
             Ok(response
                 .headers()
                 .get_all("set-cookie")
@@ -142,96 +183,48 @@ impl Http {
                 .collect())
         })
     }
-}
 
-fn send(
-    mut request: RequestBuilder<WithBody>,
-    url: &str,
-    headers: &Headers,
-    body: &[u8],
-) -> Result<Vec<u8>, Failure> {
-    for (name, value) in headers {
-        request = request.header(*name, value.as_str());
+    /// Streams `response` into `sink` and checks the number of bytes against `expected`.
+    pub(super) fn copy(
+        &self,
+        url: &str,
+        mut response: Response,
+        sink: &mut dyn Sink,
+        expected: Option<u64>,
+    ) -> Result<u64, Failure> {
+        let mut total = 0;
+        while let Some(chunk) = self
+            .runtime
+            .block_on(response.chunk())
+            .map_err(|e| network(url, e))?
+        {
+            sink.write_all(&chunk)
+                .map_err(|e| Failure::Fatal(SourceError::new("sink", e)))?;
+            total += chunk.len() as u64;
+        }
+        match expected {
+            Some(expected) if expected != total => Err(Failure::Retry(SourceError::new(
+                "length",
+                format!("{url}: expected {expected} bytes, received {total}"),
+            ))),
+            _ => Ok(total),
+        }
     }
-    whole(url, accepted(url, request.send(body))?)
 }
 
-/// Reads a whole response.
-fn whole(url: &str, mut response: Response<Body>) -> Result<Vec<u8>, Failure> {
-    response
-        .body_mut()
-        .with_config()
-        .limit(u64::MAX)
-        .read_to_vec()
-        .map_err(|e| Failure::Retry(SourceError::new("network", format!("{url}: {e}"))))
-}
-
-fn accepted(
-    url: &str,
-    result: Result<Response<Body>, ureq::Error>,
-) -> Result<Response<Body>, Failure> {
-    let response =
-        result.map_err(|e| Failure::Retry(SourceError::new("network", format!("{url}: {e}"))))?;
-    let status = response.status().as_u16();
-    if (200..300).contains(&status) {
-        return Ok(response);
-    }
-    let mut error = SourceError::new("status", format!("HTTP {status} for {url}"));
-    error.status = Some(status);
-    Err(if status == 408 || status == 429 || status >= 500 {
-        Failure::Retry(error)
-    } else {
-        Failure::Fatal(error)
+/// `request` with `headers`.
+fn with(request: RequestBuilder, headers: &Headers) -> RequestBuilder {
+    headers.iter().fold(request, |request, (name, value)| {
+        request.header(*name, value.as_str())
     })
 }
 
-/// The length the response says it has.
-pub(super) fn content_length(response: &Response<Body>) -> Option<u64> {
-    response
-        .headers()
-        .get("content-length")?
-        .to_str()
-        .ok()?
-        .parse()
-        .ok()
+fn network(url: &str, error: impl std::fmt::Display) -> Failure {
+    Failure::Retry(SourceError::new("network", format!("{url}: {error}")))
 }
 
 /// Starts a transfer again in `sink`.
 pub(super) fn restart(sink: &mut dyn Sink) -> Result<(), Failure> {
     sink.reset()
         .map_err(|e| Failure::Fatal(SourceError::new("sink", e)))
-}
-
-/// Streams `response` into `sink` and checks the number of bytes against `expected`.
-pub(super) fn copy(
-    url: &str,
-    response: Response<Body>,
-    sink: &mut dyn Sink,
-    expected: Option<u64>,
-) -> Result<u64, Failure> {
-    let mut reader = response
-        .into_body()
-        .into_with_config()
-        .limit(u64::MAX)
-        .reader();
-    let mut buffer = vec![0; 1 << 16];
-    let mut total = 0;
-    loop {
-        let read = reader
-            .read(&mut buffer)
-            .map_err(|e| Failure::Retry(SourceError::new("network", format!("{url}: {e}"))))?;
-        if read == 0 {
-            break;
-        }
-        sink.write_all(&buffer[..read])
-            .map_err(|e| Failure::Fatal(SourceError::new("sink", e)))?;
-        total += read as u64;
-    }
-    match expected {
-        Some(expected) if expected != total => Err(Failure::Retry(SourceError::new(
-            "length",
-            format!("{url}: expected {expected} bytes, received {total}"),
-        ))),
-        _ => Ok(total),
-    }
 }

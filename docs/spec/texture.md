@@ -70,7 +70,7 @@ Texture arrays and 3D textures name their format with `m_Format`, a graphics for
 
 ## 4. Container
 
-The member is decoded content, which the evaluator encodes. The canonical file is lossless WebP, written by the `webp-lossless` encoder (version 1) with the fixed parameters of that encoder. The canonical file of an HDR image is OpenEXR with half-float RGBA channels and ZIP compression, written by the `exr` encoder (version 1), which stores every decoded value exactly; browsers cannot show it, so a view that needs an 8-bit image clamps each value to 0..=1, multiplies it by 255 and rounds it. Views that need another container, such as PNG, produce it from the same decoded image with their own encoder.
+The member is decoded content, which the evaluator encodes. The canonical file is an 8-bit RGBA PNG, written by the `png` encoder (version 4) at zlib compression level 4, with each row's filter chosen adaptively. The canonical file of an HDR image is OpenEXR with half-float RGBA channels and ZIP compression, written by the `exr` encoder (version 1), which stores every decoded value exactly; browsers cannot show it, so a view that needs an 8-bit image clamps each value to 0..=1, multiplies it by 255 and rounds it. Views that need another container, such as WebP, produce it from the same decoded image with their own encoder.
 
 ## 5. Correctness
 

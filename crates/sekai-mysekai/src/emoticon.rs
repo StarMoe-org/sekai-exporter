@@ -23,7 +23,7 @@ const FORM: &str = "emoticon";
 const NAME: &str = "mysekai-runtime/emoticons/emoticons";
 const PACKAGE_PREFIX: &str = "mysekai/effect/emoticon/";
 
-const TEXTURE_EXTENSION: &str = "webp";
+const TEXTURE_EXTENSION: &str = "png";
 const LOOP_END_FLAG: &str = "LOOP_END_FLAG";
 /// The most frames an overhead item's resampled clip may hold.
 const MAX_FRAMES: u32 = 100_000;

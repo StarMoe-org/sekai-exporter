@@ -2,18 +2,27 @@
 //! memory budget and the connections of each remote.
 //!
 //! A job declares the memory it holds from start to end and, optionally, one connection to a
-//! remote. Inside, it takes CPU slots for each part of its work with [`Slots::cpu`], so a job can
-//! convert on one slot and encode on two. Jobs receive their memory and connection in the order
-//! given; a job that does not fit waits, and one that needs more than the whole budget runs
-//! alone. With one CPU slot every job runs on the calling thread, in order, and no thread is
-//! created.
+//! remote. Inside, it takes CPU slots for each part of its work with [`Slots::cpu`] or
+//! [`Slots::hold`], so a job can convert on one slot and encode on two. Jobs start in the order
+//! given while they fit. A job that does not fit waits, and lets at most [`BACKFILL`] jobs that
+//! do fit, from the [`BACKFILL`] after it, start ahead of it; one that needs more than the whole
+//! budget runs alone. With one CPU slot every job runs on the calling thread, in order, and no
+//! thread is created.
+//!
+//! Several runs may share one scheduler at once, each from its own thread. Each keeps its own
+//! order, and all of them draw on the same CPU slots, memory budget and connections.
 //!
 //! Declared needs are estimates. With [`Limits::resident`], a job also waits while the memory the
 //! process holds, the needs of the running jobs and its own need together exceed a limit, so
 //! memory that estimates miss, or that the allocator keeps after jobs end, holds back new jobs.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::OnceCell;
+use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
+
+/// How far a job that does not fit is passed over: later jobs start ahead of it from this many
+/// places behind it, this many times. Then the jobs that run finish and it starts.
+pub const BACKFILL: usize = 32;
 
 /// The resources a run may use.
 #[derive(Debug, Clone)]
@@ -37,6 +46,18 @@ pub struct Resident {
     pub probe: fn() -> u64,
 }
 
+impl Limits {
+    /// `cpu` CPU slots, with no memory budget and no remotes.
+    pub fn threads(cpu: usize) -> Self {
+        Self {
+            cpu,
+            memory: u64::MAX,
+            connections: Vec::new(),
+            resident: None,
+        }
+    }
+}
+
 /// What a job holds from its start to its end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Need {
@@ -54,8 +75,14 @@ struct State {
     memory: u64,
     /// The connections in use, by remote.
     connections: Vec<usize>,
-    /// The number of the next job to receive its memory.
-    turn: usize,
+}
+
+/// The jobs of one run that have not started.
+struct Queue {
+    /// The jobs, in order.
+    waiting: VecDeque<usize>,
+    /// The jobs that started ahead of the first waiting job.
+    overtaken: usize,
 }
 
 /// Runs jobs within [`Limits`].
@@ -63,7 +90,10 @@ struct State {
 pub struct Scheduler {
     limits: Limits,
     state: Mutex<State>,
+    /// Signalled when a job ends or the first waiting job starts: another job may start.
     changed: Condvar,
+    /// Signalled when CPU slots are returned.
+    freed: Condvar,
 }
 
 /// What a running job takes CPU slots through.
@@ -72,29 +102,48 @@ pub struct Slots<'s> {
     scheduler: &'s Scheduler,
 }
 
-impl Slots<'_> {
-    /// Runs `work` on `slots` CPU slots, waiting until they are free. A request for more slots
-    /// than there are takes all of them. Work must not take slots again from inside `work`.
-    pub fn cpu<R>(&self, slots: usize, work: impl FnOnce() -> R) -> R {
+/// CPU slots, returned when dropped.
+#[derive(Debug)]
+#[must_use = "the slots are returned when this is dropped"]
+pub struct Held<'s> {
+    scheduler: &'s Scheduler,
+    slots: usize,
+}
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        if self.slots > 0 {
+            self.scheduler.lock().cpu -= self.slots;
+            self.scheduler.freed.notify_all();
+        }
+    }
+}
+
+impl<'s> Slots<'s> {
+    /// Takes `slots` CPU slots, waiting until they are free. A request for more slots than there
+    /// are takes all of them. Slots must not be taken again while these are held.
+    pub fn hold(&self, slots: usize) -> Held<'s> {
         let scheduler = self.scheduler;
-        let slots = slots.clamp(1, scheduler.limits.cpu.max(1));
+        // With one slot, jobs run one after another and there is nothing to wait for.
         if scheduler.limits.cpu <= 1 {
-            return work();
+            return Held {
+                scheduler,
+                slots: 0,
+            };
         }
-        {
-            let mut state = scheduler.lock();
-            while state.cpu + slots > scheduler.limits.cpu {
-                state = scheduler.wait(state);
-            }
-            state.cpu += slots;
+        let slots = slots.clamp(1, scheduler.limits.cpu);
+        let mut state = scheduler.lock();
+        while state.cpu + slots > scheduler.limits.cpu {
+            state = wait(&scheduler.freed, state);
         }
-        let release = Release(|| {
-            scheduler.lock().cpu -= slots;
-            scheduler.changed.notify_all();
-        });
-        let result = work();
-        drop(release);
-        result
+        state.cpu += slots;
+        Held { scheduler, slots }
+    }
+
+    /// Runs `work` on `slots` CPU slots, taken as [`Slots::hold`] takes them.
+    pub fn cpu<R>(&self, slots: usize, work: impl FnOnce() -> R) -> R {
+        let _held = self.hold(slots);
+        work()
     }
 }
 
@@ -105,6 +154,12 @@ impl<F: FnMut()> Drop for Release<F> {
     fn drop(&mut self) {
         (self.0)();
     }
+}
+
+fn wait<'a>(condition: &Condvar, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
+    condition
+        .wait(state)
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 impl Scheduler {
@@ -118,6 +173,7 @@ impl Scheduler {
             limits,
             state: Mutex::new(state),
             changed: Condvar::new(),
+            freed: Condvar::new(),
         }
     }
 
@@ -130,20 +186,15 @@ impl Scheduler {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn wait<'a>(&self, state: MutexGuard<'a, State>) -> MutexGuard<'a, State> {
-        self.changed
-            .wait(state)
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
     /// The memory job `need` holds: all of the budget when it needs more than the budget.
     fn held(&self, need: &Need) -> u64 {
         need.memory.min(self.limits.memory)
     }
 
-    /// Whether `need` can start now. A job that needs memory starts when nothing else holds
-    /// memory, whatever the limits, so every job gets to run.
-    fn fits(&self, state: &State, need: &Need) -> bool {
+    /// Whether `need` can start now. The memory of the process is read at most once into
+    /// `probed`. A job that needs memory starts when nothing else holds memory, whatever the
+    /// limits, so every job gets to run.
+    fn fits(&self, state: &State, need: &Need, probed: &OnceCell<u64>) -> bool {
         let held = self.held(need);
         let memory = state.memory + held <= self.limits.memory;
         let connection = need.remote.is_none_or(|remote| {
@@ -152,7 +203,8 @@ impl Scheduler {
         // The running jobs count with their whole needs, whether or not they have allocated yet.
         let resident = || match self.limits.resident {
             Some(resident) if held > 0 && state.memory > 0 => {
-                (resident.probe)()
+                probed
+                    .get_or_init(resident.probe)
                     .saturating_add(state.memory)
                     .saturating_add(held)
                     <= resident.limit
@@ -163,7 +215,8 @@ impl Scheduler {
     }
 
     /// Runs `job(i, slots)` for each `i` in `0..needs.len()` and returns the results in that
-    /// order. Jobs start in index order, each once its need fits.
+    /// order. Jobs start in index order, except that jobs start ahead of one that does not fit,
+    /// as far as [`BACKFILL`] allows.
     ///
     /// # Panics
     ///
@@ -186,18 +239,16 @@ impl Scheduler {
         if self.limits.cpu <= 1 {
             return (0..needs.len()).map(|i| job(i, &slots)).collect();
         }
-        let next = AtomicUsize::new(0);
+        let queue = Mutex::new(Queue {
+            waiting: (0..needs.len()).collect(),
+            overtaken: 0,
+        });
         let results: Mutex<Vec<Option<T>>> = Mutex::new((0..needs.len()).map(|_| None).collect());
         std::thread::scope(|s| {
             for _ in 0..self.limits.cpu.min(needs.len()) {
                 s.spawn(|| {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(need) = needs.get(i) else {
-                            break;
-                        };
-                        self.acquire(i, need);
-                        let release = Release(|| self.release(need));
+                    while let Some(i) = self.start(&queue, needs) {
+                        let release = Release(|| self.release(&needs[i]));
                         let result = job(i, &slots);
                         drop(release);
                         results.lock().unwrap_or_else(PoisonError::into_inner)[i] = Some(result);
@@ -213,19 +264,51 @@ impl Scheduler {
             .collect()
     }
 
-    /// Waits for the turn of job `i` and for its need to fit, then takes it.
-    fn acquire(&self, i: usize, need: &Need) {
+    /// Waits until a job of `queue` can start, takes what it needs and returns its number; `None`
+    /// once every job of the queue has started. The queue is locked before the state, and kept
+    /// while its run waits, so the workers of one run wait on it one at a time.
+    fn start(&self, queue: &Mutex<Queue>, needs: &[Need]) -> Option<usize> {
+        let mut queue = queue.lock().unwrap_or_else(PoisonError::into_inner);
         let mut state = self.lock();
-        while state.turn != i || !self.fits(&state, need) {
-            state = self.wait(state);
+        loop {
+            queue.waiting.front()?;
+            if let Some(position) = self.startable(&state, &queue, needs) {
+                let i = queue.waiting.remove(position)?;
+                let need = &needs[i];
+                queue.overtaken = if position == 0 {
+                    0
+                } else {
+                    queue.overtaken + 1
+                };
+                state.memory += self.held(need);
+                if let Some(remote) = need.remote {
+                    state.connections[remote] += 1;
+                }
+                drop(state);
+                // The next first job may be passed over anew, and without one the run ends.
+                if position == 0 {
+                    self.changed.notify_all();
+                }
+                return Some(i);
+            }
+            state = wait(&self.changed, state);
         }
-        state.turn += 1;
-        state.memory += self.held(need);
-        if let Some(remote) = need.remote {
-            state.connections[remote] += 1;
-        }
-        drop(state);
-        self.changed.notify_all();
+    }
+
+    /// The position among the waiting jobs of `queue` of the one to start now: the first that
+    /// fits, no further behind the first than it may still be passed over.
+    fn startable(&self, state: &State, queue: &Queue, needs: &[Need]) -> Option<usize> {
+        let reach = if queue.overtaken < BACKFILL {
+            1 + BACKFILL
+        } else {
+            1
+        };
+        let probed = OnceCell::new();
+        queue
+            .waiting
+            .iter()
+            .take(reach)
+            .position(|&i| self.fits(state, &needs[i], &probed))
     }
 
     fn release(&self, need: &Need) {
@@ -241,7 +324,7 @@ impl Scheduler {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::thread::ThreadId;
     use std::time::Duration;
 
@@ -334,6 +417,47 @@ mod tests {
             running.sub(1);
         });
         assert_eq!(alone.load(Ordering::SeqCst), 4);
+    }
+
+    /// Memory needs as jobs without connections.
+    fn memory_needs(memory: impl IntoIterator<Item = u64>) -> Vec<Need> {
+        let need = |memory| Need {
+            memory,
+            remote: None,
+        };
+        memory.into_iter().map(need).collect()
+    }
+
+    #[test]
+    fn a_job_that_fits_starts_ahead_of_one_that_does_not() {
+        let scheduler = Scheduler::new(limits(4, 100));
+        let needs = memory_needs([80, 80, 10]);
+        let started = Mutex::new(Vec::new());
+        let small_started = || started.lock().unwrap().contains(&2);
+        scheduler.run(&needs, |i, _| {
+            started.lock().unwrap().push(i);
+            // The first job ends only after the last has started, which the second must not
+            // hold back.
+            while i == 0 && !small_started() {
+                pause();
+            }
+        });
+        assert_eq!(started.into_inner().unwrap(), [0, 2, 1]);
+    }
+
+    #[test]
+    fn a_job_is_passed_over_a_bounded_number_of_times() {
+        let scheduler = Scheduler::new(limits(2, 100));
+        // The second job needs the whole budget, which is free only when no small job runs.
+        let needs = memory_needs([10, 100].into_iter().chain([10; 400]));
+        let started = Mutex::new(Vec::new());
+        scheduler.run(&needs, |i, _| {
+            started.lock().unwrap().push(i);
+            pause();
+        });
+        let started = started.into_inner().unwrap();
+        let before = started.iter().position(|&i| i == 1).unwrap();
+        assert!(before <= 1 + BACKFILL, "{before} jobs started first");
     }
 
     #[test]

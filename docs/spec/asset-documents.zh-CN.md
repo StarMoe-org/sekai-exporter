@@ -24,7 +24,7 @@
     { "bundle": "character/member/res001_no001", "path_id": "-8500090008082076930", "class": "Texture2D" }
   ],
   "members": [
-    { "role": "image", "sha256": "…", "size": 482113, "extension": "webp", "media_type": "image/webp" }
+    { "role": "image", "sha256": "…", "size": 482113, "extension": "png", "media_type": "image/png" }
   ],
   "references": []
 }

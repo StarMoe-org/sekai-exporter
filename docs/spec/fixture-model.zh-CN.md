@@ -222,8 +222,8 @@
 
 GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、其网格、材质、贴图与采样器。与[模型文件](model.zh-CN.md)的容器相比的差异为：
 
-- **图像位于文件之外。** `images[].uri` 为 `texture/<n>.webp`，`texture/<n>` 是同一资产中具该角色的成员。每个图像都是 8 位 WebP，行序从图像顶部开始。没有图像被内嵌，也没有图像是 PNG。
-- **没有扩展声明 WebP 图像。** 对于这些图像，`extensionsUsed` 与 `extensionsRequired` 中既不列出 `EXT_texture_webp`，也不列出任何其他扩展：`texture.source` 直接命名图像。
+- **图像位于文件之外。** `images[].uri` 为 `texture/<n>.png`，`texture/<n>` 是同一资产中具该角色的成员。每个图像都是 8 位 RGBA PNG，行序从图像顶部开始。没有图像被内嵌。
+- **贴图直接命名其图像。** `texture.source` 命名图像，`extensionsUsed` 与 `extensionsRequired` 中不为这些图像列出任何扩展。
 - **`KHR_texture_transform` 只用于基础颜色贴图**，且其槽在任一轴上的缩放不为 1，或在任一轴上的偏移不为 0。只有在写出时才列入 `extensionsUsed`。其缩放为该槽的缩放，其偏移为 `(ox, 1 - sy - oy)`，其中该槽的缩放为 `(sx, sy)`、偏移为 `(ox, oy)`。每个其他贴图属性只在 `textures` 中保留其缩放与偏移，由运行时自行施用。
 - **贴图坐标不翻转。** `TEXCOORD_n` 为源分量对原样（u, v），其中 v 从图像底部计数，而图像中的行从顶部写出。运行时在采样时翻转 v。这是与模型文件 UV 规则的唯一差异，也是本形式不使用模型文件的翻转的原因。
 - **基变换即模型文件的基变换：** 右手系、Y 向上、对 X 取反（`S = diag(-1, 1, 1)`），施用于位置、旋转、法线、切线、三角形、绑定姿势与碰撞几何，使场景与碰撞处于同一空间。
@@ -239,7 +239,7 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 1. 它有一个场景，即默认场景，且恰有一个节点带有 `fixtureViewRoot`；该节点是场景唯一的根节点，并且是预制体根。
 2. 每个节点带有 `sourceObject`，其值是该节点所写出源对象的 id，且没有两个节点具有相同的 `(file, gameObjectId, transformId)`。
 3. 根带有 `fixtureCollision`；碰撞体所命名的每个 `geometryId` 都是该文档中的一个几何；导航构建所读取的每个节点都具有带 2.3 所述键的 `sourceCollision`。
-4. 每个材质都有 `shader`、`renderQueue`、`keywords`、`floats`、`ints`、`colors` 与 `textures`，且每个贴图属性都在 `textures` 中；程序由 2.4.4 给出运行时材质的每个材质，都持有该程序的材质代码从 extras 读取的每个键；`textures` 中的每个贴图索引都命名一个贴图，每个贴图都命名一个作为该资产成员的图像；每个图像都是 WebP 且可解码。
+4. 每个材质都有 `shader`、`renderQueue`、`keywords`、`floats`、`ints`、`colors` 与 `textures`，且每个贴图属性都在 `textures` 中；程序由 2.4.4 给出运行时材质的每个材质，都持有该程序的材质代码从 extras 读取的每个键；`textures` 中的每个贴图索引都命名一个贴图，每个贴图都命名一个作为该资产成员的图像；每个图像都是 PNG 且可解码。
 5. 文件没有 `animations`；文件中的任何对象都不带版本字段、坐标约定，或单位或 UV 约定字符串。
 6. `attach-points` 成员按存储顺序列出 `_attachPoints` 的每一项；其中每个 `sourceObject` 都是文件中某个节点的 `sourceObject`；每个定位器的 `position` 与 `rotation` 等于其节点的 `translation` 与 `rotation`；`root.scale` 等于根节点的 `scale`；`collider` 不为空时，指向该节点 `sourceCollision` 中的一个碰撞体。
 
@@ -247,14 +247,14 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 
 - 文件通过 Khronos glTF Validator 检查且无错误。
 - 节点身份、变换、extras 键、材质表（extras 与源属性的对照）、碰撞文档与节点记录，都与同一资源包的独立导出结果逐值比较，每处差异均予以说明。
-- WebP 图像按解码后的像素与源贴图比较。
+- PNG 图像按解码后的像素与源贴图比较。
 - 对抽取的家具有样本，游戏自身导航构建从源读取的每个节点与碰撞体，都通过 `sourceObject` 从本文件重新找到，其形状一致。
 - 一个版本每件家具的挂点，与从同一批资源包的对象文档独立读出的其 `FixtureView` 的 `_attachPoints` 比较：数量、顺序、定位器的名字与身份，以及姿态。
 - 同一资源包在单线程与多线程下，以及在原生与 Web 目标上，给出的字节都相同。
 
 ## 6. 版本
 
-形式版本：2。版本 2 增加了 `attach-points` 成员。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表、挂点）的改动，都会改变本形式每种资产的版本。
+形式版本：3。版本 2 增加了 `attach-points` 成员；版本 3 跟随模型文件的版本 2。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表、挂点）的改动，都会改变本形式每种资产的版本。
 
 ## 7. 为节点命名
 

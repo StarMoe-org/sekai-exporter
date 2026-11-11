@@ -30,7 +30,7 @@ A mesh has one bind pose for each bone slot, and its vertices weigh on slots. Wh
 
 A node binds to one slot only: binding by hash comes first, in slot order, then binding by `m_Bones`, also in slot order, and a node that is already bound is passed over. Bones are bound by their hash first because the hash records the bone the mesh was made for: the bind pose of the slot is the inverse of that bone's transform, while the renderer's `m_Bones` may list other bones.
 
-The skin has one joint for each bound slot, in slot order, with the slot's bind pose as its inverse bind matrix. A slot that binds no node has no joint; no vertex may weigh on it. `JOINTS_0` gives each vertex the joints of its slots.
+The skin has one joint for each bound slot, in slot order, with the slot's bind pose as its inverse bind matrix. A slot that binds no node has no joint. A skinned renderer with a vertex that weighs on such a slot cannot be posed by the nodes of the model: it draws no mesh in the file, adds no material, and its node has `extras.unbound` set to `true`. `JOINTS_0` gives each vertex the joints of its slots.
 
 The node of a `SkinnedMeshRenderer` whose mesh has blend shapes has `weights`: for each channel, its entry of `m_BlendShapeWeights`, or 0 when the list is shorter, divided by the channel's full weight.
 
@@ -69,7 +69,7 @@ A texture's sampler follows its `m_TextureSettings`. `m_WrapU` and `m_WrapV` giv
 | 1 (bilinear) | `LINEAR` | `LINEAR` | `LINEAR_MIPMAP_NEAREST` |
 | 2 (trilinear) | `LINEAR` | `LINEAR` | `LINEAR_MIPMAP_LINEAR` |
 
-Each image is outside the file. Its URI is `texture/<n>.webp`, where `n` counts the images from 0, and names the member of the same asset with the role `texture/<n>`, an image in the form of the `image` member of the [texture form](texture.md).
+Each image is outside the file. Its URI is `texture/<n>.png`, where `n` counts the images from 0, and names the member of the same asset with the role `texture/<n>`, an image in the form of the `image` member of the [texture form](texture.md).
 
 ## 3. Sources
 
@@ -82,7 +82,6 @@ The root, or each root, is a `GameObject` that the asset form selects. The model
 | A vertex channel has a format or a component count this page does not list | Error `unsupported` |
 | A set of texture coordinates follows a missing set | Error `unsupported` |
 | A blend shape channel does not have exactly one frame | Error `unsupported` |
-| A vertex weighs on a bone slot that binds no node of the model | Error `unsupported` |
 | The mesh of a skinned renderer has no bone indices, or a bone index with a weight does not fit in 16 bits | Error `unsupported` |
 | A texture has a wrap mode or a filter mode the table above does not list | Error `unsupported` |
 | A texture cannot be decoded | The error of the [texture form](texture.md) |
@@ -95,7 +94,7 @@ The supported vertex channels are positions, normals and texture coordinates as 
 
 ## 4. Container
 
-GLB: glTF 2.0 with one binary chunk. Textures use the extension `EXT_texture_webp`, which the file requires. A base colour texture with a tiling or an offset uses `KHR_texture_transform`.
+GLB: glTF 2.0 with one binary chunk. Each texture names its PNG image directly. A base colour texture with a tiling or an offset uses `KHR_texture_transform`.
 
 Unity's left-handed space maps to glTF's right-handed space by negating X:
 
@@ -118,4 +117,4 @@ The mapping above is the change of basis from Unity's coordinates to those of gl
 
 ## 6. Version
 
-Format version: 1. A change to any of the above changes the version of every asset form that uses the format.
+Format version: 2. Version 2 draws no mesh for a skinned renderer that cannot be posed, where version 1 failed the asset. A change to any of the above changes the version of every asset form that uses the format.

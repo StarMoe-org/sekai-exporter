@@ -100,7 +100,7 @@ fn members_get_paths_from_the_asset_name() {
         asset(&store, "a/two", &[("base", b"2"), ("mask", b"3")]),
         failed(&store, "b/bad"),
     ];
-    let plan = plan("v1", &bindings, &store).unwrap();
+    let plan = plan("v1", &bindings, &store, 2).unwrap();
     assert_eq!(
         paths(&plan),
         [
@@ -122,10 +122,10 @@ fn the_revision_does_not_depend_on_the_order_of_bindings() {
     let store = s.store();
     let a = asset(&store, "a", &[("image", b"1")]);
     let b = asset(&store, "b", &[("image", b"2")]);
-    let first = plan("v1", &[a.clone(), b.clone()], &store).unwrap();
-    let second = plan("v1", &[b, a], &store).unwrap();
+    let first = plan("v1", &[a.clone(), b.clone()], &store, 2).unwrap();
+    let second = plan("v1", &[b, a], &store, 2).unwrap();
     assert_eq!(first, second);
-    let other = plan("v2", &[asset(&store, "a", &[("image", b"1")])], &store).unwrap();
+    let other = plan("v2", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
     assert_ne!(first.revision, other.revision);
 }
 
@@ -134,11 +134,11 @@ fn an_index_publication_is_reproducible() {
     let s = Scratch::new("index");
     let store = s.store();
     let bindings = [asset(&store, "a/one", &[("image", b"1")])];
-    let plan = plan("v1", &bindings, &store).unwrap();
+    let plan = plan("v1", &bindings, &store, 2).unwrap();
     let root = s.0.join("published");
-    let first = index::publish(&store, &root, "jp/canonical", &plan).unwrap();
+    let first = index::publish(&store, &root, "jp/canonical", &plan, 2).unwrap();
     let bytes = std::fs::read(root.join("jp/canonical/current.json")).unwrap();
-    let second = index::publish(&store, &root, "jp/canonical", &plan).unwrap();
+    let second = index::publish(&store, &root, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(first, second);
     assert_eq!(
         bytes,
@@ -153,15 +153,15 @@ fn a_missing_object_stops_the_pointer() {
     let s = Scratch::new("verify");
     let store = s.store();
     let root = s.0.join("published");
-    let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store).unwrap();
-    index::publish(&store, &root, "t", &good).unwrap();
+    let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
+    index::publish(&store, &root, "t", &good, 2).unwrap();
     let before = std::fs::read(root.join("t/current.json")).unwrap();
 
     let binding = asset(&store, "b", &[("image", b"gone")]);
-    let plan = plan("v2", &[binding], &store).unwrap();
+    let plan = plan("v2", &[binding], &store, 2).unwrap();
     let member = plan.files.iter().find(|f| f.role == "image").unwrap();
     std::fs::remove_file(store.path(&member.key)).unwrap();
-    let error = index::publish(&store, &root, "t", &plan).unwrap_err();
+    let error = index::publish(&store, &root, "t", &plan, 2).unwrap_err();
     assert_eq!(error.stage, "verify");
     assert_eq!(before, std::fs::read(root.join("t/current.json")).unwrap());
 }
@@ -174,16 +174,16 @@ fn a_removed_file_leaves_the_tree_one_publication_later() {
     let a = asset(&store, "a", &[("image", b"1")]);
     let b = asset(&store, "b", &[("image", b"2")]);
 
-    let one = plan("v1", &[a.clone(), b], &store).unwrap();
-    assert_eq!(tree::publish(&store, &root, &one).unwrap().written, 4);
+    let one = plan("v1", &[a.clone(), b], &store, 2).unwrap();
+    assert_eq!(tree::publish(&store, &root, &one, 2).unwrap().written, 4);
 
-    let two = plan("v2", std::slice::from_ref(&a), &store).unwrap();
-    let report = tree::publish(&store, &root, &two).unwrap();
+    let two = plan("v2", std::slice::from_ref(&a), &store, 2).unwrap();
+    let report = tree::publish(&store, &root, &two, 2).unwrap();
     assert_eq!((report.written, report.deleted), (0, 0));
     assert_eq!(read_tree(&root, "b.webp"), b"2");
 
-    let three = plan("v3", &[a], &store).unwrap();
-    assert_eq!(tree::publish(&store, &root, &three).unwrap().deleted, 2);
+    let three = plan("v3", &[a], &store, 2).unwrap();
+    assert_eq!(tree::publish(&store, &root, &three, 2).unwrap().deleted, 2);
     assert!(!root.join("b.webp").exists());
     assert_eq!(read_tree(&root, "a.webp"), b"1");
 }
@@ -193,13 +193,13 @@ fn a_failed_asset_keeps_its_previous_files() {
     let s = Scratch::new("failed");
     let store = s.store();
     let root = s.0.join("tree");
-    let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store).unwrap();
-    tree::publish(&store, &root, &good).unwrap();
+    let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
+    tree::publish(&store, &root, &good, 2).unwrap();
     let document = read_tree(&root, "a.asset.json");
 
     for version in ["v2", "v3"] {
-        let bad = plan(version, &[failed(&store, "a")], &store).unwrap();
-        let report = tree::publish(&store, &root, &bad).unwrap();
+        let bad = plan(version, &[failed(&store, "a")], &store, 2).unwrap();
+        let report = tree::publish(&store, &root, &bad, 2).unwrap();
         assert_eq!(report.deleted, 0);
         assert_eq!(read_tree(&root, "a.webp"), b"1");
         assert_eq!(read_tree(&root, "a.asset.json"), document);
@@ -211,10 +211,10 @@ fn publishing_again_changes_nothing() {
     let s = Scratch::new("again");
     let store = s.store();
     let root = s.0.join("tree");
-    let plan = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store).unwrap();
-    tree::publish(&store, &root, &plan).unwrap();
+    let plan = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
+    tree::publish(&store, &root, &plan, 2).unwrap();
     let listing = read_tree(&root, "_listing.json");
-    let report = tree::publish(&store, &root, &plan).unwrap();
+    let report = tree::publish(&store, &root, &plan, 2).unwrap();
     assert_eq!(
         (report.written, report.unchanged, report.deleted),
         (0, 2, 0)
@@ -331,13 +331,13 @@ fn sqlite_index_is_deterministic_packs_composite_forms_and_validates() {
     }
     bindings.push(failed(&store, "broken/item"));
 
-    let forward = plan("v1", &bindings, &store).unwrap();
+    let forward = plan("v1", &bindings, &store, 2).unwrap();
     let mut rev_bindings = bindings;
     rev_bindings.reverse();
-    let backward = plan("v1", &rev_bindings, &store).unwrap();
+    let backward = plan("v1", &rev_bindings, &store, 2).unwrap();
 
-    let built_a = sqlite::build(&store, &forward, &SqliteOptions::default()).unwrap();
-    let built_b = sqlite::build(&store, &backward, &SqliteOptions::default()).unwrap();
+    let built_a = sqlite::build(&store, &forward, &SqliteOptions::default(), 2).unwrap();
+    let built_b = sqlite::build(&store, &backward, &SqliteOptions::default(), 2).unwrap();
     assert_eq!(built_a, built_b);
     assert_eq!(built_a.archives.len(), 1);
     assert_eq!(built_a.direct_files.len(), 220);
@@ -365,6 +365,7 @@ fn sqlite_index_is_deterministic_packs_composite_forms_and_validates() {
         "jp/canonical",
         &forward,
         &SqliteOptions::unpacked(),
+        2,
     )
     .unwrap();
     assert!(pointer.sqlite.is_some());

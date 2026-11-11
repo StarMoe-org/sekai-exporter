@@ -10,6 +10,8 @@ use sekai_format::AssetDocument;
 use sekai_format::publication::{AssetFailure, ListingEntry};
 use sha2::{Digest, Sha256};
 
+use crate::parallel;
+
 /// A failure of a publication, with the name of the stage that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishError {
@@ -112,21 +114,35 @@ fn member_path(name: &str, role: &str, extension: &str, members: usize) -> Strin
     }
 }
 
-/// Reads the asset documents of `bindings` and lists what a publication of them contains.
-pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<Plan, PublishError> {
+/// The asset document of `binding` and the size of its file.
+fn read(store: &LocalStore, binding: &Binding) -> Result<(AssetDocument, u64), PublishError> {
+    let bytes = store
+        .read(&binding.document)
+        .map_err(PublishError::wrap("plan"))?;
+    let document = AssetDocument::from_bytes(&bytes)
+        .map_err(|e| PublishError::new("plan", format!("{}: {e}", binding.name)))?;
+    Ok((document, bytes.len() as u64))
+}
+
+/// Reads the asset documents of `bindings` on up to `threads` threads and lists what a
+/// publication of them contains.
+pub fn plan(
+    version: &str,
+    bindings: &[Binding],
+    store: &LocalStore,
+    threads: usize,
+) -> Result<Plan, PublishError> {
     let mut files = Vec::new();
     let mut assets = Vec::with_capacity(bindings.len());
     let mut listings: BTreeMap<String, Vec<ListingEntry>> = BTreeMap::new();
     let mut failures = Vec::new();
-    let wrap = PublishError::wrap("plan");
-    for binding in bindings {
-        let bytes = store.read(&binding.document).map_err(&wrap)?;
-        let document = AssetDocument::from_bytes(&bytes)
-            .map_err(|e| PublishError::new("plan", format!("{}: {e}", binding.name)))?;
+    let documents = parallel::map(bindings, threads, |binding| read(store, binding));
+    for (binding, document) in bindings.iter().zip(documents) {
+        let (document, size) = document?;
         files.push(File {
             path: format!("{}.asset.json", binding.name),
             key: binding.document.clone(),
-            size: bytes.len() as u64,
+            size,
             media_type: "application/json".to_owned(),
             asset: binding.name.clone(),
             role: "document".to_owned(),

@@ -9,15 +9,19 @@
 //! [`Streamed::outside`].
 //!
 //! Units run in manifest order, in segments of consecutive units. The bundles of the windows of a
-//! segment are opened together, and the derivations of the segment run through the scheduler. A
+//! segment are opened together, and the derivations of the segment run through the scheduler of
+//! the run, while the next segment runs too and the bundles of the one after it are opened. A
 //! bundle stays open, indexed and parsed until the last unit whose window holds it, which the
 //! manifest tells in advance; the ledger of the bundle is settled then too. Since every closure
 //! stays inside its own window, the result depends neither on how units are grouped into segments
 //! nor on the number of threads, and publishing is a step after the last unit.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map};
 use std::io;
+use std::ops::Range;
+use std::panic;
 use std::sync::{Arc, Mutex};
+use std::thread::{self, ScopedJoinHandle};
 
 use sekai_catalog::{BundleIndexes, Derivations, Store};
 use sekai_convert::{Converter, ObjectId};
@@ -25,10 +29,11 @@ use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sekai_unity::{BlockCache, ByteSource, ClassLayouts};
 
-use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned};
+use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned, Produced, Runner};
 use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
+use crate::sched::Scheduler;
 use crate::version::{BundleError, BundleInput, Parsed, Version, bundle_files};
 
 /// The estimated memory of the bundles that stay parsed while a version streams, in bytes.
@@ -413,8 +418,17 @@ pub fn evaluate(
     evaluate_in_segments(manifest, inputs, stream, &mut || Ok(()))
 }
 
+/// The segments whose derivations run at once with more than one CPU slot.
+const RUNNING: usize = 2;
+
 /// Evaluates as [`evaluate`] does, and calls `segment_done` after each segment, once the files of
 /// its assets are in the store.
+///
+/// Every derivation and every bundle index of the run takes its CPU slots from one scheduler.
+/// With more than one CPU slot, [`RUNNING`] segments run at once while the bundles of the next
+/// one are opened, so neither the indexing nor the last derivations of a segment leave slots
+/// idle. The segments are finished in order, each with what it gathered, so the result is the one
+/// of evaluating them one after another.
 pub fn evaluate_in_segments(
     manifest: &[Entry],
     inputs: &dyn Inputs,
@@ -422,59 +436,175 @@ pub fn evaluate_in_segments(
     segment_done: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<Streamed> {
     let units = Units::new(manifest);
-    let parsed = Arc::new(Parsed::new(PARSED_BYTES));
-    let kept = Kept {
-        inner: stream.indexes,
-        records: Mutex::default(),
+    let runner = Runner::new(
+        stream.store,
+        stream.derivations,
+        stream.recorder,
+        stream.fusion,
+        &stream.options,
+    );
+    let opener = Opener {
+        units: &units,
+        inputs,
+        stream,
+        scheduler: &runner.scheduler,
+        parsed: Arc::new(Parsed::new(PARSED_BYTES)),
+        kept: Kept {
+            inner: stream.indexes,
+            records: Mutex::default(),
+        },
     };
+    // With one CPU slot, as in plain mode, every segment runs on the calling thread.
+    let alone = runner.scheduler.limits().cpu <= 1;
+    let depth = if alone { 1 } else { RUNNING };
     let mut held: BTreeMap<usize, Held> = BTreeMap::new();
     let mut gathered = Gathered::default();
     for error in &units.errors {
         report(&mut gathered, error.clone());
     }
-    let mut start = 0;
-    while start < units.entries.len() {
-        let end = units.segment(start, &stream.segment);
-        evaluate_segment(
-            &units,
-            start..end,
-            inputs,
-            stream,
-            &parsed,
-            &kept,
-            &mut held,
-            &mut gathered,
-        )?;
-        // The bundles no later unit needs are let go, and their ledgers settled.
-        let done: Vec<usize> = held
-            .keys()
-            .copied()
-            .filter(|&entry| units.last[entry] < end)
-            .collect();
-        for entry in done {
-            if let Some(bundle) = held.remove(&entry) {
-                parsed.forget(&bundle.sha256);
+    thread::scope(|scope| {
+        let start = |segment| {
+            let run = || run_segment(&units, segment, stream, &runner);
+            if alone {
+                Running::Done(run())
+            } else {
+                Running::Thread(scope.spawn(run))
+            }
+        };
+        let mut running = VecDeque::new();
+        let mut next = opener.open(0, &mut held)?;
+        while next.is_some() || !running.is_empty() {
+            if let Some(segment) = next.take() {
+                let end = segment.units.end;
+                running.push_back((end, start(segment)));
+                next = opener.open(end, &mut held)?;
+            }
+            if next.is_none() || running.len() == depth {
+                let (end, segment) = running.pop_front().expect("a segment is running");
+                gathered.absorb(segment.finish()?);
+                opener.release(end, &mut held);
+                gathered.settle(&units, end);
+                segment_done()?;
             }
         }
+        Ok(finish(gathered))
+    })
+}
+
+/// A segment whose derivations run, on the calling thread or on a thread of its own.
+enum Running<'scope> {
+    Done(io::Result<Gathered>),
+    Thread(ScopedJoinHandle<'scope, io::Result<Gathered>>),
+}
+
+impl Running<'_> {
+    /// What the segment gathered, once it has run.
+    fn finish(self) -> io::Result<Gathered> {
+        match self {
+            Running::Done(gathered) => gathered,
+            Running::Thread(thread) => thread
+                .join()
+                .unwrap_or_else(|panic| panic::resume_unwind(panic)),
+        }
+    }
+}
+
+/// The bundles of a segment of units, opened and indexed.
+struct OpenedSegment<'a> {
+    /// The units of the segment.
+    units: Range<usize>,
+    version: Version<'a>,
+    /// The bundles of the segment that could not be read, opened or indexed.
+    errors: Vec<BundleError>,
+}
+
+/// Opens the segments of a manifest, and lets go of their bundles once no later unit needs them.
+struct Opener<'s, 'a> {
+    units: &'s Units<'s>,
+    inputs: &'s dyn Inputs,
+    stream: &'s Stream<'a>,
+    /// The scheduler whose CPU slots the bundles are indexed on.
+    scheduler: &'s Scheduler,
+    /// The parsed bundles, which the versions of all segments share.
+    parsed: Arc<Parsed>,
+    /// The indexes of the open bundles.
+    kept: Kept<'a>,
+}
+
+impl<'a> Opener<'_, 'a> {
+    /// The segment that starts at unit `start`, or `None` past the last unit. The bundles it
+    /// opens are added to `held`, and the bundles already there are used as they are.
+    fn open(
+        &self,
+        start: usize,
+        held: &mut BTreeMap<usize, Held>,
+    ) -> io::Result<Option<OpenedSegment<'a>>> {
+        if start == self.units.entries.len() {
+            return Ok(None);
+        }
+        let units = start..self.units.segment(start, &self.stream.segment);
+        let _span = self
+            .stream
+            .recorder
+            .span("open", "segment", &self.units.entries[start].name);
+        let bundles: BTreeSet<usize> = units
+            .clone()
+            .flat_map(|unit| self.units.windows[unit].iter().copied())
+            .collect();
+        let mut errors = Vec::new();
+        let mut inputs = Vec::new();
+        for entry in bundles {
+            let name = &self.units.entries[entry].name;
+            let bundle = match held.entry(entry) {
+                btree_map::Entry::Occupied(occupied) => occupied.into_mut(),
+                btree_map::Entry::Vacant(vacant) => match self.inputs.open(name) {
+                    Ok(input) => vacant.insert(Held {
+                        source: input.source,
+                        sha256: input.sha256,
+                    }),
+                    Err(e) => {
+                        errors.push(BundleError {
+                            name: name.clone(),
+                            code: "unreadable",
+                            message: e.to_string(),
+                        });
+                        continue;
+                    }
+                },
+            };
+            inputs.push(BundleInput {
+                name: name.clone(),
+                source: bundle.source.clone(),
+                sha256: bundle.sha256,
+            });
+        }
+        let (version, unindexed) = Version::open_on(
+            inputs,
+            self.stream.cache,
+            self.stream.classes,
+            &self.kept,
+            self.scheduler,
+        )?;
+        errors.extend(unindexed);
+        Ok(Some(OpenedSegment {
+            units,
+            version: version.sharing(self.parsed.clone()),
+            errors,
+        }))
+    }
+
+    /// Lets go of the bundles in `held` that no unit from `end` on needs.
+    fn release(&self, end: usize, held: &mut BTreeMap<usize, Held>) {
+        for (_, bundle) in held.extract_if(.., |&entry, _| self.units.last[entry] < end) {
+            self.parsed.forget(&bundle.sha256);
+        }
         let needed: HashSet<[u8; 32]> = held.values().map(|bundle| bundle.sha256).collect();
-        kept.records
+        self.kept
+            .records
             .lock()
             .unwrap()
             .retain(|sha256, _| needed.contains(sha256));
-        let settled: Vec<usize> = gathered
-            .tallies
-            .keys()
-            .copied()
-            .filter(|&entry| units.last[entry] < end)
-            .collect();
-        for entry in settled {
-            let tally = gathered.tallies.remove(&entry).unwrap_or_default();
-            gathered.ledgers.extend(tally.settle());
-        }
-        segment_done()?;
-        start = end;
     }
-    Ok(finish(gathered))
 }
 
 /// Each error of a bundle is reported once, however many segments meet it.
@@ -485,62 +615,59 @@ fn report(gathered: &mut Gathered, error: BundleError) {
         .or_insert(error);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn evaluate_segment(
-    units: &Units<'_>,
-    segment: std::ops::Range<usize>,
-    inputs: &dyn Inputs,
-    stream: &Stream<'_>,
-    parsed: &Arc<Parsed>,
-    kept: &Kept<'_>,
-    held: &mut BTreeMap<usize, Held>,
-    gathered: &mut Gathered,
-) -> io::Result<()> {
-    let threads = if stream.options.plain {
-        1
-    } else {
-        stream.options.threads
-    };
-    let bundles: BTreeSet<usize> = segment
-        .clone()
-        .flat_map(|unit| units.windows[unit].iter().copied())
-        .collect();
-    let mut opened = Vec::new();
-    for &entry in &bundles {
-        let name = &units.entries[entry].name;
-        if let std::collections::btree_map::Entry::Vacant(vacant) = held.entry(entry) {
-            match inputs.open(name) {
-                Ok(input) => {
-                    vacant.insert(Held {
-                        source: input.source,
-                        sha256: input.sha256,
-                    });
-                }
-                Err(e) => {
-                    report(
-                        gathered,
-                        BundleError {
-                            name: name.clone(),
-                            code: "unreadable",
-                            message: e.to_string(),
-                        },
-                    );
-                    continue;
-                }
-            }
+impl Gathered {
+    /// Adds what a segment gathered, after the segments before it.
+    fn absorb(&mut self, segment: Gathered) {
+        let Gathered {
+            outputs,
+            unnamed,
+            converted,
+            reused,
+            errors,
+            outside,
+            tallies,
+            ledgers,
+        } = segment;
+        self.outputs.extend(outputs);
+        self.unnamed.extend(unnamed);
+        self.converted += converted;
+        self.reused += reused;
+        for error in errors.into_values() {
+            report(self, error);
         }
-        let bundle = &held[&entry];
-        opened.push(BundleInput {
-            name: name.clone(),
-            source: bundle.source.clone(),
-            sha256: bundle.sha256,
-        });
+        self.outside.extend(outside);
+        for (entry, tally) in tallies {
+            self.tallies.entry(entry).or_default().absorb(tally);
+        }
+        self.ledgers.extend(ledgers);
     }
-    let (version, errors) =
-        Version::open_indexed(opened, stream.cache, stream.classes, kept, threads)?;
-    let version = version.sharing(parsed.clone());
+
+    /// Settles the ledgers of the bundles that no unit from `end` on reads.
+    fn settle(&mut self, units: &Units<'_>, end: usize) {
+        let settled = self
+            .tallies
+            .extract_if(.., |&entry, _| units.last[entry] < end);
+        let ledgers: Vec<BundleLedger> = settled.flat_map(|(_, tally)| tally.settle()).collect();
+        self.ledgers.extend(ledgers);
+    }
+}
+
+/// Plans and runs the derivations of the units of `segment` with `runner`, and returns what they
+/// gave.
+fn run_segment(
+    units: &Units<'_>,
+    segment: OpenedSegment<'_>,
+    stream: &Stream<'_>,
+    runner: &Runner<'_>,
+) -> io::Result<Gathered> {
+    let OpenedSegment {
+        units: range,
+        version,
+        errors,
+    } = segment;
+    let mut gathered = Gathered::default();
     for error in errors {
-        report(gathered, error);
+        report(&mut gathered, error);
     }
     let index = version.index();
     let position = |entry: usize| {
@@ -555,8 +682,8 @@ fn evaluate_segment(
     {
         let _span = stream
             .recorder
-            .span("plan", "segment", &units.entries[segment.start].name);
-        for unit in segment.clone() {
+            .span("plan", "segment", &units.entries[range.start].name);
+        for unit in range.clone() {
             let Some(bundle) = position(unit) else {
                 continue;
             };
@@ -581,23 +708,24 @@ fn evaluate_segment(
     }
 
     // Assets that are refused fail here; the rest run.
-    let first = gathered.outputs.len();
     let mut runnable = Vec::new();
     let mut kept_roots = Vec::new();
     for root in roots {
         match root.refusal(&version, stream.limit) {
             Some(error) => {
-                let code = error.code.clone();
-                let document =
+                let stored =
                     eval::document(&root.planned, &version, stream.store, Vec::new(), error)?;
                 gathered.converted += 1;
+                if stream.ledger.is_some() {
+                    count_reads(&mut gathered.tallies, units, &stored.document);
+                }
                 gathered.outputs.push((
                     Output {
                         name: root.planned.name.clone(),
                         bundle: index.bundles()[root.planned.closure[0].bundle].name.clone(),
                         form: root.planned.converter.name(),
-                        document,
-                        error: Some(code),
+                        error: stored.error(),
+                        document: stored.key,
                     },
                     root.logical,
                     root.path_id,
@@ -609,50 +737,42 @@ fn evaluate_segment(
             }
         }
     }
-    let fusion = stream.fusion.filter(|_| !stream.options.plain);
-    let ran = eval::run_each(
-        &runnable,
-        &version,
-        stream.store,
-        stream.derivations,
-        stream.recorder,
-        &stream.options,
-        fusion,
-    )?;
+    let ran = runner.run(&runnable, &version)?;
     gathered.converted += ran.converted;
     gathered.reused += ran.reused;
-    for (output, (logical, path_id)) in ran.outputs.into_iter().zip(kept_roots) {
-        if let Some(output) = output {
-            gathered.outputs.push((output, logical, path_id));
+    for (produced, (logical, path_id)) in ran.outputs.into_iter().zip(kept_roots) {
+        let Some(Produced { output, document }) = produced else {
+            continue;
+        };
+        if stream.ledger.is_some() {
+            // The document of an asset that an earlier run produced is in the store.
+            let document = match document {
+                Some(document) => document,
+                None => AssetDocument::from_bytes(&stream.store.read(&output.document)?)
+                    .map_err(io::Error::other)?,
+            };
+            count_reads(&mut gathered.tallies, units, &document);
         }
+        gathered.outputs.push((output, logical, path_id));
     }
+    Ok(gathered)
+}
 
-    // What the assets of the segment read counts for the ledgers of the bundles they read.
-    if stream.ledger.is_some() {
-        for (output, _, _) in &gathered.outputs[first..] {
-            let bytes = stream.store.read(&output.document)?;
-            let document = AssetDocument::from_bytes(&bytes).map_err(io::Error::other)?;
-            for source in &document.sources {
-                if let Some(&entry) = units.positions.get(source.bundle.as_str()) {
-                    gathered
-                        .tallies
-                        .entry(entry)
-                        .or_default()
-                        .read(source.path_id);
-                }
-            }
-            for resource in &document.resources {
-                if let Some(&entry) = units.positions.get(resource.bundle.as_str()) {
-                    gathered
-                        .tallies
-                        .entry(entry)
-                        .or_default()
-                        .read_resource(&resource.file);
-                }
-            }
+/// Counts what the asset of `document` read for the ledgers of the bundles it read.
+fn count_reads(tallies: &mut BTreeMap<usize, Tally>, units: &Units<'_>, document: &AssetDocument) {
+    for source in &document.sources {
+        if let Some(&entry) = units.positions.get(source.bundle.as_str()) {
+            tallies.entry(entry).or_default().read(source.path_id);
         }
     }
-    Ok(())
+    for resource in &document.resources {
+        if let Some(&entry) = units.positions.get(resource.bundle.as_str()) {
+            tallies
+                .entry(entry)
+                .or_default()
+                .read_resource(&resource.file);
+        }
+    }
 }
 
 /// Finds, names and fingerprints the roots of the unit of `bundle`, whose window holds the

@@ -5,8 +5,7 @@ use crate::DecodeError;
 /// Decoded audio: interleaved signed 16-bit samples.
 ///
 /// Sixteen bits is the resolution reference decoders produce for the game's codecs, so decoded
-/// audio can be compared with them sample by sample, and it is what the canonical FLAC form
-/// stores.
+/// audio can be compared with them sample by sample.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Pcm {
     sample_rate: u32,

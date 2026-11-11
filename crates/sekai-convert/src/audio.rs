@@ -4,8 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use sekai_codec::DecodeError;
-use sekai_codec::cri::{Acb, Arrangement, HcaKey, Note, decode_hca, hca_info, read_acb};
+use sekai_codec::cri::{Acb, Arrangement, Hca, HcaKey, Note, read_acb};
+use sekai_codec::{DecodeError, Sound};
 use sekai_format::audio::{
     CueArrangement, CueBlock, CueEntry, CueLayer, CueNote, CueTable, CueVolumeControl, CueWaveform,
     FORMAT, VERSION,
@@ -21,7 +21,7 @@ use crate::{
 /// The `EncodeType` of HCA waveforms.
 const HCA: u8 = 2;
 
-/// The cues of a cue sheet, decoded to PCM.
+/// The cues of a cue sheet, with the stream each of their waveforms plays.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Audio {
     key: Option<u64>,
@@ -41,7 +41,7 @@ impl Converter for Audio {
     }
 
     fn version(&self) -> u32 {
-        3
+        5
     }
 
     fn encoders(&self) -> crate::Encoders {
@@ -90,18 +90,19 @@ impl Converter for Audio {
                     format!("cue/{name}/{}", n + 1)
                 };
                 roles.insert(w, role.clone());
-                let (pcm, loop_frames) = self.waveform(&acb, w, name)?;
+                let hca = self.waveform(&acb, w, name)?;
+                let info = hca.info();
                 played.push(CueWaveform {
                     role: role.clone(),
-                    frames: pcm.frames() as u64,
-                    sample_rate: pcm.sample_rate(),
-                    channels: pcm.channels(),
-                    loop_frames,
+                    frames: info.length,
+                    sample_rate: info.sample_rate,
+                    channels: info.channels,
+                    loop_frames: info.loop_frames,
                     volume,
                 });
                 members.push(Member {
                     role,
-                    content: Content::Audio(pcm),
+                    content: Content::Audio(Sound::Hca(hca)),
                 });
             }
             if !played.is_empty() {
@@ -135,20 +136,12 @@ impl Converter for Audio {
         Ok(Some(Asset { members }))
     }
 
-    /// The cue sheet twice, the samples of every member, and the encoded form of the largest
-    /// member, taken as half the samples.
-    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
-        let stored = u64::from(object.size);
-        let memory = match samples(root, cx) {
-            Some(bytes) => stored
-                .saturating_mul(2)
-                .saturating_add(bytes)
-                .saturating_add(bytes / 2),
-            None => Cost::light(stored).memory,
-        };
+    /// The cue sheet twice, a copy of the streams it holds, and their MP3 files, taken as
+    /// twice the streams.
+    fn cost(&self, _root: ObjectId, object: &ObjectIndex, _cx: &dyn Context) -> Cost {
         Cost {
             class: CostClass::Heavy,
-            memory,
+            memory: u64::from(object.size).saturating_mul(5),
         }
     }
 }
@@ -188,44 +181,9 @@ fn cue_arrangement(arrangement: &Arrangement, roles: &BTreeMap<usize, String>) -
     }
 }
 
-/// The size of the 16-bit samples of every member the cue sheet `root` gives, from the headers of
-/// its streams. Waveforms the converter cannot decode are left out.
-fn samples(root: ObjectId, cx: &dyn Context) -> Option<u64> {
-    let object = cx.object(root).ok()?;
-    let acb = read_acb(object.fields.get("m_Script")?.as_bytes()?).ok()?;
-    let bank = acb.memory_awb.as_ref()?;
-    let mut total = 0u64;
-    for cue in &acb.cues {
-        let mut seen = Vec::new();
-        for &w in &cue.waveforms {
-            if seen.contains(&w) {
-                continue;
-            }
-            seen.push(w);
-            let Some(stream) = acb
-                .waveforms
-                .get(w)
-                .and_then(|waveform| waveform.memory_awb_id)
-                .and_then(|id| bank.stream(id))
-            else {
-                continue;
-            };
-            if let Ok(info) = hca_info(stream.data) {
-                total = total.saturating_add(info.frames * u64::from(info.channels) * 2);
-            }
-        }
-    }
-    Some(total)
-}
-
 impl Audio {
-    /// Decodes waveform `index` of `acb`, which cue `cue` plays, and gives its loop.
-    fn waveform(
-        &self,
-        acb: &Acb<'_>,
-        index: usize,
-        cue: &str,
-    ) -> Result<(sekai_codec::Pcm, Option<[u64; 2]>), ConvertError> {
+    /// The stream of waveform `index` of `acb`, which cue `cue` plays.
+    fn waveform(&self, acb: &Acb<'_>, index: usize, cue: &str) -> Result<Hca, ConvertError> {
         let waveform = acb.waveforms.get(index).ok_or_else(|| {
             malformed(format!(
                 "cue {cue} plays waveform {index}, which the sheet lacks"
@@ -260,7 +218,7 @@ impl Audio {
             key,
             subkey: bank.subkey,
         });
-        let pcm = decode_hca(stream.data, key).map_err(|e| match e {
+        Hca::new(stream.data.to_vec(), key).map_err(|e| match e {
             DecodeError::Unsupported { what, .. }
                 if key.is_none() && what.starts_with("HCA stream encrypted") =>
             {
@@ -270,8 +228,7 @@ impl Audio {
                 )
             }
             e => ConvertError::from(e),
-        })?;
-        Ok((pcm, hca_info(stream.data)?.loop_frames))
+        })
     }
 }
 

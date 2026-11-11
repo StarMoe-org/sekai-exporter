@@ -430,11 +430,12 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
     let cue_table = header
         .table(0, "CueTable")?
         .ok_or_else(|| malformed("no CueTable"))?;
-    let waveform_table = header
-        .table(0, "WaveformTable")?
-        .ok_or_else(|| malformed("no WaveformTable"))?;
     let extensions = header.table(0, "WaveformExtensionDataTable")?;
-    let waveforms = read_waveforms(&waveform_table, extensions.as_ref())?;
+    // The waveform table of a sheet whose cues play nothing is empty.
+    let waveforms = match header.table(0, "WaveformTable")? {
+        Some(table) => read_waveforms(&table, extensions.as_ref())?,
+        None => Vec::new(),
+    };
     let event = match header.table(0, "TrackEventTable")? {
         Some(table) => Some(table),
         None => header.table(0, "CommandTable")?,

@@ -5,13 +5,13 @@ use std::io;
 use std::path::Path;
 
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Derivations, Derived, Key, LocalStore};
+use sekai_catalog::{Derivations, Derived, Key, LocalStore, Store};
 use sekai_convert::Asset;
 use sekai_format::AssetDocument;
 use sekai_format::publication::AssetFailure;
 use sekai_moesekai::storage_view::{self, Transform, ViewFile};
 use sekai_pipeline::metrics::Recorder;
-use sekai_pipeline::{Evaluation, parallel};
+use sekai_pipeline::parallel;
 use sekai_publish::{File, Plan, tree};
 use sha2::{Digest, Sha256};
 
@@ -101,9 +101,8 @@ fn make(
     }
     let fingerprint = fingerprint(transform, &job.source);
     if let Some(Derived::Document(key)) = derivations.get(&fingerprint)?
-        && store.contains(&key)
+        && let Some(size) = store.size(&key)?
     {
-        let size = std::fs::metadata(store.path(&key))?.len();
         return Ok(Ok((key, size, false)));
     }
     let mut span = monitor.span("transform", "storage", &job.file.path);
@@ -119,32 +118,20 @@ fn make(
     Ok(Ok((key, bytes.len() as u64, true)))
 }
 
-/// The jobs of the view, in path order, and the failures of assets that have no files. Of the
-/// assets that land on one path, the first by name keeps it; the count of the others is returned.
-fn jobs(
-    evaluation: &Evaluation,
-    store: &LocalStore,
-) -> Result<(Vec<Job>, Vec<AssetFailure>, usize), String> {
+/// The jobs of the view of the assets of `index`, the plan of the index publication, in path
+/// order. Of the assets that land on one path, the first by name keeps it; the count of the
+/// others is returned.
+fn jobs(index: &Plan) -> Result<(Vec<Job>, usize), String> {
     let mut by_path: BTreeMap<String, Job> = BTreeMap::new();
-    let mut failures = Vec::new();
     let mut shadowed = 0;
-    for output in &evaluation.outputs {
-        if let Some(code) = &output.error {
-            failures.push(AssetFailure {
-                name: output.name.clone(),
-                code: code.clone(),
-            });
-            continue;
-        }
-        let bytes = store.read(&output.document).map_err(|e| e.to_string())?;
-        let document =
-            AssetDocument::from_bytes(&bytes).map_err(|e| format!("{}: {e}", output.name))?;
-        for file in storage_view::files(&document) {
+    for asset in &index.assets {
+        let document = &asset.metadata;
+        for file in storage_view::files(document) {
             let member = &document.members[file.member];
             let sha256 = parse_hex(&member.sha256)
-                .ok_or_else(|| format!("{}: bad member hash", output.name))?;
+                .ok_or_else(|| format!("{}: bad member hash", asset.name))?;
             let job = Job {
-                asset: output.name.clone(),
+                asset: asset.name.clone(),
                 source: Key {
                     sha256,
                     extension: member.extension.clone(),
@@ -170,12 +157,13 @@ fn jobs(
             }
         }
     }
-    Ok((by_path.into_values().collect(), failures, shadowed))
+    Ok((by_path.into_values().collect(), shadowed))
 }
 
-/// Publishes the view of `evaluation` at `root`.
+/// Publishes the view of the assets of `index`, the plan of the index publication, at `root`.
+/// The assets that could not be produced are its failures.
 pub(crate) fn publish(
-    evaluation: &Evaluation,
+    index: &Plan,
     version: &str,
     root: &Path,
     store: &LocalStore,
@@ -184,7 +172,8 @@ pub(crate) fn publish(
     monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
     let span = monitor.span("publish", "storage", "");
-    let (jobs, mut failures, shadowed) = jobs(evaluation, store)?;
+    let (jobs, shadowed) = jobs(index)?;
+    let mut failures = index.failures.clone();
     let results = parallel(jobs.len(), threads, |i| {
         make(&jobs[i], store, derivations, monitor)
     });
@@ -228,7 +217,7 @@ pub(crate) fn publish(
         failures,
         revision: revision.iter().map(|b| format!("{b:02x}")).collect(),
     };
-    let report = tree::publish(store, root, &plan).map_err(|e| e.to_string())?;
+    let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
     drop(span);
     println!(
         "storage files {} transformed {made} shadowed {shadowed} failed {} written {} unchanged {} deleted {} revision {}",

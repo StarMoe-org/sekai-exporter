@@ -222,8 +222,8 @@ The errors above follow the error model of the exporter: a conversion stops at t
 
 GLB: glTF 2.0 with one binary chunk, holding the scene of 2.1, its nodes, its meshes, materials, textures and samplers. The differences from the container of a [model file](model.md) are:
 
-- **Images are outside the file.** `images[].uri` is `texture/<n>.webp`, and `texture/<n>` is the member of the same asset with that role. Every image is an 8-bit WebP in row order from the top of the image. No image is embedded and no image is PNG.
-- **No extension declares the WebP images.** Neither `EXT_texture_webp` nor any other extension is listed in `extensionsUsed` or `extensionsRequired` for the images: `texture.source` names the image directly.
+- **Images are outside the file.** `images[].uri` is `texture/<n>.png`, and `texture/<n>` is the member of the same asset with that role. Every image is an 8-bit RGBA PNG in row order from the top of the image. No image is embedded.
+- **Textures name their images directly.** `texture.source` names the image, and no extension is listed in `extensionsUsed` or `extensionsRequired` for the images.
 - **`KHR_texture_transform` is used only for a base colour texture** whose slot has a scale other than 1 in either axis or an offset other than 0 in either axis. It is listed in `extensionsUsed` only when written. Its scale is the slot's scale and its offset is `(ox, 1 - sy - oy)` for the slot's scale `(sx, sy)` and offset `(ox, oy)`. Every other texture property keeps its scale and offset in `textures` only, and the runtime applies them itself.
 - **Texture coordinates are not flipped.** `TEXCOORD_n` is the source component pair unchanged (u, v), with v counted from the bottom of the image, and rows are written in the image from the top. The runtime flips v when it samples. This is the one difference from the UV rule of model files, and it is why this form does not use the model file's flip.
 - **The change of basis is model files' change of basis:** right-handed, Y up, X reflected (`S = diag(-1, 1, 1)`) applied to positions, rotations, normals, tangents, triangles, bind poses and the collision geometry, so that the scene and the collision are in one space.
@@ -239,7 +239,7 @@ A file is correct for the runtime when each of these holds:
 1. It has one scene, which is the default scene, and exactly one node carries `fixtureViewRoot`; that node is the scene's only root node, and it is the prefab root.
 2. Every node carries `sourceObject` with the ids of the source object it was written from, and no two nodes share the same `(file, gameObjectId, transformId)`.
 3. The root carries `fixtureCollision`; every `geometryId` a collider names is a geometry of that document; every node that the navigation build reads has `sourceCollision` with the keys of 2.3.
-4. Every material has `shader`, `renderQueue`, `keywords`, `floats`, `ints`, `colors` and `textures`, with every texture property in `textures`; every material whose program 2.4.4 gives a runtime material holds every key that program's material code reads from the extras; every texture index in `textures` names a texture, and every texture names an image that is a member of the asset; every image is WebP and decodes.
+4. Every material has `shader`, `renderQueue`, `keywords`, `floats`, `ints`, `colors` and `textures`, with every texture property in `textures`; every material whose program 2.4.4 gives a runtime material holds every key that program's material code reads from the extras; every texture index in `textures` names a texture, and every texture names an image that is a member of the asset; every image is PNG and decodes.
 5. The file has no `animations`; no object of the file carries a version field, a coordinate contract, or a unit or UV convention string.
 6. The `attach-points` member lists every entry of `_attachPoints` in stored order; every `sourceObject` in it is the `sourceObject` of a node of the file; each locator's `position` and `rotation` equal its node's `translation` and `rotation`; `root.scale` equals the root node's `scale`; and `collider`, when set, names a collider in the `sourceCollision` of that node.
 
@@ -247,14 +247,14 @@ A file is correct for the runtime when each of these holds:
 
 - A file passes the Khronos glTF Validator with no errors.
 - Node identities, transforms, extras keys, the material table (extras against the source properties), the collision document and the node records are compared value by value with an independent export of the same bundle, and every difference is explained.
-- The WebP images are compared by decoded pixels with the source textures.
+- The PNG images are compared by decoded pixels with the source textures.
 - For a sample of pieces, each node and collider the game's own navigation build reads from the source is found again from this file by `sourceObject`, and its shape agrees.
 - The attach points of every piece of a version are compared with the `_attachPoints` of its `FixtureView`, read independently from the object documents of the same bundles: the count, the order, the locator names and identities, and the poses.
 - The same bundle gives the same bytes with one thread and with many, and on native and on the web target.
 
 ## 6. Version
 
-Form version: 2. Version 2 adds the `attach-points` member. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
+Form version: 3. Version 2 adds the `attach-points` member; version 3 follows version 2 of model files. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
 
 ## 7. Naming nodes
 

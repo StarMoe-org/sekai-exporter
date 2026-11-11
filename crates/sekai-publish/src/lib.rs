@@ -4,6 +4,7 @@
 pub mod s3;
 
 pub mod index;
+mod parallel;
 pub mod plan;
 pub mod sqlite;
 pub mod tar;

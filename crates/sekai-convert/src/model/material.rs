@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use sekai_format::gltf::{
-    self, ImageSource, Keywords, MaterialExtras, Named, Pbr, Sampler, TextureExtensions,
-    TextureInfo, TextureInfoExtensions, TextureProperty, TextureTransform, UnityMaterial,
+    self, Keywords, MaterialExtras, Named, Pbr, Sampler, TextureInfo, TextureInfoExtensions,
+    TextureProperty, TextureTransform, UnityMaterial,
 };
 use sekai_format::number::Number;
 use serde_json::Value as Json;
@@ -221,28 +221,24 @@ impl Materials {
         Ok(Some(name))
     }
 
-    /// Moves the materials, textures, samplers and images into `document`, writing the image of
-    /// each texture through [`EXT_TEXTURE_WEBP`](gltf::EXT_TEXTURE_WEBP) when `declare_webp` is
-    /// set, and returns the images as members `texture/<n>`.
-    pub(super) fn finish(self, declare_webp: bool, document: &mut gltf::Document) -> Vec<Member> {
+    /// Moves the materials, textures, samplers and images into `document` and returns the images
+    /// as members `texture/<n>`, which the file names as the PNG images `texture/<n>.png`.
+    pub(super) fn finish(self, document: &mut gltf::Document) -> Vec<Member> {
         document.materials = self.materials;
         document.samplers = self.samplers;
-        if declare_webp && !self.textures.is_empty() {
-            document.extensions_used.push(gltf::EXT_TEXTURE_WEBP);
-            document.extensions_required.push(gltf::EXT_TEXTURE_WEBP);
-        }
         if self.transformed {
             document.extensions_used.push(gltf::KHR_TEXTURE_TRANSFORM);
         }
         let mut members = Vec::with_capacity(self.textures.len());
         for (index, image) in self.textures.into_iter().enumerate() {
             let role = format!("texture/{index}");
-            document
-                .textures
-                .push(texture(index, image.sampler, declare_webp));
+            document.textures.push(gltf::Texture {
+                sampler: image.sampler,
+                source: index,
+            });
             document.images.push(gltf::Image {
                 name: image.name,
-                uri: format!("{role}.webp"),
+                uri: format!("{role}.png"),
             });
             members.push(Member {
                 role,
@@ -280,24 +276,6 @@ fn further_keys(
             "a form's material key reuses the name {key}"
         ))),
         None => Ok(keys),
-    }
-}
-
-/// The texture of the image `index` of a file: through [`EXT_TEXTURE_WEBP`](gltf::EXT_TEXTURE_WEBP)
-/// when `declare_webp` is set, and naming the image directly otherwise.
-fn texture(index: usize, sampler: usize, declare_webp: bool) -> gltf::Texture {
-    if declare_webp {
-        let webp = ImageSource { source: index };
-        return gltf::Texture {
-            sampler,
-            extensions: Some(TextureExtensions { webp }),
-            source: None,
-        };
-    }
-    gltf::Texture {
-        sampler,
-        extensions: None,
-        source: Some(index),
     }
 }
 

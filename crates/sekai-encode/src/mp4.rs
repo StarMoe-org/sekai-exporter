@@ -1,12 +1,13 @@
 //! MP4 files with H.264 video and AAC audio, written by the `ffmpeg` program.
 //!
 //! The program is the one the environment variable `SEKAI_FFMPEG` names, or `ffmpeg` on the
-//! search path. It runs with a fixed thread count, because x264's output depends on that count.
+//! search path. It reads the video stream from a pipe and runs with fixed thread counts: one to
+//! decode, and a fixed number to encode, because x264's output depends on that number.
 
 use std::ffi::{OsStr, OsString};
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use sekai_codec::{Movie, Pcm};
@@ -17,8 +18,11 @@ use crate::EncodeError;
 pub const NAME: &str = "mp4-h264-aac";
 
 /// The encoder version.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
+/// The threads that decode the video stream. The stream decodes to the same frames whatever the
+/// count, and one keeps up with the encoder.
+const DECODE_THREADS: &str = "1";
 /// The threads of one x264 encoder. They encode slices of the same frame, so the output does not
 /// depend on how the threads are timed.
 const VIDEO_THREADS: &str = "2";
@@ -100,8 +104,9 @@ fn wav(pcm: &Pcm) -> Result<Vec<u8>, EncodeError> {
     Ok(out)
 }
 
-/// The arguments that write `output` from the stream at `video` and the optional WAV at `audio`.
-fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -> Vec<OsString> {
+/// The arguments that write `output` from the stream on standard input and the optional WAV at
+/// `audio`.
+fn arguments(movie: &Movie, audio: Option<&Path>, output: &Path) -> Vec<OsString> {
     fn add(args: &mut Vec<OsString>, values: &[&str]) {
         args.extend(values.iter().map(OsString::from));
     }
@@ -120,10 +125,12 @@ fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -
             "mpegvideo",
             "-framerate",
             &framerate,
+            "-threads",
+            DECODE_THREADS,
             "-i",
+            "pipe:0",
         ],
     );
-    args.push(video.into());
     if let Some(audio) = audio {
         add(&mut args, &["-i"]);
         args.push(audio.into());
@@ -143,7 +150,7 @@ fn arguments(movie: &Movie, video: &Path, audio: Option<&Path>, output: &Path) -
             "-c:v",
             "libx264",
             "-preset",
-            "medium",
+            "veryfast",
             "-b:v",
             "4M",
             "-g",
@@ -195,34 +202,59 @@ pub fn encode(_movie: &Movie) -> Result<Vec<u8>, EncodeError> {
 /// Encodes `movie` with `program`.
 pub fn encode_with(program: &OsStr, movie: &Movie) -> Result<Vec<u8>, EncodeError> {
     let scratch = Scratch::new().map_err(failed)?;
-    let video = scratch.0.join("video.m2v");
-    std::fs::write(&video, &movie.stream).map_err(failed)?;
     let audio = scratch.0.join("audio.wav");
     if let Some(pcm) = &movie.audio {
         std::fs::write(&audio, wav(pcm)?).map_err(failed)?;
     }
+    // The output is a file: the index that `+faststart` moves to the front is written last.
     let output = scratch.0.join("output.mp4");
     let args = arguments(
         movie,
-        &video,
         movie.audio.as_ref().map(|_| audio.as_path()),
         &output,
     );
-    let result = Command::new(program).args(args).output().map_err(|e| {
-        if e.kind() == io::ErrorKind::NotFound {
-            EncodeError::Unavailable {
-                encoder: NAME,
-                message: format!("{} was not found", program.display()),
-            }
-        } else {
-            failed(e)
-        }
-    })?;
+    let result = run(program, args, &movie.stream)?;
     if !result.status.success() {
         let text = String::from_utf8_lossy(&result.stderr);
         return Err(failed(text.chars().take(MESSAGE_LEN).collect::<String>()));
     }
     std::fs::read(&output).map_err(failed)
+}
+
+/// Runs `program` with `args`, writes `input` to its standard input and waits for it.
+fn run(
+    program: &OsStr,
+    args: Vec<OsString>,
+    input: &[u8],
+) -> Result<std::process::Output, EncodeError> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            if e.kind() == io::ErrorKind::NotFound {
+                EncodeError::Unavailable {
+                    encoder: NAME,
+                    message: format!("{} was not found", program.display()),
+                }
+            } else {
+                failed(e)
+            }
+        })?;
+    let mut stdin = child.stdin.take().expect("standard input is piped");
+    std::thread::scope(|s| {
+        // Standard input closes when the writer ends, which ends the stream.
+        let writer = s.spawn(move || stdin.write_all(input));
+        let output = child.wait_with_output().map_err(failed)?;
+        let written = writer.join().expect("writing to the pipe does not panic");
+        // A program that fails stops reading and breaks the pipe; its own error tells why.
+        match written {
+            Err(e) if output.status.success() => Err(failed(e)),
+            _ => Ok(output),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -241,7 +273,7 @@ mod tests {
     }
 
     fn strings(movie: &Movie, audio: Option<&Path>) -> Vec<String> {
-        arguments(movie, Path::new("v"), audio, Path::new("o"))
+        arguments(movie, audio, Path::new("o"))
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -256,6 +288,13 @@ mod tests {
         assert!(args.iter().any(|a| a == "+faststart"));
         assert!(args.iter().any(|a| a == "sliced-threads=1"));
         assert!(!args.iter().any(|a| a == "-vf"));
+    }
+
+    #[test]
+    fn the_stream_is_read_from_a_pipe_by_one_decoder_thread() {
+        let args = strings(&movie(640, false), None);
+        let input = args.iter().position(|a| a == "pipe:0").unwrap();
+        assert_eq!(args[input - 3..input], ["-threads", "1", "-i"]);
     }
 
     #[test]

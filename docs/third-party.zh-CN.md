@@ -34,8 +34,7 @@
 | BC3 解码 | Khronos Data Format Specification | 规范；DXT 块按其公式以精确算术比对 | — |
 | ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
 | BC1 至 BC7 解码 | Khronos Data Format Specification；Microsoft 块压缩文档 | 规范 | — |
-| PNG 写出 | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
-| 无损 WebP 写出（图片的规范形式） | [`image-webp`](https://crates.io/crates/image-webp)，修改见 [`third_party`](../third_party/README.zh-CN.md) | 链接 | MIT OR Apache-2.0 |
+| PNG 写出与读取（图片的规范形式） | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
 | 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`webp`](https://crates.io/crates/webp) 与 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 
 ## 音频与视频
@@ -47,11 +46,10 @@
 | USM 解复用 | [WannaCRI](https://github.com/donmai-me/WannaCRI) | 参考：分离出的流逐字节比对 | MIT |
 | HCA 测试样例 | [VGAudio](https://github.com/Thealexbarney/VGAudio) | 用于编码生成的音频，不链接也不分发 | MIT |
 | OpenEXR 写出（规范 HDR 图像形式） | [`exr`](https://crates.io/crates/exr) | 链接 | BSD-3-Clause |
-| FLAC 写出 | [`flacenc`](https://crates.io/crates/flacenc)，修改见 [`third_party`](../third_party/README.zh-CN.md)；[`libm`](https://crates.io/crates/libm) | 链接 | Apache-2.0；MIT |
-| FLAC 读取 | [`claxon`](https://crates.io/crates/claxon) | 随 `storage-view` feature 链接，用于读取规范层 FLAC 成员；测试中也用于解码写出的 FLAC 并逐采样比对 | Apache-2.0 |
+| MP3 写出（规范音频形式） | [`rusty_mp3`](https://crates.io/crates/rusty_mp3)，修改见 [`third_party`](../third_party/README.zh-CN.md)；[`libm`](https://crates.io/crates/libm) | 链接 | Apache-2.0；MIT |
+| 测试中的 MP3 读取 | [`symphonia`](https://crates.io/crates/symphonia) | 用于测试，解码写出的 MP3 并与其采样比对；不链接进导出器 | MPL-2.0 |
 | AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |
-| MP3 写出 | [LAME](https://lame.sourceforge.io/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.0-or-later |
-| 运行时加载 LAME 与 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
+| 运行时加载 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
 | MP4 音轨的 AAC 写出 | [FFmpeg](https://ffmpeg.org/) libavcodec | 在原生构建中运行时加载，不随导出器分发 | 不含 GPL 组件构建时为 LGPL-2.1-or-later |
 | H.264 与 AAC 的 MP4 写出 | [FFmpeg](https://ffmpeg.org/) 与 [x264](https://www.videolan.org/developers/x264.html) | 作为独立程序运行；不链接，也不随导出器分发 | GPL-2.0-or-later |
 
@@ -80,7 +78,7 @@
 | MessagePack | [`rmp-serde`](https://crates.io/crates/rmp-serde) | 链接 | MIT |
 | 哈希 | [`sha2`](https://crates.io/crates/sha2) | 链接 | MIT OR Apache-2.0 |
 | 节点路径的 CRC-32 | [`crc32fast`](https://crates.io/crates/crc32fast) | 启用 `model` feature 时链接 | MIT OR Apache-2.0 |
-| HTTP 与 TLS | [`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |
+| HTTP 与 TLS | [`reqwest`](https://crates.io/crates/reqwest)、[`hyper`](https://crates.io/crates/hyper)、[`h2`](https://crates.io/crates/h2)、[`tokio`](https://crates.io/crates/tokio)、[`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |
 | 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
 | 运行时加载库 | [`libloading`](https://crates.io/crates/libloading) | 链接 | ISC |
 | 命令行解析 | [`lexopt`](https://crates.io/crates/lexopt) | 链接 | MIT |
@@ -88,4 +86,4 @@
 
 ## 运行时加载的库
 
-LAME 与 libavcodec 不链接进导出器，也不随其分发。当一次运行需要 MP3 或 AAC 后端时，导出器加载系统中已安装的库并检查其版本，将后端名称、版本与参数记入受影响输出的指纹。库缺失或版本不符时，运行以注明所缺库的错误终止，不改用其他后端。
+libavcodec 不链接进导出器，也不随其分发。当一次运行需要 AAC 后端时，导出器加载系统中已安装的库并检查其版本，将后端名称、版本与参数记入受影响输出的指纹。库缺失或版本不符时，运行以注明所缺库的错误终止，不改用其他后端。

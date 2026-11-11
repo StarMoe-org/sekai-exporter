@@ -858,7 +858,7 @@ fn the_model_keeps_its_texture_coordinates_and_names_its_images() {
     let glb = read_glb(&asset);
     assert_eq!(
         glb.json["images"],
-        json!([{ "name": "body_C", "uri": "texture/0.webp" }])
+        json!([{ "name": "body_C", "uri": "texture/0.png" }])
     );
     assert_eq!(glb.json["textures"], json!([{ "sampler": 0, "source": 0 }]));
     assert!(glb.json.get("extensionsUsed").is_none());

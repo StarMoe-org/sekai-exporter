@@ -6,7 +6,9 @@ use std::fs;
 use std::path::PathBuf;
 
 use sekai_codec::DecodeError;
-use sekai_codec::cri::{HcaKey, decode_adx, decode_hca, hca_info, read_acb, read_awb, read_usm};
+use sekai_codec::cri::{
+    Hca, HcaKey, decode_adx, decode_hca, hca_info, read_acb, read_awb, read_usm,
+};
 use sha2::{Digest, Sha256};
 
 fn fixture(name: &str) -> Vec<u8> {
@@ -45,6 +47,38 @@ fn decoded_samples_match_the_reference() {
         count += 1;
     }
     assert_eq!(count, 9);
+}
+
+#[test]
+fn a_stream_decodes_frame_by_frame_to_the_whole_decode() {
+    for name in ["sine_mono.hca", "sine_stereo.hca"] {
+        let data = fixture(name);
+        let whole = decode_hca(&data, None).expect(name);
+        let hca = Hca::new(data, None).expect(name);
+        let mut samples = Vec::new();
+        hca.decode_each(|block| samples.extend_from_slice(block))
+            .expect(name);
+        assert_eq!(samples, whole.samples(), "{name}");
+    }
+}
+
+#[test]
+fn the_bitrate_is_the_frames_over_their_duration() {
+    let data = fixture("sine_stereo.hca");
+    let info = hca_info(&data).expect("info");
+    let header = u64::from(u16::from_be_bytes([data[6], data[7]]));
+    let body = u64::try_from(data.len()).expect("size") - header;
+    let per_second = body * 8 * u64::from(info.sample_rate) / info.frames;
+    assert_eq!(u64::from(info.bitrate), per_second);
+}
+
+#[test]
+fn a_stream_is_checked_when_it_is_opened() {
+    let mut data = fixture("sine_mono.hca");
+    let last = data.len() - 1;
+    data[last] ^= 1;
+    let result = Hca::new(data, None);
+    assert!(matches!(result, Err(DecodeError::Malformed { .. })));
 }
 
 #[test]
@@ -357,6 +391,77 @@ fn cue_sheet_gives_cues_waveforms_and_its_bank() {
 
     let bank = acb.memory_awb.expect("bank");
     assert_eq!(bank.stream(4).expect("stream 4").data, b"four");
+}
+
+/// A sheet of one cue whose sequence has a track with a command that names nothing, and an
+/// empty waveform table and bank, with the waveform that `played` names when it is given.
+fn silent_sheet(played: Option<u16>) -> Vec<u8> {
+    use Cell::{Data, Text, U8, U16, U32};
+    let cues = utf(
+        "Cue",
+        &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
+        &[vec![U8(3), U16(0), U32(0), U32(0)]],
+    );
+    let names = utf(
+        "CueName",
+        &["CueName", "CueIndex"],
+        &[vec![Text("silent"), U16(0)]],
+    );
+    let sequence = utf(
+        "Sequence",
+        &["NumTracks", "TrackIndex"],
+        &[vec![U16(1), Data(vec![0, 0])]],
+    );
+    let tracks = utf("Track", &["EventIndex"], &[vec![U16(0)]]);
+    let command = match played {
+        Some(waveform) => {
+            let [high, low] = waveform.to_be_bytes();
+            vec![0x07, 0xD0, 4, 0, 1, high, low]
+        }
+        None => vec![0x03, 0xE8, 1, 0],
+    };
+    let events = utf("TrackEvent", &["Command"], &[vec![Data(command)]]);
+    utf(
+        "Header",
+        &[
+            "CueTable",
+            "CueNameTable",
+            "WaveformTable",
+            "SequenceTable",
+            "TrackTable",
+            "TrackEventTable",
+            "AwbFile",
+        ],
+        &[vec![
+            Data(cues),
+            Data(names),
+            Data(Vec::new()),
+            Data(sequence),
+            Data(tracks),
+            Data(events),
+            Data(Vec::new()),
+        ]],
+    )
+}
+
+#[test]
+fn a_sheet_whose_cue_plays_nothing_has_no_waveforms() {
+    let data = silent_sheet(None);
+    let acb = read_acb(&data).expect("sheet");
+    assert_eq!(acb.cues.len(), 1);
+    assert_eq!(acb.cues[0].cue_names, ["silent"]);
+    assert!(acb.cues[0].waveforms.is_empty());
+    assert!(acb.waveforms.is_empty());
+    assert!(acb.memory_awb.is_none());
+}
+
+#[test]
+fn a_cue_that_plays_a_waveform_of_an_empty_table_is_malformed() {
+    let data = silent_sheet(Some(0));
+    assert!(matches!(
+        read_acb(&data),
+        Err(DecodeError::Malformed { .. })
+    ));
 }
 
 #[test]

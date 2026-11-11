@@ -10,6 +10,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use sekai_catalog::Derived;
 
+use crate::canonical::Files;
 use crate::eval::{self, Output};
 use crate::stream::{Entry, Inputs, PARSED_BYTES, Root, Stream, Units, plan_unit};
 use crate::version::{BundleError, Parsed, Version};
@@ -334,26 +335,26 @@ impl<'a> Lazy<'a> {
             state: &self.state,
             finished: &self.finished,
         };
-        let (derived, error) = match root.refusal(&opened.version, self.stream.limit) {
-            Some(error) => {
-                let code = error.code.clone();
-                let document = eval::document(
-                    &root.planned,
-                    &opened.version,
-                    self.stream.store,
-                    Vec::new(),
-                    error,
-                )?;
-                (Derived::Document(document), Some(code))
-            }
-            None => eval::derive(
+        let stored = match root.refusal(&opened.version, self.stream.limit) {
+            Some(error) => Some(eval::document(
                 &root.planned,
                 &opened.version,
                 self.stream.store,
-                self.stream.recorder,
+                Vec::new(),
+                error,
+            )?),
+            None => eval::derive(
+                &root.planned,
+                &opened.version,
+                Files {
+                    store: self.stream.store,
+                    records: Some(self.stream.derivations),
+                    recorder: self.stream.recorder,
+                },
                 self.stream.fusion,
             )?,
         };
+        let (derived, error) = eval::outcome(stored.as_ref());
         match &error {
             Some(code) => {
                 lock(&self.state)

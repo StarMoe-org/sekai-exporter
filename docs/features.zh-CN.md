@@ -53,15 +53,13 @@
 
 | Feature | 格式 | 库 |
 |---|---|---|
-| （始终启用） | PNG | `png` |
-| （始终启用） | 无损 WebP，图片的规范形式 | `image-webp` |
+| （始终启用） | PNG，图片的规范形式 | `png` |
 | （始终启用） | OpenEXR，规范 HDR 图像形式 | `exr` |
-| （始终启用） | FLAC，音频的规范形式 | `flacenc` |
+| （始终启用） | MP3，音频的规范形式 | `rusty_mp3` |
 | `webp` | 有损 WebP | libwebp，静态链接 |
-| `mp3` | MP3 | LAME，运行时加载 |
 | `aac` | MP4 中的 AAC 音轨 | libavcodec 59 至 63 及同一 FFmpeg 版本的 libavutil（FFmpeg 5.1 至 9.0），在 64 位平台上运行时加载 |
 
-规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。默认构建包含 `mp3` 与 `aac`，因此运行时需要系统中安装 LAME 与 libavcodec。每个库在编码该格式的资产时才加载：缺少库的资产以错误 `encoder_unavailable` 失败，错误信息写明缺失的库。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
+规范形式的编码器以纯 Rust 编写，因此原生构建与 WebAssembly 构建产出相同的规范字节。依赖 C 库的后端仅在原生构建中可用。默认构建包含 `aac`，因此运行时需要系统中安装 libavcodec。每个库在编码该格式的资产时才加载：缺少库的资产以错误 `encoder_unavailable` 失败，错误信息写明缺失的库。这些库的许可证列于[第三方来源](third-party.zh-CN.md)。
 
 ## 来源与发布
 
@@ -77,7 +75,7 @@
 
 | 预设 | 内容 |
 |---|---|
-| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、`image`、`audio`、`video`、`model`、`animation`、`live2d`、`text`、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`webp`、`mp3`、`aac` |
+| `default` | 默认使用者所需的全部内容：`cdn`、`catalog-db`、`image`、`audio`、`video`、`model`、`animation`、`live2d`、`text`、`scenario`、`episode`、`virtual-live`、`costume`、`storage-view`、`webp`、`aac` |
 | `preset-mysekai` | `default` 加 `mysekai` |
 | `preset-client` | `default` 加 `client` |
 | `full` | 全部 feature |

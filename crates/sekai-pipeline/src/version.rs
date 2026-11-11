@@ -10,13 +10,13 @@ use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
 };
 use sekai_unity::{
-    BlockCache, Bundle, ByteSource, ClassLayouts, Field, NoClasses, Scalar, SerializedFile,
-    Visitor, open_files,
+    BlockCache, Bundle, ByteSource, ClassLayouts, Field, Flights, NoClasses, Scalar,
+    SerializedFile, Visitor, open_files,
 };
 use sha2::{Digest, Sha256};
 
-use crate::eval::parallel;
 use crate::index_record::{IndexRecord, StreamDigest};
+use crate::sched::{Limits, Need, Scheduler};
 
 /// The estimated memory of the bundles that stay parsed, in bytes.
 const PARSED_BYTES: u64 = 512 << 20;
@@ -323,6 +323,7 @@ impl Recent {
 pub(crate) struct Parsed {
     limit: u64,
     recent: Mutex<Recent>,
+    opening: Flights<[u8; 32], Result<Arc<Opened>, ConvertError>>,
 }
 
 impl Parsed {
@@ -331,11 +332,33 @@ impl Parsed {
         Self {
             limit,
             recent: Mutex::default(),
+            opening: Flights::default(),
         }
     }
 
     fn get(&self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
         self.recent.lock().unwrap().get(bundle)
+    }
+
+    /// The parsed bundle whose bytes hash to `bundle`: the one held, or the one `open` returns,
+    /// which is held from then on. Callers that miss it at the same time open it once.
+    fn get_or_open(
+        &self,
+        bundle: [u8; 32],
+        open: impl FnOnce() -> Result<Opened, ConvertError>,
+    ) -> Result<Arc<Opened>, ConvertError> {
+        if let Some(opened) = self.get(&bundle) {
+            return Ok(opened);
+        }
+        self.opening.run(&bundle, || {
+            // A caller that has just opened the bundle may hold it since.
+            if let Some(opened) = self.get(&bundle) {
+                return Ok(opened);
+            }
+            let opened = Arc::new(open()?);
+            self.insert(bundle, opened.clone());
+            Ok(opened)
+        })
     }
 
     fn insert(&self, bundle: [u8; 32], opened: Arc<Opened>) {
@@ -409,11 +432,24 @@ impl<'c> Version<'c> {
     /// it is there and adding it when it is not. The result does not depend on `threads` or on
     /// what `indexes` holds. Fails only if `indexes` does.
     pub fn open_indexed(
-        mut inputs: Vec<BundleInput>,
+        inputs: Vec<BundleInput>,
         cache: &'c dyn BlockCache,
         classes: &'c dyn ClassLayouts,
         indexes: &dyn BundleIndexes,
         threads: usize,
+    ) -> io::Result<(Self, Vec<BundleError>)> {
+        let scheduler = Scheduler::new(Limits::threads(threads));
+        Self::open_on(inputs, cache, classes, indexes, &scheduler)
+    }
+
+    /// Opens and indexes `inputs` as [`Version::open_indexed`] does, indexing each bundle on a
+    /// CPU slot of `scheduler`, which other work may share.
+    pub fn open_on(
+        mut inputs: Vec<BundleInput>,
+        cache: &'c dyn BlockCache,
+        classes: &'c dyn ClassLayouts,
+        indexes: &dyn BundleIndexes,
+        scheduler: &Scheduler,
     ) -> io::Result<(Self, Vec<BundleError>)> {
         // The version index orders bundles by name; opening them in that order keeps the two
         // lists aligned.
@@ -425,9 +461,9 @@ impl<'c> Version<'c> {
                     || inputs.get(i + 1).is_some_and(|next| next.name == *name)
             })
             .collect();
-        let records = parallel(inputs.len(), threads, |i| {
+        let records = scheduler.run(&vec![Need::default(); inputs.len()], |i, slots| {
             (!shared[i])
-                .then(|| record(&inputs[i], cache, classes, indexes))
+                .then(|| slots.cpu(1, || record(&inputs[i], cache, classes, indexes)))
                 .transpose()
         });
         indexes.flush()?;
@@ -484,17 +520,14 @@ impl<'c> Version<'c> {
     /// The parsed form of a bundle.
     fn opened(&self, bundle: usize) -> Result<Arc<Opened>, ConvertError> {
         let (source, sha256) = &self.bundles[bundle];
-        if let Some(opened) = self.parsed.get(sha256) {
-            return Ok(opened);
-        }
-        let opened = Arc::new(Opened::open(
-            source.clone(),
-            *sha256,
-            self.cache,
-            self.classes,
-        )?);
-        self.parsed.insert(*sha256, opened.clone());
-        Ok(opened)
+        self.parsed.get_or_open(*sha256, || {
+            Ok(Opened::open(
+                source.clone(),
+                *sha256,
+                self.cache,
+                self.classes,
+            )?)
+        })
     }
 
     fn missing(&self, id: ObjectId) -> ConvertError {

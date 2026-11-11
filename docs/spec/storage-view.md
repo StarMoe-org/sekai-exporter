@@ -1,6 +1,6 @@
 # Storage view
 
-The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update --storage <dir>` publishes it. View version: 1.
+The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update --storage <dir>` publishes it. View version: 2.
 
 ## 1. Runtime
 
@@ -10,7 +10,7 @@ Sites and players that read files of the asset storage by path.
 
 | Asset form | Files |
 |---|---|
-| `texture`, `sprite` | `<file>.webp` and `<file>.png` of the image |
+| `texture`, `sprite` | `<file>.png` and `<file>.webp` of the image |
 | `audio` | `<cue>.mp3` for each cue; the waveforms of a cue with several are `<cue>_2.mp3` and so on |
 | `video` | `<base>.mp4` |
 | `scenario` | `<file>.json` |
@@ -31,9 +31,9 @@ Assets that share a name follow the naming rule in [architecture](../architectur
 
 | File | Parameters |
 |---|---|
-| WebP | The canonical lossless member, unchanged |
-| PNG | The pixels of the WebP member, 8-bit RGBA, `png` encoder |
-| MP3 | The samples of the FLAC member, 320 kb/s constant bit rate, LAME, with the tag frame that records the encoder delay and padding |
+| PNG | The canonical member, unchanged |
+| WebP | The pixels of the PNG member, lossy, libwebp quality factor 75 and method 5, `webp` encoder |
+| MP3 | The canonical member, unchanged; see [audio](audio.md) |
 | MP4 | The canonical member, unchanged; see [video](video.md) |
 | JSON and text | The canonical member, unchanged |
 
@@ -50,3 +50,4 @@ A view is compared with a reference tree made from the same input: documents by 
 | Version | Change |
 |---|---|
 | 1 | First version |
+| 2 | Images are the canonical PNG and a WebP made from it; sounds are the canonical MP3 |

@@ -1,8 +1,8 @@
 //! Encoders that write decoded images and audio in standard formats.
 //!
 //! The encoders of the canonical forms (PNG, OpenEXR and MP3) are pure Rust and always present.
-//! The MP4 encoder runs the `ffmpeg` program. Encoders that need a C library are features and
-//! are available only in native builds.
+//! The MP4 encoder runs the `ffmpeg` program. The lossy WebP encoder needs a C library, so it is
+//! a feature and is available only in native builds.
 //!
 //! Every encoder module has the same shape: a [`NAME`](png::NAME) and a
 //! [`VERSION`](png::VERSION), which enter the fingerprint of everything it encodes, and an
@@ -13,8 +13,6 @@
 
 mod error;
 
-#[cfg(feature = "aac")]
-pub mod aac;
 pub mod exr;
 pub mod mp3;
 pub mod mp4;

@@ -57,9 +57,8 @@ In `sekai-encode`:
 | (always) | OpenEXR, the canonical HDR image form | `exr` |
 | (always) | MP3, the canonical audio form | `rusty_mp3` |
 | `webp` | Lossy WebP | libwebp, statically linked |
-| `aac` | AAC audio tracks in MP4 | libavcodec 59 to 63 with the libavutil of the same FFmpeg release (FFmpeg 5.1 to 9.0), loaded at run time on 64-bit platforms |
 
-The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. Backends that need a C library are available only in native builds. The default build includes `aac`, so it needs libavcodec installed at run time. Each library is loaded when an asset of that format is encoded: an asset whose library is missing fails with the error `encoder_unavailable`, and the message names the library. The licences of these libraries are listed in [Third-party sources](third-party.md).
+The encoders of the canonical forms are written in pure Rust, so native and WebAssembly builds produce the same canonical bytes. The lossy WebP backend links libwebp, a C library, and is available only in native builds. The licences of the libraries are listed in [Third-party sources](third-party.md).
 
 ## Sources and publishing
 
@@ -75,7 +74,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 
 | Preset | Contents |
 |---|---|
-| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, `image`, `audio`, `video`, `model`, `animation`, `live2d`, `text`, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp`, `aac` |
+| `default` | Everything the default consumer needs: `cdn`, `catalog-db`, `image`, `audio`, `video`, `model`, `animation`, `live2d`, `text`, `scenario`, `episode`, `virtual-live`, `costume`, `storage-view`, `webp` |
 | `preset-mysekai` | `default` and `mysekai` |
 | `preset-client` | `default` and `client` |
 | `full` | Every feature |

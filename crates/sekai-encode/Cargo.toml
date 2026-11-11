@@ -14,12 +14,10 @@ png = "0.18.1"
 rusty_mp3 = "0.6.1"
 sekai-codec.workspace = true
 smallvec = "1"
-libloading = { version = "0.9", optional = true }
 webp = { version = "0.3", optional = true, default-features = false }
 
 [features]
 webp = ["dep:webp"]
-aac = ["dep:libloading"]
 
 [lints]
 workspace = true

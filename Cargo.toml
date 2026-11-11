@@ -27,7 +27,7 @@ sekai-mysekai = { path = "crates/sekai-mysekai" }
 sekai-wasm = { path = "crates/sekai-wasm" }
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 missing_docs = "warn"
 unreachable_pub = "warn"
 rust_2018_idioms = { level = "warn", priority = -1 }

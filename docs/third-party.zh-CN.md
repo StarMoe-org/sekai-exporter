@@ -48,9 +48,6 @@
 | OpenEXR 写出（规范 HDR 图像形式） | [`exr`](https://crates.io/crates/exr) | 链接 | BSD-3-Clause |
 | MP3 写出（规范音频形式） | [`rusty_mp3`](https://crates.io/crates/rusty_mp3)，修改见 [`third_party`](../third_party/README.zh-CN.md)；[`libm`](https://crates.io/crates/libm) | 链接 | Apache-2.0；MIT |
 | 测试中的 MP3 读取 | [`symphonia`](https://crates.io/crates/symphonia) | 用于测试，解码写出的 MP3 并与其采样比对；不链接进导出器 | MPL-2.0 |
-| AAC 写出 | [FFmpeg libavcodec](https://ffmpeg.org/) | 在原生构建中运行时加载，不随导出器分发 | LGPL-2.1-or-later |
-| 运行时加载 libavcodec | [`libloading`](https://crates.io/crates/libloading) | 原生构建中链接 | ISC |
-| MP4 音轨的 AAC 写出 | [FFmpeg](https://ffmpeg.org/) libavcodec | 在原生构建中运行时加载，不随导出器分发 | 不含 GPL 组件构建时为 LGPL-2.1-or-later |
 | H.264 与 AAC 的 MP4 写出 | [FFmpeg](https://ffmpeg.org/) 与 [x264](https://www.videolan.org/developers/x264.html) | 作为独立程序运行；不链接，也不随导出器分发 | GPL-2.0-or-later |
 
 ## 模型与文档
@@ -80,10 +77,5 @@
 | 节点路径的 CRC-32 | [`crc32fast`](https://crates.io/crates/crc32fast) | 启用 `model` feature 时链接 | MIT OR Apache-2.0 |
 | HTTP 与 TLS | [`reqwest`](https://crates.io/crates/reqwest)、[`hyper`](https://crates.io/crates/hyper)、[`h2`](https://crates.io/crates/h2)、[`tokio`](https://crates.io/crates/tokio)、[`ureq`](https://crates.io/crates/ureq)、[`rustls`](https://crates.io/crates/rustls)、[`ring`](https://crates.io/crates/ring)、[`webpki-roots`](https://crates.io/crates/webpki-roots)、[`socks`](https://crates.io/crates/socks) | 启用 `cdn` 或 `s3` feature 时链接 | MIT OR Apache-2.0；Apache-2.0 OR ISC OR MIT；Apache-2.0 AND ISC；CDLA-Permissive-2.0；MIT OR Apache-2.0 |
 | 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
-| 运行时加载库 | [`libloading`](https://crates.io/crates/libloading) | 链接 | ISC |
 | 命令行解析 | [`lexopt`](https://crates.io/crates/lexopt) | 链接 | MIT |
 | CPU 与内存采样 | [`sysinfo`](https://crates.io/crates/sysinfo)、[`cpu-time`](https://crates.io/crates/cpu-time) | 链接进命令行程序 | MIT；MIT OR Apache-2.0 |
-
-## 运行时加载的库
-
-libavcodec 不链接进导出器，也不随其分发。当一次运行需要 AAC 后端时，导出器加载系统中已安装的库并检查其版本，将后端名称、版本与参数记入受影响输出的指纹。库缺失或版本不符时，运行以注明所缺库的错误终止，不改用其他后端。

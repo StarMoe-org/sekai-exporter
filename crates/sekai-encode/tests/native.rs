@@ -97,4 +97,3 @@ mod movie {
         assert_eq!(first, mp4::encode(&movie).expect("encoded"));
     }
 }
-

@@ -37,7 +37,7 @@ mod storage {
     use sekai_catalog::{Derivations, LocalStore};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
-    use sekai_pipeline::Evaluation;
+    use sekai_publish::Plan;
 
     use crate::monitor::Monitor;
 
@@ -62,7 +62,7 @@ mod storage {
 
     /// Refuses to publish a view that this build does not have.
     pub(crate) fn publish(
-        _evaluation: &Evaluation,
+        _index: &Plan,
         _version: &str,
         _root: &Path,
         _store: &LocalStore,

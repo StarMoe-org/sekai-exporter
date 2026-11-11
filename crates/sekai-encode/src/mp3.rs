@@ -84,15 +84,17 @@ fn load(libraries: &[&str]) -> Result<Library, EncodeError> {
         })
 }
 
-fn check_version(library: &Library) -> Result<(), EncodeError> {
+fn check_version(library: &Library) -> Result<String, EncodeError> {
     let version: Symbol<'_, Version> = symbol(library, b"get_lame_version\0")?;
     // SAFETY: the function returns a static NUL-terminated string.
-    let text = unsafe { CStr::from_ptr(version()) }.to_string_lossy();
+    let text = unsafe { CStr::from_ptr(version()) }
+        .to_string_lossy()
+        .into_owned();
     let mut parts = text.split(['.', ' ']).map(|part| part.parse::<u32>().ok());
     let major = parts.next().flatten();
     let minor = parts.next().flatten();
     match (major, minor) {
-        (Some(major), Some(minor)) if (major, minor) >= MINIMUM_VERSION => Ok(()),
+        (Some(major), Some(minor)) if (major, minor) >= MINIMUM_VERSION => Ok(text),
         _ => Err(unavailable(format!(
             "LAME {text} is older than {}.{}",
             MINIMUM_VERSION.0, MINIMUM_VERSION.1
@@ -128,19 +130,28 @@ fn configure(
     Ok(())
 }
 
-fn open_library(libraries: &[&str]) -> Result<Library, EncodeError> {
+fn open_library(libraries: &[&str]) -> Result<(Library, String), EncodeError> {
     let library = load(libraries)?;
-    check_version(&library)?;
-    Ok(library)
+    let version = check_version(&library)?;
+    Ok((library, version))
+}
+
+fn default_library() -> &'static Result<(Library, String), EncodeError> {
+    static DEFAULT: OnceLock<Result<(Library, String), EncodeError>> = OnceLock::new();
+    DEFAULT.get_or_init(|| open_library(&LIBRARIES))
+}
+
+/// The version string reported by the host `libmp3lame` library, when present.
+pub fn library_version() -> Option<&'static str> {
+    default_library()
+        .as_ref()
+        .ok()
+        .map(|(_, version)| version.as_str())
 }
 
 /// Writes `pcm` as a constant-bitrate MP3 stream.
 pub fn encode(pcm: &Pcm, bitrate_kbps: u32) -> Result<Vec<u8>, EncodeError> {
-    static DEFAULT: OnceLock<Result<Library, EncodeError>> = OnceLock::new();
-    let library = DEFAULT
-        .get_or_init(|| open_library(&LIBRARIES))
-        .as_ref()
-        .map_err(Clone::clone)?;
+    let (library, _) = default_library().as_ref().map_err(Clone::clone)?;
     run(library, pcm, bitrate_kbps)
 }
 
@@ -150,7 +161,7 @@ pub fn encode_with(
     pcm: &Pcm,
     bitrate_kbps: u32,
 ) -> Result<Vec<u8>, EncodeError> {
-    let library = open_library(libraries)?;
+    let (library, _) = open_library(libraries)?;
     run(&library, pcm, bitrate_kbps)
 }
 

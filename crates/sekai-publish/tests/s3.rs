@@ -97,6 +97,8 @@ impl Request {
 #[derive(Default)]
 struct State {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
+    cache_controls: Mutex<BTreeMap<String, String>>,
+    heads: AtomicUsize,
     puts: AtomicUsize,
     /// Uploads of objects other than pointers are refused once this many have been accepted.
     refuse_after: Mutex<Option<usize>>,
@@ -191,7 +193,14 @@ fn serve(state: &State, mut stream: TcpStream) {
         (403, Vec::new())
     } else {
         match request.method.as_str() {
-            "HEAD" | "GET" => match state.objects.lock().unwrap().get(&name) {
+            "HEAD" => {
+                state.heads.fetch_add(1, Ordering::SeqCst);
+                match state.objects.lock().unwrap().get(&name) {
+                    Some(bytes) => (200, bytes.clone()),
+                    None => (404, Vec::new()),
+                }
+            }
+            "GET" => match state.objects.lock().unwrap().get(&name) {
                 Some(bytes) => (200, bytes.clone()),
                 None => (404, Vec::new()),
             },
@@ -208,6 +217,13 @@ fn serve(state: &State, mut stream: TcpStream) {
                     (400, Vec::new())
                 } else {
                     state.puts.fetch_add(1, Ordering::SeqCst);
+                    if let Some(cc) = request.headers.get("cache-control") {
+                        state
+                            .cache_controls
+                            .lock()
+                            .unwrap()
+                            .insert(name.clone(), cc.clone());
+                    }
                     state.objects.lock().unwrap().insert(name, request.body);
                     (200, Vec::new())
                 }
@@ -397,4 +413,110 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
     let e = publish(&store, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
+}
+
+#[test]
+fn incremental_publication_skips_head_for_live_objects() {
+    let s = Scratch::new("incremental");
+    let store = s.store();
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+
+    publish(&store, &s3, "jp/canonical", &sample(&store, "v1", b"mask")).unwrap();
+    server.state.heads.store(0, Ordering::SeqCst);
+
+    // Identical publication sends 0 HEADs and 0 PUTs.
+    publish(&store, &s3, "jp/canonical", &sample(&store, "v1", b"mask")).unwrap();
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+
+    // Changing one member checks only the 6 changed objects (1 member + 1 doc + 2 shards ("a" and
+    // "a/two") + 1 listing + 1 root), skipping HEAD on all 6 unchanged objects from v1.
+    let (_, report) =
+        publish(&store, &s3, "jp/canonical", &sample(&store, "v2", b"mask2")).unwrap();
+    assert_eq!((report.uploaded, report.present), (6, 6));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 6);
+}
+
+#[test]
+fn sqlite_layout_packs_composite_forms_sets_cache_control_and_skips_unchanged_heads() {
+    use sekai_publish::s3::{S3Layout, publish_with};
+
+    let s = Scratch::new("sqlite-s3");
+    let store = s.store();
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+
+    let l2d_members: Vec<MemberFile> = [
+        (
+            "model",
+            "json",
+            "application/json",
+            br#"{"v":3}"#.as_slice(),
+        ),
+        (
+            "moc3",
+            "moc3",
+            "application/octet-stream",
+            b"MOC3".as_slice(),
+        ),
+    ]
+    .into_iter()
+    .map(|(role, ext, mime, bytes)| {
+        let key = store.put(bytes, ext).unwrap();
+        MemberFile {
+            role: role.to_owned(),
+            sha256: hex(&key.sha256),
+            size: bytes.len() as u64,
+            extension: ext.to_owned(),
+            media_type: mime.to_owned(),
+        }
+    })
+    .collect();
+    let l2d_doc = AssetDocument {
+        format: FORMAT.to_owned(),
+        version: VERSION,
+        name: "chara/miku".to_owned(),
+        form: "live2d-model".to_owned(),
+        form_version: 2,
+        fingerprint: "aa".to_owned(),
+        sources: Vec::new(),
+        members: l2d_members,
+        resources: Vec::new(),
+        references: Vec::new(),
+        error: None,
+    };
+    let l2d_binding = Binding {
+        name: "chara/miku".to_owned(),
+        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
+    };
+    let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
+
+    let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store).unwrap();
+    let (pointer, report) =
+        publish_with(&store, &s3, "jp/canonical", &v1, &S3Layout::default()).unwrap();
+    // 1 sqlite + 1 root.json + 1 packed .tar + 1 standalone .webp = 4 store objects.
+    assert_eq!((report.uploaded, report.present), (4, 0));
+    assert!(pointer.sqlite.is_some());
+
+    let sqlite_key = Key {
+        sha256: sekai_catalog::store::parse_hex(pointer.sqlite.as_deref().unwrap()).unwrap(),
+        extension: "sqlite".to_owned(),
+    };
+    let sqlite_name = object_name(&sqlite_key);
+    assert!(server.object(&sqlite_name).is_some());
+    let ccs = server.state.cache_controls.lock().unwrap().clone();
+    assert_eq!(
+        ccs.get(&sqlite_name).map(String::as_str),
+        Some("public, max-age=31536000, immutable")
+    );
+    assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
+
+    // Incremental v2 adding one texture skips HEAD on the existing `.tar` and `.webp`.
+    server.state.heads.store(0, Ordering::SeqCst);
+    let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
+    let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store).unwrap();
+    let (_, report2) =
+        publish_with(&store, &s3, "jp/canonical", &v2, &S3Layout::default()).unwrap();
+    assert_eq!((report2.uploaded, report2.present), (3, 2));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 3);
 }

@@ -8,26 +8,32 @@
 //! is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects bytes
 //! that do not match. The pointer is written last, and only when it changes.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{IndexRoot, IndexShard, Pointer};
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
 use crate::index::{Documents, documents};
 use crate::plan::{Plan, PublishError, hex};
+use crate::sqlite::{self, SqliteBuild, SqliteOptions};
 
 /// The SHA-256 of no bytes.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 /// How many times a request is sent before its failure is reported.
 const ATTEMPTS: u32 = 3;
+/// Cache policy for immutable content-addressed objects under `store/`.
+const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+/// Cache policy for mutable target pointers (`published/<target>/current.json`).
+const POINTER_CACHE_CONTROL: &str = "no-cache";
 
 /// Where a publication goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -258,10 +264,15 @@ impl S3 {
         name: &str,
         sha256: &str,
         media_type: &str,
+        cache_control: &'static str,
         body: impl Fn() -> Result<B, String>,
     ) -> Result<(), String> {
         let response = self.send("PUT", name, sha256, |url, headers| {
-            let mut request = self.agent.put(url).header("content-type", media_type);
+            let mut request = self
+                .agent
+                .put(url)
+                .header("content-type", media_type)
+                .header("cache-control", cache_control);
             for (header, value) in headers {
                 request = request.header(header, value);
             }
@@ -277,6 +288,21 @@ impl S3 {
     }
 }
 
+/// Which publication layout an S3 upload writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum S3Layout {
+    /// Classic JSON-sharded layout (`IndexRoot`, `IndexShard`s, `Listing`s, `.asset.json`, members).
+    Index,
+    /// Three-tier browser-native layout (`index.sqlite`, `.tar` composite archives, standalone media).
+    Sqlite(SqliteOptions),
+}
+
+impl Default for S3Layout {
+    fn default() -> Self {
+        Self::Sqlite(SqliteOptions::default())
+    }
+}
+
 /// Publishes `plan` in the `index` layout to the bucket of `s3`: the objects first, then the
 /// pointer of `target`. The shards, listings and root are written to `store` first, and every
 /// object the bucket lacks is read from `store`. A failed stage leaves the previous pointer in
@@ -287,48 +313,148 @@ pub fn publish(
     target: &str,
     plan: &Plan,
 ) -> Result<(Pointer, S3Report), PublishError> {
-    let Documents { pointer, objects } = documents(store, plan)?;
-    let mut all: BTreeMap<&Key, (u64, &str)> = BTreeMap::new();
-    for file in &plan.files {
-        all.insert(&file.key, (file.size, file.media_type.as_str()));
-    }
-    for (key, size) in &objects {
-        all.insert(key, (*size, "application/json"));
-    }
-    let all: Vec<_> = all.into_iter().collect();
+    publish_with(store, s3, target, plan, &S3Layout::Index)
+}
 
-    let uploaded = AtomicUsize::new(0);
-    each(all.len(), s3.bucket.connections, |i| {
-        let (key, (size, media_type)) = all[i];
-        let name = s3.object(key);
-        let failed = |message: String| PublishError::new("files", message);
-        if s3.head(&name).map_err(failed)? == Some(size) {
-            return Ok(());
+/// Publishes `plan` in `layout` to the bucket of `s3`, skipping `HEAD` checks for objects already
+/// referenced by the bucket's live pointer when that pointer's index is available in `store`.
+pub fn publish_with(
+    store: &LocalStore,
+    s3: &S3,
+    target: &str,
+    plan: &Plan,
+    layout: &S3Layout,
+) -> Result<(Pointer, S3Report), PublishError> {
+    let (pointer, all) = match layout {
+        S3Layout::Index => {
+            let Documents { pointer, objects } = documents(store, plan)?;
+            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
+            for file in &plan.files {
+                all.insert(file.key.clone(), (file.size, file.media_type.clone()));
+            }
+            for (key, size) in objects {
+                all.insert(key, (size, "application/json".to_owned()));
+            }
+            (pointer, all)
         }
+        S3Layout::Sqlite(options) => {
+            let SqliteBuild {
+                sqlite,
+                sqlite_size,
+                archives,
+                direct_files,
+            } = sqlite::build(store, plan, options)?;
+            let root_doc = IndexRoot {
+                format: "index-root".to_owned(),
+                version: 1,
+                published_version: plan.version.clone(),
+                revision: plan.revision.clone(),
+                shards: Vec::new(),
+                listings: Vec::new(),
+                failures: plan.failures.clone(),
+            };
+            let root_bytes =
+                serde_json::to_vec(&root_doc).map_err(|e| PublishError::new("documents", e))?;
+            let root_size = root_bytes.len() as u64;
+            let root_key = store
+                .put(&root_bytes, "json")
+                .map_err(PublishError::wrap("documents"))?;
+            let pointer = Pointer {
+                format: "pointer".to_owned(),
+                version: 1,
+                published_version: plan.version.clone(),
+                revision: plan.revision.clone(),
+                root: hex(&root_key.sha256),
+                sqlite: Some(hex(&sqlite.sha256)),
+            };
+            let mut all: BTreeMap<Key, (u64, String)> = BTreeMap::new();
+            for (key, size, media_type) in direct_files {
+                all.insert(key, (size, media_type));
+            }
+            for (key, size) in archives {
+                all.insert(key, (size, "application/x-tar".to_owned()));
+            }
+            all.insert(root_key, (root_size, "application/json".to_owned()));
+            all.insert(sqlite, (sqlite_size, "application/vnd.sqlite3".to_owned()));
+            (pointer, all)
+        }
+    };
+
+    let all: Vec<_> = all.into_iter().collect();
+    let pointer_bytes =
+        serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
+    let pointer_name = s3.pointer(target);
+
+    // Pre-verify local store presence so missing store objects always surface as `verify` even
+    // when the remote pointer already holds parts of the publication.
+    for (key, (size, _)) in &all {
         let path = store.path(key);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == size) {
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
             return Err(PublishError::new(
                 "verify",
                 format!("{key} is not in the store with {size} bytes"),
             ));
         }
-        s3.put(&name, &hex(&key.sha256), media_type, || {
-            File::open(&path).map_err(|e| format!("{key}: {e}"))
-        })
+    }
+
+    // Consult the live remote pointer once: if identical, every object of `all` is already live;
+    // otherwise resolve all keys of the live publication from `store` so unchanged objects skip
+    // redundant `HEAD` checks.
+    let remote_pointer = s3.get(&pointer_name).ok().flatten();
+    if remote_pointer.as_deref() == Some(pointer_bytes.as_slice()) {
+        return Ok((
+            pointer,
+            S3Report {
+                uploaded: 0,
+                present: all.len(),
+                pointer_written: false,
+            },
+        ));
+    }
+    let known_live = remote_pointer
+        .as_deref()
+        .and_then(|raw| serde_json::from_slice::<Pointer>(raw).ok())
+        .map(|prev| live_keys_from_pointer(store, &prev))
+        .unwrap_or_default();
+
+    let uploaded = AtomicUsize::new(0);
+    each(all.len(), s3.bucket.connections, |i| {
+        let (key, (size, media_type)) = &all[i];
+        if known_live.contains(key) {
+            return Ok(());
+        }
+        let name = s3.object(key);
+        let failed = |message: String| PublishError::new("files", message);
+        if s3.head(&name).map_err(failed)? == Some(*size) {
+            return Ok(());
+        }
+        let path = store.path(key);
+        s3.put(
+            &name,
+            &hex(&key.sha256),
+            media_type,
+            IMMUTABLE_CACHE_CONTROL,
+            || File::open(&path).map_err(|e| format!("{key}: {e}")),
+        )
         .map_err(failed)?;
         uploaded.fetch_add(1, Ordering::Relaxed);
         Ok(())
     })?;
 
-    let bytes = serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let name = s3.pointer(target);
     let failed = |message: String| PublishError::new("pointer", message);
-    let pointer_written = s3.get(&name).map_err(failed)?.as_deref() != Some(&bytes[..]);
+    let pointer_written = remote_pointer.as_deref() != Some(pointer_bytes.as_slice())
+        && s3.get(&pointer_name).map_err(failed)?.as_deref() != Some(pointer_bytes.as_slice());
     if pointer_written {
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
         let sha256 = hex(&digest);
-        s3.put(&name, &sha256, "application/json", || Ok(bytes.as_slice()))
-            .map_err(failed)?;
+        s3.put(
+            &pointer_name,
+            &sha256,
+            "application/json",
+            POINTER_CACHE_CONTROL,
+            || Ok(pointer_bytes.as_slice()),
+        )
+        .map_err(failed)?;
     }
     let uploaded = uploaded.into_inner();
     Ok((
@@ -339,6 +465,80 @@ pub fn publish(
             pointer_written,
         },
     ))
+}
+
+fn live_keys_from_pointer(store: &LocalStore, prev: &Pointer) -> BTreeSet<Key> {
+    let mut keys = BTreeSet::new();
+    let Some(root_sha) = parse_hex(&prev.root) else {
+        return keys;
+    };
+    let root_key = Key {
+        sha256: root_sha,
+        extension: "json".to_owned(),
+    };
+    if store.contains(&root_key) {
+        keys.insert(root_key.clone());
+    }
+
+    if let Some(sqlite_hex) = &prev.sqlite {
+        if let Some(sqlite_sha) = parse_hex(sqlite_hex) {
+            let sqlite_key = Key {
+                sha256: sqlite_sha,
+                extension: "sqlite".to_owned(),
+            };
+            if let Ok(sqlite_bytes) = store.read(&sqlite_key) {
+                keys.insert(sqlite_key);
+                if let Ok(referenced) = sqlite::referenced_keys(&sqlite_bytes) {
+                    keys.extend(referenced);
+                }
+            }
+        }
+        return keys;
+    }
+
+    // Classic `index` layout: resolve shards, listings, and every file entry from local store.
+    let Ok(root_bytes) = store.read(&root_key) else {
+        return keys;
+    };
+    let Ok(root_doc) = serde_json::from_slice::<IndexRoot>(&root_bytes) else {
+        return keys;
+    };
+    for listing in &root_doc.listings {
+        if let Some(sha256) = parse_hex(&listing.sha256) {
+            let lkey = Key {
+                sha256,
+                extension: "json".to_owned(),
+            };
+            if store.contains(&lkey) {
+                keys.insert(lkey);
+            }
+        }
+    }
+    for shard_ref in &root_doc.shards {
+        let Some(sha256) = parse_hex(&shard_ref.sha256) else {
+            continue;
+        };
+        let skey = Key {
+            sha256,
+            extension: "json".to_owned(),
+        };
+        let Ok(shard_bytes) = store.read(&skey) else {
+            continue;
+        };
+        let Ok(shard_doc) = serde_json::from_slice::<IndexShard>(&shard_bytes) else {
+            continue;
+        };
+        keys.insert(skey);
+        for entry in shard_doc.entries {
+            if let Some(fsha) = parse_hex(&entry.sha256) {
+                keys.insert(Key {
+                    sha256: fsha,
+                    extension: entry.extension,
+                });
+            }
+        }
+    }
+    keys
 }
 
 /// Runs `job` for indices `0..n` on up to `threads` threads, stopping after the first failure.

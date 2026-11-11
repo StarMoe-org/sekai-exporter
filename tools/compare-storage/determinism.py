@@ -21,9 +21,12 @@ import sys
 from compare import join_relative, list_files, same_bytes
 
 PUBLICATION_FORMATS = {"index-root", "index-shard", "listing"}
+PUBLICATION_EXTENSIONS = (".sqlite", ".tar")
 
 
 def is_publication(path):
+    if path.endswith(PUBLICATION_EXTENSIONS):
+        return True
     if not path.endswith(".json"):
         return False
     try:

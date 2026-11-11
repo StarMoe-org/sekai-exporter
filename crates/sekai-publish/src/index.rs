@@ -43,7 +43,7 @@ fn entry(file: &File) -> IndexEntry {
 
 /// Whether the store holds `key` with `size` bytes. An object is written under a temporary name
 /// and renamed, so one that exists under its name is complete.
-fn stored(store: &LocalStore, key: &Key, size: u64) -> bool {
+pub(crate) fn stored(store: &LocalStore, key: &Key, size: u64) -> bool {
     std::fs::metadata(store.path(key)).is_ok_and(|m| m.is_file() && m.len() == size)
 }
 
@@ -122,6 +122,7 @@ pub(crate) fn documents(store: &LocalStore, plan: &Plan) -> Result<Documents, Pu
             published_version: plan.version.clone(),
             revision: plan.revision.clone(),
             root: index_root,
+            sqlite: None,
         },
         objects: written,
     })

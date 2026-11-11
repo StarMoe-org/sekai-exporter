@@ -221,3 +221,176 @@ fn publishing_again_changes_nothing() {
     );
     assert_eq!(listing, read_tree(&root, "_listing.json"));
 }
+
+#[test]
+fn sqlite_index_is_deterministic_packs_composite_forms_and_validates() {
+    use sekai_format::asset::SourceObject;
+    use sekai_publish::sqlite::{self, SqliteOptions};
+    use sekai_publish::tar;
+
+    let s = Scratch::new("sqlite");
+    let store = s.store();
+    let root = s.0.join("published");
+
+    let mut bindings = Vec::new();
+    // Multi-member composite Live2D model (packed into .tar under default options).
+    let l2d_members: Vec<MemberFile> = [
+        (
+            "model",
+            "json",
+            "application/json",
+            br#"{"version":3}"#.as_slice(),
+        ),
+        (
+            "moc3",
+            "moc3",
+            "application/octet-stream",
+            b"MOC3_BINARY_DATA".as_slice(),
+        ),
+        (
+            "textures/00",
+            "webp",
+            "image/webp",
+            b"RIFF_WEBP_00".as_slice(),
+        ),
+    ]
+    .into_iter()
+    .map(|(role, ext, mime, data)| {
+        let key = store.put(data, ext).unwrap();
+        MemberFile {
+            role: role.to_owned(),
+            sha256: hex(&key),
+            size: data.len() as u64,
+            extension: ext.to_owned(),
+            media_type: mime.to_owned(),
+        }
+    })
+    .collect();
+    let l2d_doc = AssetDocument {
+        format: FORMAT.to_owned(),
+        version: VERSION,
+        name: "chara/model_a".to_owned(),
+        form: "live2d-model".to_owned(),
+        form_version: 2,
+        fingerprint: "11".repeat(32),
+        sources: vec![SourceObject {
+            bundle: "chara_bundle".to_owned(),
+            path_id: 10,
+            class: "MonoBehaviour".to_owned(),
+        }],
+        members: l2d_members,
+        resources: Vec::new(),
+        references: Vec::new(),
+        error: None,
+    };
+    bindings.push(Binding {
+        name: "chara/model_a".to_owned(),
+        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
+    });
+
+    // Enough standalone textures + an overflow-sized source list to exercise multi-page B-trees
+    // and SQLite payload overflow chains.
+    for idx in 0..220u32 {
+        let name = format!("tex/group_{:02}/img_{idx:03}", idx % 7);
+        let payload = format!("webp-bytes-{idx}").into_bytes();
+        let mkey = store.put(&payload, "webp").unwrap();
+        let sources = if idx == 0 {
+            (0..120)
+                .map(|sidx| SourceObject {
+                    bundle: format!("tex_bundle_long_identifier_{sidx:03}"),
+                    path_id: i64::from(sidx + 1),
+                    class: "Texture2D".to_owned(),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let doc = AssetDocument {
+            format: FORMAT.to_owned(),
+            version: VERSION,
+            name: name.clone(),
+            form: "texture".to_owned(),
+            form_version: 1,
+            fingerprint: "44".repeat(32),
+            sources,
+            members: vec![MemberFile {
+                role: "image".to_owned(),
+                sha256: hex(&mkey),
+                size: payload.len() as u64,
+                extension: "webp".to_owned(),
+                media_type: "image/webp".to_owned(),
+            }],
+            resources: Vec::new(),
+            references: Vec::new(),
+            error: None,
+        };
+        bindings.push(Binding {
+            name,
+            document: store.put(&doc.to_bytes().unwrap(), "json").unwrap(),
+        });
+    }
+    bindings.push(failed(&store, "broken/item"));
+
+    let forward = plan("v1", &bindings, &store).unwrap();
+    let mut rev_bindings = bindings;
+    rev_bindings.reverse();
+    let backward = plan("v1", &rev_bindings, &store).unwrap();
+
+    let built_a = sqlite::build(&store, &forward, &SqliteOptions::default()).unwrap();
+    let built_b = sqlite::build(&store, &backward, &SqliteOptions::default()).unwrap();
+    assert_eq!(built_a, built_b);
+    assert_eq!(built_a.archives.len(), 1);
+    assert_eq!(built_a.direct_files.len(), 220);
+
+    // Verify `.tar` archive member offsets match raw bytes (in sorted member path order).
+    let tar_bytes = store.read(&built_a.archives[0].0).unwrap();
+    let tar_entries = tar::entries(&tar_bytes).unwrap();
+    assert_eq!(tar_entries.len(), 3);
+    assert_eq!(tar_entries[0].path, "moc3.moc3");
+    let start = tar_entries[0].offset as usize;
+    let end = start + tar_entries[0].size as usize;
+    assert_eq!(&tar_bytes[start..end], b"MOC3_BINARY_DATA");
+    assert_eq!(tar_entries[1].path, "model.json");
+
+    // Verify pure-Rust `referenced_keys` extracts the 1 `.tar` + 220 `.webp` keys.
+    let db_bytes = store.read(&built_a.sqlite).unwrap();
+    let refs = sqlite::referenced_keys(&db_bytes).unwrap();
+    assert_eq!(refs.len(), 221);
+    assert!(refs.contains(&built_a.archives[0].0));
+
+    // Verify local `sqlite::publish` populates `pointer.sqlite`.
+    let pointer = sqlite::publish(
+        &store,
+        &root,
+        "jp/canonical",
+        &forward,
+        &SqliteOptions::unpacked(),
+    )
+    .unwrap();
+    assert!(pointer.sqlite.is_some());
+
+    // When Python with `sqlite3` is present on the host, run `PRAGMA integrity_check` as well.
+    let has_python_sqlite = std::process::Command::new("python3")
+        .args(["-c", "import sqlite3"])
+        .status()
+        .is_ok_and(|s| s.success());
+    if has_python_sqlite {
+        let db_path = store.path(&built_a.sqlite);
+        let output = std::process::Command::new("python3")
+            .args([
+                "-c",
+                "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); \
+                 assert c.execute('PRAGMA integrity_check').fetchall() == [('ok',)]; \
+                 assert c.execute('SELECT COUNT(*) FROM assets').fetchone() == (222,); \
+                 assert c.execute('SELECT COUNT(*) FROM files').fetchone() == (223,)",
+            ])
+            .arg(&db_path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "sqlite3 integrity check failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

@@ -68,6 +68,19 @@ pub struct File {
     pub role: String,
 }
 
+/// A published asset and its decoded asset document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishedAsset {
+    /// The name of the asset.
+    pub name: String,
+    /// The bundle of the asset's root object, or empty when no source is listed.
+    pub bundle: String,
+    /// The asset document in the store.
+    pub document: Key,
+    /// The parsed asset document.
+    pub metadata: AssetDocument,
+}
+
 /// Everything a publication contains.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -75,6 +88,8 @@ pub struct Plan {
     pub version: String,
     /// The files, in path order.
     pub files: Vec<File>,
+    /// The assets, in name order.
+    pub assets: Vec<PublishedAsset>,
     /// The listing of each asset form, in name order.
     pub listings: BTreeMap<String, Vec<ListingEntry>>,
     /// The assets that could not be produced, in name order.
@@ -100,6 +115,7 @@ fn member_path(name: &str, role: &str, extension: &str, members: usize) -> Strin
 /// Reads the asset documents of `bindings` and lists what a publication of them contains.
 pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<Plan, PublishError> {
     let mut files = Vec::new();
+    let mut assets = Vec::with_capacity(bindings.len());
     let mut listings: BTreeMap<String, Vec<ListingEntry>> = BTreeMap::new();
     let mut failures = Vec::new();
     let wrap = PublishError::wrap("plan");
@@ -115,10 +131,21 @@ pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<P
             asset: binding.name.clone(),
             role: "document".to_owned(),
         });
+        let bundle = document
+            .sources
+            .first()
+            .map(|source| source.bundle.clone())
+            .unwrap_or_default();
         if let Some(error) = &document.error {
             failures.push(AssetFailure {
                 name: binding.name.clone(),
                 code: error.code.clone(),
+            });
+            assets.push(PublishedAsset {
+                name: binding.name.clone(),
+                bundle,
+                document: binding.document.clone(),
+                metadata: document,
             });
             continue;
         }
@@ -153,6 +180,12 @@ pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<P
                 fingerprint: document.fingerprint.clone(),
                 size: total,
             });
+        assets.push(PublishedAsset {
+            name: binding.name.clone(),
+            bundle,
+            document: binding.document.clone(),
+            metadata: document,
+        });
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(pair) = files.windows(2).find(|pair| pair[0].path == pair[1].path) {
@@ -161,6 +194,7 @@ pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<P
             format!("two files are published at {}", pair[0].path),
         ));
     }
+    assets.sort_by(|a, b| a.name.cmp(&b.name));
     for listing in listings.values_mut() {
         listing.sort_by(|a, b| a.name.cmp(&b.name));
     }
@@ -186,6 +220,7 @@ pub fn plan(version: &str, bindings: &[Binding], store: &LocalStore) -> Result<P
     Ok(Plan {
         version: version.to_owned(),
         files,
+        assets,
         listings,
         failures,
         revision: hex(&records.finalize()),

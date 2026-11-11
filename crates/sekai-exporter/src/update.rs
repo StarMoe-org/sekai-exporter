@@ -640,7 +640,7 @@ fn publish_bucket(
     plan: &Plan,
     monitor: &Monitor,
 ) -> Result<(), lexopt::Error> {
-    use sekai_publish::s3::{self, Bucket, Credentials, S3};
+    use sekai_publish::s3::{self, Bucket, Credentials, S3, S3Layout};
 
     let Some(section) = bucket_section(config)? else {
         return Ok(());
@@ -683,9 +683,22 @@ fn publish_bucket(
                 .ok_or("publish.s3.connections is not a number")?,
         },
     };
+    let layout = match section.get("layout") {
+        None => S3Layout::Sqlite(parse_sqlite_options(&section)?),
+        Some(value) => match text(Some(value), "layout")?.as_str() {
+            "sqlite" => S3Layout::Sqlite(parse_sqlite_options(&section)?),
+            "index" => S3Layout::Index,
+            other => {
+                return Err(
+                    format!("publish.s3.layout {other:?} must be \"sqlite\" or \"index\"").into(),
+                );
+            }
+        },
+    };
     let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
     let _span = monitor.span("publish", "s3", target);
-    let (_, report) = s3::publish(store, &s3, target, plan).map_err(|e| e.to_string())?;
+    let (_, report) =
+        s3::publish_with(store, &s3, target, plan, &layout).map_err(|e| e.to_string())?;
     println!(
         "bucket uploaded {} present {} pointer {}",
         report.uploaded,
@@ -697,6 +710,27 @@ fn publish_bucket(
         }
     );
     Ok(())
+}
+
+#[cfg(feature = "s3")]
+fn parse_sqlite_options(
+    section: &serde_json::Value,
+) -> Result<sekai_publish::sqlite::SqliteOptions, lexopt::Error> {
+    use sekai_publish::sqlite::SqliteOptions;
+    let Some(value) = section.get("pack_forms") else {
+        return Ok(SqliteOptions::default());
+    };
+    let array = value
+        .as_array()
+        .ok_or("publish.s3.pack_forms must be an array of strings")?;
+    let mut pack_forms = std::collections::BTreeSet::new();
+    for item in array {
+        let form = item
+            .as_str()
+            .ok_or("publish.s3.pack_forms entries must be strings")?;
+        pack_forms.insert(form.to_owned());
+    }
+    Ok(SqliteOptions { pack_forms })
 }
 
 /// Refuses a configuration that names a bucket, which this build cannot publish to.

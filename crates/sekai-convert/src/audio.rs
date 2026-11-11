@@ -44,6 +44,10 @@ impl Converter for Audio {
         3
     }
 
+    fn encoders(&self) -> crate::Encoders {
+        crate::Encoders::AUDIO
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

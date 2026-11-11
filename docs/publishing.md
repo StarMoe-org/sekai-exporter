@@ -53,7 +53,7 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 
 ## S3-compatible buckets
 
-With the `s3` feature, `sekai-exporter update` also publishes the `index` layout to an S3-compatible bucket when the configuration file has a `publish.s3` section:
+With the `s3` feature, `sekai-exporter update` also publishes to an S3-compatible bucket when the configuration file has a `publish.s3` section:
 
 ```json
 {
@@ -63,6 +63,7 @@ With the `s3` feature, `sekai-exporter update` also publishes the `index` layout
       "endpoint": "https://s3.example.invalid/bucket",
       "region": "us-east-1",
       "prefix": "sekai/",
+      "layout": "sqlite",
       "connections": 8,
       "secrets": { "access_key_id": "SEKAI_S3_ACCESS_KEY_ID", "secret_access_key": "SEKAI_S3_SECRET_ACCESS_KEY" }
     }
@@ -75,12 +76,14 @@ With the `s3` feature, `sekai-exporter update` also publishes the `index` layout
 | `endpoint` | The address of the bucket, path-style (`https://<host>/<bucket>`) or virtual-hosted (`https://<bucket>.<host>`) |
 | `region` | The region the requests are signed for |
 | `prefix` | Optional. Prepended to every object name; empty or ending in `/` |
+| `layout` | Optional, `"sqlite"` by default (`"sqlite"` or `"index"`). `"sqlite"` uploads the three-tier browser layout (`index.sqlite` + `.tar` composite archives + standalone media) without JSON sidecar explosion; `"index"` uploads the classic JSON shard layout |
+| `pack_forms` | Optional array of asset form names whose multi-member assets are packed into `.tar` archives under `"sqlite"` layout (defaults to `costume-model`, `emoticon`, `fixture-model`, `live2d-model`, `live2d-motions`, `site-model`) |
 | `connections` | Optional, 8 by default. Requests in flight at once |
 | `secrets` | The names of the secrets that hold the access key ID and the secret access key. Each value is read from the environment variable of that name, or from the file of that name in the `--secrets` directory |
 
-The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer at `<prefix>published/<region>/<view>/current.json`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
+The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer at `<prefix>published/<region>/<view>/current.json`. Immutable objects under `store/` are written with `Cache-Control: public, max-age=31536000, immutable` and pointers with `Cache-Control: no-cache`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
 
-A publication first asks the bucket for each object it refers to and uploads only the objects it lacks or holds with another size. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes, so a second publication of the same version sends no uploads. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
+A publication first reads the bucket's live `current.json` pointer: if it already matches, no object requests are sent; otherwise every store key referenced by that live pointer's local index skips redundant `HEAD` checks, and only new or unverified objects are checked and uploaded. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
 
 ## Evaluation and publishing together
 

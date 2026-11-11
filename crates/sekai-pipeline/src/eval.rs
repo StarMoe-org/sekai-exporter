@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use sekai_catalog::{Derivations, Derived, Key, Store};
-use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, ObjectId};
+use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, Encoders, ObjectId};
 use sekai_encode::{EncodeError, exr, flac, mp4, webp_lossless};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
@@ -14,6 +14,7 @@ use sekai_unity::ClassLayouts;
 use sekai_unity::index::VersionIndex;
 use sha2::{Digest, Sha256};
 
+use crate::index_record::StreamDigest;
 use crate::metrics::Recorder;
 use crate::reads::Reads;
 use crate::sched::{Limits, Need, Resident, Scheduler, Slots};
@@ -137,36 +138,52 @@ pub(crate) fn fingerprint(
     name: &str,
     index: &VersionIndex,
     closure: &[ObjectId],
-    resources: &[Vec<[u8; 32]>],
+    streams: &[Vec<Vec<StreamDigest>>],
     classes: &dyn ClassLayouts,
 ) -> [u8; 32] {
     let mut text = format!(
-        "fingerprint 1\nform {} {}\nname {name}\nencoder {} {}\nencoder {} {}\nencoder {} {}\nencoder {} {}\n",
+        "fingerprint 2\nform {} {}\nname {name}\n",
         converter.name(),
         converter.version(),
-        webp_lossless::NAME,
-        webp_lossless::VERSION,
-        exr::NAME,
-        exr::VERSION,
-        flac::NAME,
-        flac::VERSION,
-        mp4::NAME,
-        mp4::VERSION,
     );
+    let encoders = converter.encoders();
+    if encoders.image {
+        text.push_str(&format!(
+            "encoder {} {}\n",
+            webp_lossless::NAME,
+            webp_lossless::VERSION
+        ));
+    }
+    if encoders.hdr_image {
+        text.push_str(&format!("encoder {} {}\n", exr::NAME, exr::VERSION));
+    }
+    if encoders.audio {
+        text.push_str(&format!("encoder {} {}\n", flac::NAME, flac::VERSION));
+    }
+    if encoders.video {
+        text.push_str(&format!("encoder {} {}\n", mp4::NAME, mp4::VERSION));
+    }
     if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", hex(&identity)));
     }
-    let mut bundles = BTreeSet::new();
     for id in closure {
-        bundles.insert(id.bundle);
         if let Some(position) = index.position(*id) {
             let object = &index.bundles()[id.bundle].files[id.file].objects[position];
             text.push_str(&format!("object {}\n", hex(&object.sha256)));
         }
-    }
-    for bundle in bundles {
-        for hash in &resources[bundle] {
-            text.push_str(&format!("resource {}\n", hex(hash)));
+        if let Some(digest) = streams
+            .get(id.bundle)
+            .and_then(|b| b.get(id.file))
+            .and_then(|list| {
+                list.binary_search_by_key(&id.path_id, |d| d.path_id)
+                    .ok()
+                    .map(|pos| &list[pos])
+            })
+        {
+            match digest.sha256 {
+                Some(sha) => text.push_str(&format!("stream {}\n", hex(&sha))),
+                None => text.push_str("stream missing\n"),
+            }
         }
     }
     Sha256::digest(text.as_bytes()).into()
@@ -247,6 +264,7 @@ pub(crate) fn derive(
     version: &Version<'_>,
     store: &dyn Store,
     recorder: &dyn Recorder,
+    fusion: Option<&dyn Fusion>,
 ) -> io::Result<(Derived, Option<String>)> {
     let cost = plan.cost(version);
     let alone = Scheduler::new(Limits {
@@ -257,10 +275,36 @@ pub(crate) fn derive(
     });
     alone
         .run(&[Need::default()], |_, slots| {
-            derive_within(plan, cost, slots, version, store, recorder, None)
+            derive_within(plan, cost, slots, version, store, recorder, fusion)
         })
         .pop()
         .expect("the derivation ran")
+}
+
+fn check_declared_encoders(
+    declared: Encoders,
+    asset: &Asset,
+    form: &str,
+) -> Result<(), ConvertError> {
+    for member in &asset.members {
+        let missing = match &member.content {
+            Content::Image(_) if !declared.image => Some(webp_lossless::NAME),
+            Content::HdrImage(_) if !declared.hdr_image => Some(exr::NAME),
+            Content::Audio(_) if !declared.audio => Some(flac::NAME),
+            Content::Video(_) if !declared.video => Some(mp4::NAME),
+            _ => None,
+        };
+        if let Some(encoder) = missing {
+            return Err(ConvertError::new(
+                "undeclared_encoder",
+                format!(
+                    "converter {form} produced member {} using encoder {encoder} without declaring it",
+                    member.role
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Evaluates one derivation as [`derive`] does, within the CPU slots of a running job.
@@ -278,7 +322,7 @@ pub(crate) fn derive_within(
     fusion: Option<&dyn Fusion>,
 ) -> io::Result<(Derived, Option<String>)> {
     let form = plan.converter.name();
-    let reads = Reads::new(version, &plan.closure);
+    let reads = Reads::new(version, &plan.closure, Some(version.all_streams()));
     let result = slots.cpu(1, || {
         let mut span = recorder.span("convert", form, &plan.name);
         let result = plan.converter.convert(plan.closure[0], &reads);
@@ -287,6 +331,12 @@ pub(crate) fn derive_within(
         }
         result
     });
+    let result = match result {
+        Ok(Some(asset)) => {
+            check_declared_encoders(plan.converter.encoders(), &asset, form).map(|()| Some(asset))
+        }
+        other => other,
+    };
     let (objects, resources) = reads.finish();
     let encoders = if cost.class == CostClass::Wide { 2 } else { 1 };
     let mut members = Vec::new();
@@ -586,5 +636,132 @@ mod tests {
         assert_eq!(of(&Table([1; 32])), of(&Table([1; 32])));
         assert_ne!(of(&Table([1; 32])), of(&Table([2; 32])));
         assert_ne!(of(&Table([1; 32])), of(&NoClasses));
+    }
+
+    #[test]
+    fn fingerprint_scopes_encoders_and_stream_slices_to_declared_closure() {
+        use sekai_unity::index::{BundleIndex, FileIndex};
+
+        struct WithEnc(Encoders);
+        impl Converter for WithEnc {
+            fn name(&self) -> &'static str {
+                "form"
+            }
+            fn version(&self) -> u32 {
+                1
+            }
+            fn encoders(&self) -> Encoders {
+                self.0
+            }
+            fn is_root(&self, _: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
+                false
+            }
+            fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+                Ok(None)
+            }
+        }
+
+        let obj_a = ObjectIndex {
+            path_id: 1,
+            class_id: 49,
+            class: "TextAsset".to_owned(),
+            name: None,
+            script: None,
+            script_name: None,
+            references: Vec::new(),
+            size: 4,
+            sha256: [0xaa; 32],
+            error: None,
+        };
+        let obj_b = ObjectIndex {
+            path_id: 2,
+            class_id: 28,
+            class: "Texture2D".to_owned(),
+            name: None,
+            script: None,
+            script_name: None,
+            references: Vec::new(),
+            size: 4,
+            sha256: [0xbb; 32],
+            error: None,
+        };
+        let index = VersionIndex::new(vec![BundleIndex {
+            name: "b".to_owned(),
+            files: vec![FileIndex {
+                path: "CAB-1".to_owned(),
+                externals: Vec::new(),
+                objects: vec![obj_a, obj_b],
+                container: Vec::new(),
+            }],
+        }]);
+
+        let id_text = ObjectId {
+            bundle: 0,
+            file: 0,
+            path_id: 1,
+        };
+        let id_tex = ObjectId {
+            bundle: 0,
+            file: 0,
+            path_id: 2,
+        };
+        let streams_v1 = vec![vec![vec![StreamDigest {
+            path_id: 2,
+            file: "CAB-1.resS".to_owned(),
+            offset: 0,
+            size: 64,
+            sha256: Some([0x11; 32]),
+        }]]];
+        let streams_v2 = vec![vec![vec![StreamDigest {
+            path_id: 2,
+            file: "CAB-1.resS".to_owned(),
+            offset: 0,
+            size: 64,
+            sha256: Some([0x22; 32]),
+        }]]];
+
+        // Sibling TextAsset in the same bundle is unaffected when Texture2D's `.resS` slice changes.
+        assert_eq!(
+            fingerprint(&Form, "txt", &index, &[id_text], &streams_v1, &NoClasses),
+            fingerprint(&Form, "txt", &index, &[id_text], &streams_v2, &NoClasses),
+        );
+        // Texture2D itself tracks its own `.resS` slice digest.
+        assert_ne!(
+            fingerprint(
+                &WithEnc(Encoders::IMAGE),
+                "tex",
+                &index,
+                &[id_tex],
+                &streams_v1,
+                &NoClasses
+            ),
+            fingerprint(
+                &WithEnc(Encoders::IMAGE),
+                "tex",
+                &index,
+                &[id_tex],
+                &streams_v2,
+                &NoClasses
+            ),
+        );
+        // Different declared encoder capabilities produce distinct fingerprints.
+        assert_ne!(
+            fingerprint(
+                &WithEnc(Encoders::NONE),
+                "x",
+                &index,
+                &[id_text],
+                &streams_v1,
+                &NoClasses
+            ),
+            fingerprint(
+                &WithEnc(Encoders::AUDIO),
+                "x",
+                &index,
+                &[id_text],
+                &streams_v1,
+                &NoClasses
+            ),
+        );
     }
 }

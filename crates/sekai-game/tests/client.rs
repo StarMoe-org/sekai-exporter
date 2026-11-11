@@ -115,3 +115,32 @@ fn a_package_without_player_data_is_an_error() {
     let apk = archive(&[("res/icon.png", b"image")]);
     assert!(player_bundle(&apk).is_err());
 }
+
+#[test]
+fn nested_apks_in_subdirectories_and_uppercase_extensions_are_unpacked() {
+    use sekai_game::client::player_bundle_from;
+
+    let file = serialized_file();
+    let base = archive(&[(&data("level0"), &file)]);
+    let pack = archive(&[(&data("level0.resS"), b"streamed")]);
+    let xapk = archive(&[("apks/Base.APK", &base), ("splits/asset_pack.apk", &pack)]);
+
+    let expected = [
+        ("level0", true, file),
+        ("level0.resS", false, b"streamed".to_vec()),
+    ]
+    .map(|(path, serialized, bytes)| (path.to_owned(), serialized, bytes));
+    assert_eq!(
+        entries(player_bundle_from(std::io::Cursor::new(&xapk)).unwrap()),
+        expected
+    );
+}
+
+#[test]
+fn deeply_nested_apks_are_rejected() {
+    let inner = archive(&[(&data("level0"), &serialized_file())]);
+    let mid = archive(&[("inner.apk", &inner)]);
+    let outer = archive(&[("mid.apk", &mid)]);
+    let err = player_bundle(&outer).unwrap_err();
+    assert!(err.to_string().contains("depth"), "{err}");
+}

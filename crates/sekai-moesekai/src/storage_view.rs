@@ -33,7 +33,10 @@ impl Transform {
         match self {
             Self::Copy => "copy".to_owned(),
             Self::Png => format!("{} {}", png::NAME, png::VERSION),
-            Self::Mp3 => format!("{} {} {MP3_KBPS}", mp3::NAME, mp3::VERSION),
+            Self::Mp3 => match mp3::library_version() {
+                Some(lame) => format!("{} {} {lame} {MP3_KBPS}", mp3::NAME, mp3::VERSION),
+                None => format!("{} {} {MP3_KBPS}", mp3::NAME, mp3::VERSION),
+            },
         }
     }
 

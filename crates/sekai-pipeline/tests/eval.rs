@@ -161,6 +161,10 @@ impl Converter for Wide {
         Texture.version()
     }
 
+    fn encoders(&self) -> sekai_convert::Encoders {
+        Texture.encoders()
+    }
+
     fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
         Texture.is_root(object, script, paths)
     }
@@ -402,6 +406,10 @@ impl Converter for Watched {
         Texture.version()
     }
 
+    fn encoders(&self) -> sekai_convert::Encoders {
+        Texture.encoders()
+    }
+
     fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
         Texture.is_root(object, script, paths)
     }
@@ -501,5 +509,44 @@ fn plain_mode_neither_reads_nor_writes_records() {
     assert_eq!(again.reused, 0, "plain mode read no records");
     assert_eq!(again.converted, normal.converted);
     assert_eq!(first.outputs, again.outputs);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn undeclared_encoder_usage_is_reported_as_an_error() {
+    struct UndeclaredImage;
+
+    impl Converter for UndeclaredImage {
+        fn name(&self) -> &'static str {
+            "undeclared"
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+            Texture.is_root(object, script, paths)
+        }
+
+        fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+            Texture.convert(root, cx)
+        }
+    }
+
+    let root = scratch("undeclared-encoder");
+    let evaluation = run_with(
+        Box::new(UndeclaredImage),
+        &root,
+        1,
+        &MemoryDerivations::default(),
+    );
+    assert!(!evaluation.outputs.is_empty());
+    assert!(
+        evaluation
+            .outputs
+            .iter()
+            .all(|o| o.error.as_deref() == Some("undeclared_encoder"))
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

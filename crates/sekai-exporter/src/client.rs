@@ -4,7 +4,7 @@ use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use sekai_game::client::{PLAYER_BUNDLE, player_bundle};
+use sekai_game::client::{PLAYER_BUNDLE, player_bundle_from};
 use sekai_layouts::{PlayerLayouts, ScriptTable, TableError, VersionTable};
 use sekai_pipeline::BundleInput;
 use sekai_pipeline::stream::{Entry, Inputs};
@@ -50,8 +50,8 @@ pub(crate) fn source(
     let scripts = scripts
         .map(|path| read_table(path, ScriptTable::from_jsonl_gz))
         .transpose()?;
-    let bundle = std::fs::read(package)
-        .and_then(|bytes| player_bundle(&bytes))
+    let bundle = std::fs::File::open(package)
+        .and_then(player_bundle_from)
         .map_err(|e| format!("{}: {e}", package.display()))?;
     let manifest = vec![Entry {
         name: PLAYER_BUNDLE.to_owned(),

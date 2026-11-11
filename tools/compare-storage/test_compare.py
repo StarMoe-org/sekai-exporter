@@ -390,6 +390,8 @@ class DeterminismTests(TreeTestCase):
             f"{n}.json": b'{"format": "%s"}' % name.encode()
             for n, name in enumerate(["index-root", "index-shard", "listing"])
         }
+        documents["aa/idx.sqlite"] = b"SQLite format 3\x00"
+        documents["bb/pack.tar"] = b"\x00" * 1024
         same = {"a.json": b'{"format": "asset"}'}
         run1, run2 = self.runs({**same, **documents}, same)
         self.assertEqual(self.run_main([run1, run2])[0], 1)

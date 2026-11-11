@@ -46,6 +46,14 @@ pub trait Converter: Send + Sync {
     /// The converter version. It changes only when the converter's output changes.
     fn version(&self) -> u32;
 
+    /// Which canonical media encoders this converter's members may use.
+    ///
+    /// Only the versions of the declared encoders enter the asset's derivation fingerprint, and
+    /// producing a member whose encoder was not declared fails with `undeclared_encoder`.
+    fn encoders(&self) -> Encoders {
+        Encoders::NONE
+    }
+
     /// Whether `object` is the root of an asset of this form. `script` is the script the object
     /// refers to, as in [`Object::script`]: `"<assembly>/<namespace>.<class>"`, or `None` when
     /// the object refers to no script or the script does not resolve. `container_paths` are the
@@ -84,6 +92,50 @@ pub trait Converter: Send + Sync {
         let _ = (root, cx);
         Cost::light(u64::from(object.size))
     }
+}
+
+/// Which canonical media encoders a [`Converter`] may rely on when encoding its members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Encoders {
+    /// Lossless WebP (`Content::Image`).
+    pub image: bool,
+    /// OpenEXR (`Content::HdrImage`).
+    pub hdr_image: bool,
+    /// FLAC (`Content::Audio`).
+    pub audio: bool,
+    /// MP4 (`Content::Video`).
+    pub video: bool,
+}
+
+impl Encoders {
+    /// No media encoders (`Content::File` only).
+    pub const NONE: Self = Self {
+        image: false,
+        hdr_image: false,
+        audio: false,
+        video: false,
+    };
+    /// Lossless WebP (`Content::Image`).
+    pub const IMAGE: Self = Self {
+        image: true,
+        ..Self::NONE
+    };
+    /// Lossless WebP and OpenEXR (`Content::Image` and `Content::HdrImage`).
+    pub const TEXTURE: Self = Self {
+        image: true,
+        hdr_image: true,
+        ..Self::NONE
+    };
+    /// FLAC (`Content::Audio`).
+    pub const AUDIO: Self = Self {
+        audio: true,
+        ..Self::NONE
+    };
+    /// MP4 (`Content::Video`).
+    pub const VIDEO: Self = Self {
+        video: true,
+        ..Self::NONE
+    };
 }
 
 /// How converting and encoding an asset uses the processor.

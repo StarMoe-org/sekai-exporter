@@ -5,21 +5,30 @@ use std::collections::BTreeSet;
 
 use sekai_convert::{Chunk, Context, ConvertError, EngineObject, Object, ObjectId, PPtr};
 
+use crate::index_record::StreamDigest;
+
 /// A [`Context`] that records what a conversion reads and refuses anything outside the closure,
 /// so that everything an output depends on is in its fingerprint.
 pub(crate) struct Reads<'a> {
     inner: &'a dyn Context,
     closure: &'a [ObjectId],
+    streams: Option<&'a [Vec<Vec<StreamDigest>>]>,
     objects: RefCell<BTreeSet<ObjectId>>,
     resources: RefCell<BTreeSet<(usize, String)>>,
 }
 
 impl<'a> Reads<'a> {
-    /// Reads from `inner` within `closure`, the root first and the rest in order.
-    pub(crate) fn new(inner: &'a dyn Context, closure: &'a [ObjectId]) -> Self {
+    /// Reads from `inner` within `closure`, the root first and the rest in order, verifying
+    /// resource slice reads against `streams` when present.
+    pub(crate) fn new(
+        inner: &'a dyn Context,
+        closure: &'a [ObjectId],
+        streams: Option<&'a [Vec<Vec<StreamDigest>>]>,
+    ) -> Self {
         Self {
             inner,
             closure,
+            streams,
             objects: RefCell::default(),
             resources: RefCell::default(),
         }
@@ -66,8 +75,31 @@ impl Context for Reads<'_> {
     ) -> Result<Chunk<'_>, ConvertError> {
         let chunk = self.inner.resource(from, path, offset, size)?;
         self.check(from)?;
-        let file = path.rsplit('/').next().unwrap_or(path).to_owned();
-        self.resources.borrow_mut().insert((from.bundle, file));
+        let file = path.rsplit('/').next().unwrap_or(path);
+        if let Some(streams) = self.streams {
+            let indexed = streams
+                .get(from.bundle)
+                .and_then(|b| b.get(from.file))
+                .and_then(|list| {
+                    list.binary_search_by_key(&from.path_id, |d| d.path_id)
+                        .ok()
+                        .map(|pos| &list[pos])
+                })
+                .is_some_and(|d| d.file == file && d.offset == offset && d.size == size);
+            if !indexed {
+                return Err(ConvertError::new(
+                    "undeclared_read",
+                    format!(
+                        "resource {file} ({offset}..{}) is not indexed on object {}",
+                        offset.saturating_add(size),
+                        from.path_id
+                    ),
+                ));
+            }
+        }
+        self.resources
+            .borrow_mut()
+            .insert((from.bundle, file.to_owned()));
         Ok(chunk)
     }
 

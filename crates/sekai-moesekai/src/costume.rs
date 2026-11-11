@@ -50,6 +50,10 @@ impl Converter for CostumeModel {
         1
     }
 
+    fn encoders(&self) -> sekai_convert::Encoders {
+        sekai_convert::Encoders::IMAGE
+    }
+
     fn is_root(
         &self,
         object: &ObjectIndex,

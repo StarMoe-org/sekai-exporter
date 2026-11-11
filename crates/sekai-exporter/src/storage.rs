@@ -223,6 +223,7 @@ pub(crate) fn publish(
     let plan = Plan {
         version: version.to_owned(),
         files,
+        assets: Vec::new(),
         listings: BTreeMap::new(),
         failures,
         revision: revision.iter().map(|b| format!("{b:02x}")).collect(),

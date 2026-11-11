@@ -556,9 +556,6 @@ fn evaluate_segment(
         let _span = stream
             .recorder
             .span("plan", "segment", &units.entries[segment.start].name);
-        let resources: Vec<Vec<[u8; 32]>> = (0..index.bundles().len())
-            .map(|b| version.resource_hashes(b))
-            .collect();
         for unit in segment.clone() {
             let Some(bundle) = position(unit) else {
                 continue;
@@ -574,7 +571,6 @@ fn evaluate_segment(
                 &version,
                 bundle,
                 &window,
-                &resources,
                 stream,
                 tally,
                 &mut roots,
@@ -667,7 +663,6 @@ pub(crate) fn plan_unit<'a>(
     version: &Version<'_>,
     bundle: usize,
     window: &BTreeSet<usize>,
-    resources: &[Vec<[u8; 32]>],
     stream: &Stream<'a>,
     mut tally: Option<(&mut Tally, &[&str])>,
     roots: &mut Vec<Root<'a>>,
@@ -677,7 +672,7 @@ pub(crate) fn plan_unit<'a>(
     let index = version.index();
     let unit = &index.bundles()[bundle].name;
     if let Some((tally, _)) = &mut tally {
-        tally.open(unit, resources[bundle].len() as u64);
+        tally.open(unit, version.resource_hashes(bundle).len() as u64);
     }
     let mut found = Vec::new();
     for (f, file) in index.bundles()[bundle].files.iter().enumerate() {
@@ -741,7 +736,7 @@ pub(crate) fn plan_unit<'a>(
             &name,
             index,
             &closure,
-            resources,
+            version.all_streams(),
             stream.classes,
         );
         let first = leaving.first().cloned().map(|first| (first, leaving.len()));

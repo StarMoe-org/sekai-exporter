@@ -368,6 +368,21 @@ fn a_new_publication_answers_and_the_old_one_keeps_its_name() {
 }
 
 #[test]
+fn a_version_published_again_under_its_name_answers_with_its_new_files() {
+    let output = Output::new("same-name");
+    output.publish("jp", "local", &[("a.txt", b"first")]);
+    let server = Running::start(&output, options());
+    assert_eq!(server.get("/jp@local/a.txt").body, b"first");
+    assert_eq!(server.get("/jp@local/b.txt").status, 404);
+
+    // The name stays and the files change, as on every run of `export`.
+    output.publish("jp", "local", &[("a.txt", b"changed"), ("b.txt", b"added")]);
+    assert_eq!(server.get("/jp@local/a.txt").body, b"changed");
+    assert_eq!(server.get("/jp@local/b.txt").body, b"added");
+    assert_eq!(server.get("/jp/a.txt").body, b"changed");
+}
+
+#[test]
 fn what_the_store_does_not_hold_whole_is_not_sent() {
     let output = Output::new("damaged");
     let files: [(&str, &[u8]); 3] = [

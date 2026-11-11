@@ -188,11 +188,11 @@ struct Pointed {
 }
 
 impl Pointed {
-    /// Whether the reading still holds for `target` at `now`. The pointer of a named version
-    /// does not change once it exists; any other reading holds for `max_age`.
-    fn holds(&self, target: &Target, now: Duration, max_age: Duration) -> bool {
-        let lasting = target.version.is_some() && self.root.is_some();
-        lasting || now.saturating_sub(self.read_at) < max_age
+    /// Whether the reading still holds at `now`: for `max_age` after it was made. That is so
+    /// for the pointer of a named version as well, which changes when the version is published
+    /// again under its name.
+    fn holds(&self, now: Duration, max_age: Duration) -> bool {
+        now.saturating_sub(self.read_at) < max_age
     }
 }
 
@@ -331,7 +331,7 @@ impl<'a> Asked<'a> {
     fn pointer(self, now: Duration) -> Lookup<'a> {
         let name = self.target.pointer();
         match self.resolver.reading(&name) {
-            Some(pointed) if pointed.holds(&self.target, now, self.resolver.max_age) => {
+            Some(pointed) if pointed.holds(now, self.resolver.max_age) => {
                 self.pointed(pointed.root)
             }
             _ => self.read(Read::Pointer(name)),

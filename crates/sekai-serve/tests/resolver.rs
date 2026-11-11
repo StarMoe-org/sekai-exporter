@@ -583,15 +583,15 @@ mod lookups {
     }
 
     #[test]
-    fn the_pointer_of_a_named_version_is_read_once() {
+    fn the_pointer_of_a_named_version_is_read_again_after_max_age() {
         let (resolver, published) = (resolver(""), published());
-        for now in [0, 1_000_000] {
+        for (now, reads) in [(0, 3), (59, 0), (60, 1), (119, 0), (1_000_000, 1)] {
             assert_eq!(
                 status(&resolver, &published, "/jp@1/storage/b/1.png", now),
                 200
             );
+            assert_eq!(published.reads().len(), reads, "{now}");
         }
-        assert_eq!(published.reads(), ["pointer", "root", "chunk"]);
 
         // A version that is not published may be published later, so it is looked for again.
         for (now, reads) in [(0, 1), (59, 0), (60, 1)] {
@@ -601,6 +601,34 @@ mod lookups {
             );
             assert_eq!(published.reads().len(), reads, "{now}");
         }
+    }
+
+    #[test]
+    fn a_version_published_again_under_its_name_takes_effect_after_max_age() {
+        let (resolver, mut published) = (resolver(r#", "max_age": 30"#), published());
+        let named = |path: &str| format!("/jp@1/storage/{path}");
+        assert_eq!(status(&resolver, &published, &named("b/1.png"), 0), 200);
+        // The name stays and the files change, as when `export` publishes `local` on its next
+        // run, or `update --force` the version it has published before.
+        published.publish("jp/storage", "1", &files(&["b/2.png", "new.png"]), 2);
+        published.reads();
+
+        // The reading of the pointer holds for 30 seconds, as that of the current version does.
+        assert_eq!(status(&resolver, &published, &named("b/1.png"), 29), 200);
+        assert_eq!(status(&resolver, &published, &named("new.png"), 29), 404);
+        assert_eq!(published.reads(), ["chunk"]);
+
+        assert_eq!(status(&resolver, &published, &named("new.png"), 30), 200);
+        assert_eq!(published.reads(), ["pointer", "root", "chunk"]);
+        assert_eq!(status(&resolver, &published, &named("b/1.png"), 31), 404);
+        assert_eq!(status(&resolver, &published, &named("b/2.png"), 31), 200);
+        assert_eq!(published.reads(), [""; 0]);
+
+        // A version that is no longer published is not found, once its reading is over.
+        published.pointers.remove("jp/storage/versions/1.json");
+        assert_eq!(status(&resolver, &published, &named("b/2.png"), 59), 200);
+        assert_eq!(status(&resolver, &published, &named("b/2.png"), 60), 404);
+        assert_eq!(published.reads(), ["pointer"]);
     }
 
     #[test]

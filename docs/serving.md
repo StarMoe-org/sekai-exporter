@@ -80,7 +80,9 @@ With `"redirect"`, a file is `302` to its object, with the same `Cache-Control`.
 
 With `cors`, every response has `Access-Control-Allow-Origin` and exposes `Accept-Ranges`, `Content-Disposition`, `Content-Range` and `ETag`, and `OPTIONS` allows the `Range`, `If-None-Match` and `If-Range` request headers.
 
-The pointer of a view is read again at most every `max_age` seconds, so a new publication reaches every path of the view within that time and never mixes two versions in one lookup. A pointer that does not exist is remembered for as long, so a region, a view or a version answers within `max_age` of its first publication. The pointer of a named version does not change once it exists, so it is not read again while it is remembered.
+The pointer of a view is read again at most every `max_age` seconds, so a new publication reaches every path of the view within that time and never mixes two versions in one lookup. A pointer that does not exist is remembered for as long, so a region, a view or a version answers within `max_age` of its first publication.
+
+The pointer of a named version is read again as often, because a version can be published again under its name: `export` publishes `local` on every run, and `update --force` publishes the version it finds once more, with other files when the converters have changed since. The resolver answers with the new files within `max_age`. A client or a cache that already holds a response for the named version keeps it for as long as its `Cache-Control` allows, up to a year: the caches in front of the resolver have to be purged, and a browser keeps what it holds.
 
 ## What the resolver checks
 

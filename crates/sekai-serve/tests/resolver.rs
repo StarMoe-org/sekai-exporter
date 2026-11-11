@@ -273,6 +273,40 @@ mod responses {
         assert_eq!(header(&response, "content-length"), Some("11"));
         let missing = answer(&resolver, &published, &head("/jp/storage/none"));
         assert_eq!((missing.status, &missing.body), (404, &Body::Empty));
+
+        // The headers are those of `GET`, the length of the body among them, whatever the
+        // status: a file, a path the view does not have, a path of no route, a range the file
+        // does not have, and a file that cannot be sent.
+        let unsent = PathFile {
+            extension: "../x".to_owned(),
+            ..file("unsent")
+        };
+        let mut damaged = Published::default();
+        damaged.publish("jp/storage", "1", &[unsent], 8192);
+        let cases = [
+            (&published, PATH, None, 200, "11"),
+            (&published, "/jp/storage/none", None, 404, "10"),
+            (&published, "/none", None, 404, "10"),
+            (&published, PATH, Some("bytes=11-"), 416, "22"),
+            (&damaged, "/jp/storage/unsent", None, 500, "27"),
+        ];
+        for (published, path, range, status, length) in cases {
+            let resolver = super::resolver("");
+            let request = |method| Request {
+                method,
+                range,
+                ..get(path)
+            };
+            let (got, _) = lookup(&resolver, published, &request("GET"), 0);
+            let (headed, _) = lookup(&resolver, published, &request("HEAD"), 0);
+            assert_eq!((got.status, headed.status), (status, status), "{path}");
+            assert_eq!(header(&got, "content-length"), Some(length), "{path}");
+            assert_eq!(headed.headers, got.headers, "{path}");
+            assert_eq!(headed.body, Body::Empty, "{path}");
+            if let Body::Text(text) = got.body {
+                assert_eq!(text.len().to_string(), length, "{path}");
+            }
+        }
     }
 
     #[test]

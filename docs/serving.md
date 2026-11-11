@@ -61,7 +61,7 @@ A routes file with another key, an invalid pattern, or a route that gives the re
 
 ## Responses
 
-The resolver answers `GET` and `HEAD`, and `OPTIONS` with `204` and the methods it allows. A path that no route matches, or that the view does not have, is `404` with `Cache-Control: public, max-age=<max_age>`. Other methods are `405`, and a URL path longer than 8192 bytes is `414`. A file that cannot be read is `500` with `Cache-Control: no-store`; [What the resolver checks](#what-the-resolver-checks) lists the reasons. Every response has `X-Content-Type-Options: nosniff`, so a client takes a file for nothing but its media type.
+The resolver answers `GET`, `HEAD` with the headers of `GET` and no body, and `OPTIONS` with `204` and the methods it allows. A path that no route matches, or that the view does not have, is `404` with `Cache-Control: public, max-age=<max_age>`. Other methods are `405`, and a URL path longer than 8192 bytes is `414`. A file that cannot be read is `500` with `Cache-Control: no-store`; [What the resolver checks](#what-the-resolver-checks) lists the reasons. Every response has `X-Content-Type-Options: nosniff`, so a client takes a file for nothing but its media type.
 
 With `"bytes"`, a file is `200` with:
 

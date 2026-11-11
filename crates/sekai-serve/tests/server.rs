@@ -330,6 +330,11 @@ fn published_files_are_served_with_their_bytes_and_headers() {
             (reply.status, reply.body.as_slice()),
             (404, &b"not found\n"[..])
         );
+        // The answer to `HEAD` gives the length of the text it leaves out.
+        let head = server.request("HEAD", missing, &[]);
+        assert_eq!((head.status, head.body.len()), (404, 0), "{missing}");
+        assert_eq!(head.header("content-length"), "10", "{missing}");
+        assert_eq!(reply.header("content-length"), "10", "{missing}");
     }
     assert_eq!(server.request("DELETE", "/jp/a.txt", &[]).status, 405);
     assert_eq!(server.request("OPTIONS", "/jp/a.txt", &[]).status, 204);

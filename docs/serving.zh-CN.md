@@ -61,7 +61,7 @@
 
 ## 响应
 
-解析器回答 `GET` 和 `HEAD`，对 `OPTIONS` 以 `204` 和允许的方法回答。没有路由匹配或视图中没有的路径返回 `404`，附带 `Cache-Control: public, max-age=<max_age>`。其他方法返回 `405`，超过 8192 字节的 URL 路径返回 `414`。无法读取的文件返回 `500`，附带 `Cache-Control: no-store`，原因列于[解析器检查什么](#解析器检查什么)。每个响应都带有 `X-Content-Type-Options: nosniff`，因此客户端只按给出的媒体类型看待文件。
+解析器回答 `GET`；对 `HEAD` 以 `GET` 的头回答，不带正文；对 `OPTIONS` 以 `204` 和允许的方法回答。没有路由匹配或视图中没有的路径返回 `404`，附带 `Cache-Control: public, max-age=<max_age>`。其他方法返回 `405`，超过 8192 字节的 URL 路径返回 `414`。无法读取的文件返回 `500`，附带 `Cache-Control: no-store`，原因列于[解析器检查什么](#解析器检查什么)。每个响应都带有 `X-Content-Type-Options: nosniff`，因此客户端只按给出的媒体类型看待文件。
 
 使用 `"bytes"` 时，文件以 `200` 返回，附带：
 

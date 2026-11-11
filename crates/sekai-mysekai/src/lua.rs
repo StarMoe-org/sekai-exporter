@@ -126,7 +126,12 @@ impl fmt::Display for LuaError {
 /// The statements of `source`. A byte order mark at its start is ignored.
 pub(crate) fn parse(source: &str) -> Result<Block, LuaError> {
     let tokens = Lexer::new(source.strip_prefix('\u{feff}').unwrap_or(source)).tokens()?;
-    Parser { tokens, at: 0 }.chunk()
+    Parser {
+        tokens,
+        at: 0,
+        depth: 0,
+    }
+    .chunk()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -440,9 +445,15 @@ const UNARY_PRIORITY: u8 = 8;
 /// The marks that end a block.
 const BLOCK_END: &[&str] = &["end", "else", "elseif", "until"];
 
+/// How deeply blocks and expressions may nest, which bounds the stack the parser and the readers
+/// of its tree use.
+const MAX_DEPTH: u32 = 200;
+
 struct Parser {
     tokens: Vec<(Token, u32)>,
     at: usize,
+    /// The blocks and expressions being read.
+    depth: u32,
 }
 
 impl Parser {
@@ -511,7 +522,25 @@ impl Parser {
         *self.peek() == Token::End || self.mark().is_some_and(|mark| BLOCK_END.contains(&mark))
     }
 
+    /// Reads with `read` one level deeper, or fails past [`MAX_DEPTH`].
+    fn nested<T>(
+        &mut self,
+        read: impl FnOnce(&mut Self) -> Result<T, LuaError>,
+    ) -> Result<T, LuaError> {
+        if self.depth == MAX_DEPTH {
+            return Err(self.error(format!("nested more than {MAX_DEPTH} levels deep")));
+        }
+        self.depth += 1;
+        let result = read(self);
+        self.depth -= 1;
+        result
+    }
+
     fn block(&mut self) -> Result<Block, LuaError> {
+        self.nested(Self::statements)
+    }
+
+    fn statements(&mut self) -> Result<Block, LuaError> {
         let mut block = Vec::new();
         while !self.at_block_end() {
             if self.accept(";") {
@@ -674,6 +703,10 @@ impl Parser {
 
     /// Reads an expression of operators whose left priority is above `limit`.
     fn binary(&mut self, limit: u8) -> Result<Expr, LuaError> {
+        self.nested(|parser| parser.operations(limit))
+    }
+
+    fn operations(&mut self, limit: u8) -> Result<Expr, LuaError> {
         let mut left = self.unary()?;
         while let Some(&(_, op, _, right)) = BINARY
             .iter()
@@ -830,6 +863,14 @@ mod tests {
 
     fn number(value: i64) -> Expr {
         Expr::Number(Number::Int(value))
+    }
+
+    #[test]
+    fn deep_nesting_is_an_error() {
+        let source = format!("x = {}1{}", "(".repeat(10_000), ")".repeat(10_000));
+        let error = parse(&source).unwrap_err();
+        assert!(error.message.contains("nested"), "{error}");
+        assert!(parse(&format!("x = {}1{}", "(".repeat(50), ")".repeat(50))).is_ok());
     }
 
     #[test]

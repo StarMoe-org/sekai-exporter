@@ -1316,12 +1316,7 @@ dependencies = [
 name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
- "bytes",
  "cpu-time",
- "futures-util",
- "http-body-util",
- "hyper",
- "hyper-util",
  "lexopt",
  "mimalloc",
  "sekai-catalog",
@@ -1340,8 +1335,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
- "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -1437,9 +1430,17 @@ dependencies = [
 name = "sekai-serve"
 version = "0.0.0"
 dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "sekai-format",
  "serde",
  "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

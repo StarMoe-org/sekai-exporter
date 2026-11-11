@@ -95,6 +95,32 @@ fn names_that_cannot_name_a_file_match_nothing() {
 }
 
 #[test]
+fn names_of_devices_match_nothing() {
+    let routes = sample();
+    let devices = [
+        "con", "NUL", "Aux", "prn", "com1", "LPT9", "nul.json", "con.1.2", "COM0.x", "nul.",
+    ];
+    for name in devices {
+        for path in [format!("/{name}/a.png"), format!("/jp@{name}/a.png")] {
+            assert_eq!(routes.resolve(&path), None, "{path}");
+        }
+    }
+    // A name that only begins or ends like one is a name.
+    for name in [
+        "console", "com", "com10", "lpt", "nulls", "a.con", "con-1", "_nul",
+    ] {
+        assert_eq!(
+            routes.resolve(&format!("/{name}/a.png")),
+            target(name, "canonical", None, "a.png")
+        );
+        assert_eq!(
+            routes.resolve(&format!("/jp@{name}/a.png")),
+            target("jp", "canonical", Some(name), "a.png")
+        );
+    }
+}
+
+#[test]
 fn a_target_names_its_pointer() {
     let current = target("jp", "storage", None, "a").unwrap();
     assert_eq!(current.pointer(), "jp/storage/current.json");
@@ -131,6 +157,7 @@ fn invalid_routes_are_refused() {
         one(r#"{ "pattern": "/{region}/{path}" }"#),
         one(r#"{ "pattern": "/{region}/{view}/{path}", "view": "storage" }"#),
         one(r#"{ "pattern": "/{path}", "region": "jp", "view": ".." }"#),
+        one(r#"{ "pattern": "/{path}", "region": "nul", "view": "storage" }"#),
         one(r#"{ "pattern": "/{region}/{view}/{path}", "shard": "x" }"#),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "delivery": "redirect" }"#
             .to_owned(),

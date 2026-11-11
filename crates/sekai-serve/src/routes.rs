@@ -9,6 +9,10 @@ use serde::Deserialize;
 /// file says otherwise.
 const DEFAULT_MAX_AGE: u64 = 60;
 
+/// The longest region, view or version a request can name, in bytes. A name is part of the file
+/// name of a pointer, so a longer one names nothing.
+const MAX_NAME_BYTES: usize = 200;
+
 /// A file of a view that a request names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
@@ -23,7 +27,8 @@ pub struct Target {
 }
 
 impl Target {
-    /// The path of the pointer that publishes the target, relative to the published root.
+    /// The path of the pointer that publishes the target, relative to the published root:
+    /// `<region>/<view>/current.json`, or `<region>/<view>/versions/<version>.json`.
     pub fn pointer(&self) -> String {
         let Self { region, view, .. } = self;
         match &self.version {
@@ -143,7 +148,7 @@ fn default_max_age() -> u64 {
 }
 
 /// Whether `text` can be the value of a response header.
-fn is_header_value(text: &str) -> bool {
+pub(crate) fn is_header_value(text: &str) -> bool {
     !text.is_empty() && text.chars().all(|c| c.is_ascii_graphic() || c == ' ')
 }
 
@@ -260,7 +265,7 @@ fn check_names(segments: &[Vec<Piece>], file: &RouteFile) -> Result<(), String> 
     ] {
         match (fields.contains(&field), fixed) {
             (true, None) => {}
-            (false, Some(value)) if is_name(value) => {}
+            (false, Some(value)) if is_request_name(value) => {}
             (false, Some(value)) => return Err(format!("{value:?} is not a {name}")),
             (true, Some(_)) => return Err(format!("both it and the route give the {name}")),
             (false, None) => return Err(format!("neither it nor the route gives the {name}")),
@@ -324,7 +329,7 @@ fn capture<'a>(pieces: &[Piece], mut segment: &'a str, captures: &mut Captures<'
                     _ => segment.len(),
                 };
                 let (value, after) = segment.split_at(end);
-                if !is_name(value) {
+                if !is_request_name(value) {
                     return None;
                 }
                 captures.set(*field, value);
@@ -333,6 +338,24 @@ fn capture<'a>(pieces: &[Piece], mut segment: &'a str, captures: &mut Captures<'
         }
     }
     segment.is_empty().then_some(())
+}
+
+/// Whether `text` can name a region, a view or a version in a request: a name that is not too
+/// long to be part of a file name, and that no host takes for a device.
+fn is_request_name(text: &str) -> bool {
+    text.len() <= MAX_NAME_BYTES && is_name(text) && !is_device_name(text)
+}
+
+/// Whether Windows takes a file named `name` for a device, which it does whatever follows the
+/// first dot: `con`, `prn`, `aux`, `nul`, and `com` or `lpt` with a digit, in either case. A
+/// host there would open the device where it means to open a pointer.
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    match stem.to_ascii_lowercase().as_bytes() {
+        b"con" | b"prn" | b"aux" | b"nul" => true,
+        [b'c', b'o', b'm', digit] | [b'l', b'p', b't', digit] => digit.is_ascii_digit(),
+        _ => false,
+    }
 }
 
 /// `text` with every `%XX` replaced by the byte it encodes, if that makes UTF-8.

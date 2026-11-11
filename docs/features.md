@@ -69,6 +69,7 @@ The encoders of the canonical forms are written in pure Rust, so native and WebA
 | `catalog-db` | `sekai-catalog` | The catalog kept in a redb database |
 | `s3` | `sekai-publish` | S3-compatible stores |
 | `serve` | `sekai-exporter` | The `serve` command: an HTTP server that resolves the paths of published views ([Serving](serving.md)) |
+| `server` | `sekai-serve` | The HTTP server behind the `serve` command, with `tokio` and `hyper`. Without it the crate does no I/O |
 
 ## Presets
 

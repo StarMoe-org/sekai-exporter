@@ -15,6 +15,7 @@ LAYERS = {
     "sekai-layouts": 1,
     "sekai-codec": 1,
     "sekai-catalog": 1,
+    "sekai-serve": 1,
     "sekai-game": 1,
     "sekai-convert": 2,
     "sekai-encode": 2,

@@ -388,10 +388,10 @@ class DeterminismTests(TreeTestCase):
     def test_skip_publication_leaves_out_publication_documents(self):
         documents = {
             f"{n}.json": b'{"format": "%s"}' % name.encode()
-            for n, name in enumerate(["index-root", "index-shard", "listing"])
+            for n, name in enumerate(["index-root", "index-shard", "listing", "path-index"])
         }
         documents["aa/idx.sqlite"] = b"SQLite format 3\x00"
-        documents["bb/pack.tar"] = b"\x00" * 1024
+        documents["bb/chunk.paths"] = b"SKPI"
         same = {"a.json": b'{"format": "asset"}'}
         run1, run2 = self.runs({**same, **documents}, same)
         self.assertEqual(self.run_main([run1, run2])[0], 1)

@@ -7,7 +7,7 @@ Every file in RUN1 must exist in RUN2 with the same bytes, and the reverse. With
 is the metrics file of the second run, JSON Lines with one object per line. Each span of the
 "convert" stage ({"kind": "span", "stage": "convert"}) is one recomputed derivation, and their
 count must be 0. With --skip-publication, the documents of a publication (index roots, index
-shards and listings) are left out of both directories, so that the store of a run that published
+shards, listings, SQLite indexes and path indexes) are left out of both directories, so that the store of a run that published
 can be compared with the store of a run that did not.
 
 Exit status: 0 if everything matches, 1 otherwise, 2 for usage errors.
@@ -20,8 +20,8 @@ import sys
 
 from compare import join_relative, list_files, same_bytes
 
-PUBLICATION_FORMATS = {"index-root", "index-shard", "listing"}
-PUBLICATION_EXTENSIONS = (".sqlite", ".tar")
+PUBLICATION_FORMATS = {"index-root", "index-shard", "listing", "path-index"}
+PUBLICATION_EXTENSIONS = (".sqlite", ".paths")
 
 
 def is_publication(path):

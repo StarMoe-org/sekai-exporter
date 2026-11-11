@@ -4,9 +4,20 @@
 
 An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the game's Unity asset bundles and client package and turns their contents into assets in open formats: images, audio, video, models, scenarios, curves and documents. Every output is recorded with the objects it came from, so a consumer can find out what any file is.
 
+Rather than writing out the objects of each bundle one by one, it follows the references of an asset across bundles and writes the whole asset in the form a named runtime reads, such as a GLB model with its skeleton, materials and textures, or a Live2D model with its textures, physics and motions.
+
 ## Status
 
-In development. Unpacking works: `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration. `sekai-codec` decodes Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and ASTC HDR textures (including texture arrays and 3D textures), HCA and ADX audio, ACB and AWB archives and USM containers in pure Rust. `sekai-encode` writes PNG, lossy WebP, OpenEXR, MP3 and AAC. Converters for textures, sprites, fonts, text assets, story scenes, action sets, scenario backgrounds, virtual live scripts, CRI movies, CRI cue sheets, Live2D models and motion sets, costume parts and motions, and MySekai furniture, site models, emoticons, character actions and talks are in place, and [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet. `sekai-exporter export` and `update` evaluate bundles one at a time into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view. The core also builds for WebAssembly, and continuous integration compares its object documents and its store with those of the native build byte for byte. The documents in [`docs/`](docs/) describe the design that the code implements, and the [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
+In development. What works today:
+
+- **Unpacking.** `sekai-exporter objects <bundles> <output>` writes the [object document](docs/spec/object-documents.md) of every bundle in a directory, and its field values are compared with UnityPy in continuous integration.
+- **Decoding** in pure Rust: Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and ASTC HDR textures (including texture arrays and 3D textures), HCA and ADX audio, ACB and AWB archives, and USM containers.
+- **Encoding**: PNG, lossy WebP, OpenEXR and MP3, and MP4 through the `ffmpeg` program.
+- **Converters** for textures, sprites, fonts, text assets, story scenes, action sets, scenario backgrounds, virtual live scripts, CRI movies, CRI cue sheets, Live2D models and motion sets, costume parts and motions, and MySekai furniture, site models, emoticons, character actions and talks. [Features](docs/features.md) lists what each feature converts and which ones convert nothing yet.
+- **Evaluation and publishing.** `sekai-exporter export` and `update` evaluate bundles into a local content-addressed store and publish the result as indexes, a path tree or the `storage` view, locally or to S3-compatible storage.
+- **WebAssembly.** The core builds for `wasm32`, and continuous integration compares its object documents and its store with those of the native build byte for byte.
+
+The documents in [`docs/`](docs/) describe the design that the code implements, and the [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
 
 ## What it does
 
@@ -30,13 +41,7 @@ Why the project is built around converting rather than unpacking is explained in
 | [Features](docs/features.md) | Crates, Cargo features and presets |
 | [Roadmap](docs/roadmap.md) | The state of every part, and how to pick up open work |
 | [Live2D motions](docs/live2d-motion.md) | How the game stores Live2D motions, and why their canonical form is the clip's curves |
-| [Object documents](docs/spec/object-documents.md) | The specification of object documents |
-| [Texture](docs/spec/texture.md) | The specification of the texture form |
-| [Live2D](docs/spec/live2d.md) | The specification of the Live2D model and motion-set forms |
-| [Clip documents](docs/spec/clip-documents.md) | The specification of animation clip documents |
-| [Model files](docs/spec/model.md) | The specification of model files: a prefab as GLB with external images |
-| [Component documents](docs/spec/component-documents.md) | The specification of component documents: the components of a prefab and their references |
-| [Costumes](docs/spec/costume.md) | The specification of the costume part and motion forms |
+| [Specifications](docs/spec/README.md) | The specification of every asset form and published document format |
 | [Glossary](docs/glossary.md) | Terms used throughout the documents and the code |
 | [Third-party sources](docs/third-party.md) | The upstream specification, library or reference behind each component |
 | [Contributing](CONTRIBUTING.md) | Where changes go, rules and checks |

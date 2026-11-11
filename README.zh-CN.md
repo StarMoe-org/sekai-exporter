@@ -4,9 +4,20 @@
 
 面向《世界计划 彩色舞台 feat. 初音未来》（Project SEKAI COLORFUL STAGE! feat. Hatsune Miku）的导出器。它读取游戏的 Unity 资源包与客户端安装包，将其中的内容转换为开放格式的资产，包括图片、音频、视频、模型、剧本、曲线与各类文档。每一项输出都记录其来源对象，使用者可据此查明任意文件的含义。
 
+它不逐个写出每个资源包里的对象，而是跨资源包沿引用找齐一个资产所需的对象，按某个具体运行时读取的形式整体写出，例如带骨骼、材质与贴图的 GLB 模型，或带贴图、物理与动作的 Live2D 模型。
+
 ## 状态
 
-开发中。解包已可用：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。`sekai-codec` 以纯 Rust 解码 Alpha8、R8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGB、ETC2 RGBA8、EAC R、crunch DXT5、ASTC LDR 与 ASTC HDR 贴图（含贴图数组与 3D 贴图），HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器。`sekai-encode` 写出 PNG、有损 WebP、OpenEXR、MP3 和 AAC。贴图、精灵、字体、文本资产、剧情场景、动作集、剧情背景、虚拟演唱会剧本、CRI 视频、CRI cue 表、Live2D 模型与动作集、服装部件与动作，以及 MySekai 家具、场地模型、表情、角色动作与对话等转换器已经可用，[功能开关](docs/features.zh-CN.md)列出了每个 feature 转换什么、哪些还不转换任何内容。`sekai-exporter export` 和 `update` 逐个资源包求值，写入本地内容寻址 store，并把结果发布为索引、路径树或 `storage` 视图。核心也可构建为 WebAssembly，持续集成会把它写出的对象文档和 store 与原生构建的逐字节比对。[`docs/`](docs/) 中的文档描述了代码所实现的设计，[路线图](docs/roadmap.zh-CN.md)列出了每个部分的状态和尚未完成的工作。
+开发中。目前可用的部分：
+
+- **解包**：`sekai-exporter objects <资源包目录> <输出目录>` 为目录中的每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对。
+- **解码**，纯 Rust：Alpha8、R8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGB、ETC2 RGBA8、EAC R、crunch DXT5、ASTC LDR 与 ASTC HDR 贴图（含贴图数组与 3D 贴图），HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器。
+- **编码**：PNG、有损 WebP、OpenEXR 与 MP3，以及经 `ffmpeg` 程序写出的 MP4。
+- **转换器**：贴图、精灵、字体、文本资产、剧情场景、动作集、剧情背景、虚拟演唱会剧本、CRI 视频、CRI cue 表、Live2D 模型与动作集、服装部件与动作，以及 MySekai 家具、场地模型、表情、角色动作与对话。[功能开关](docs/features.zh-CN.md)列出了每个 feature 转换什么、哪些还不转换任何内容。
+- **求值与发布**：`sekai-exporter export` 和 `update` 对资源包求值，写入本地内容寻址 store，并把结果发布为索引、路径树或 `storage` 视图，目标可以是本地目录或 S3 兼容存储。
+- **WebAssembly**：核心可构建为 `wasm32`，持续集成会把它写出的对象文档和 store 与原生构建的逐字节比对。
+
+[`docs/`](docs/) 中的文档描述了代码所实现的设计，[路线图](docs/roadmap.zh-CN.md)列出了每个部分的状态和尚未完成的工作。
 
 ## 功能
 
@@ -30,13 +41,7 @@
 | [Feature](docs/features.zh-CN.md) | crate、Cargo feature 与预设 |
 | [路线图](docs/roadmap.zh-CN.md) | 每个部分的状态，以及如何认领未完成的工作 |
 | [Live2D 动作](docs/live2d-motion.zh-CN.md) | 游戏如何保存 Live2D 动作，以及其规范形式为何是 clip 的曲线 |
-| [对象文档](docs/spec/object-documents.zh-CN.md) | 对象文档的规范 |
-| [贴图](docs/spec/texture.zh-CN.md) | 贴图形式的规范 |
-| [Live2D](docs/spec/live2d.zh-CN.md) | Live2D 模型与动作集形式的规范 |
-| [剪辑文档](docs/spec/clip-documents.zh-CN.md) | 动画剪辑文档的规范 |
-| [模型文件](docs/spec/model.zh-CN.md) | 模型文件的规范：以 GLB 表示的预制体及其外部图像 |
-| [组件文档](docs/spec/component-documents.zh-CN.md) | 组件文档的规范：预制体的组件及其引用 |
-| [服装](docs/spec/costume.zh-CN.md) | 服装部件与动作形式的规范 |
+| [规范](docs/spec/README.zh-CN.md) | 每种资产形式与每种发布文档格式的规范 |
 | [术语表](docs/glossary.md) | 文档与代码中统一使用的术语 |
 | [第三方来源](docs/third-party.zh-CN.md) | 每个组件所依据的上游规范、库或参考实现 |
 | [贡献指南](CONTRIBUTING.zh-CN.md) | 改动的位置、规则与检查 |

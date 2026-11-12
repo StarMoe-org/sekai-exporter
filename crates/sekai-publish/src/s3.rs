@@ -656,8 +656,12 @@ struct Page {
 }
 
 impl Page {
-    /// Reads the XML of a `ListObjectsV2` response.
+    /// Reads the XML of a `ListObjectsV2` response. Any other response, such as the list of
+    /// buckets that a request outside every bucket gets, is an error rather than an empty page.
     fn parse(xml: &str) -> Result<Self, String> {
+        if !xml.contains("<ListBucketResult") {
+            return Err("the response is not a listing of objects".to_owned());
+        }
         let names = elements(xml, "Contents")
             .map(|contents| {
                 let name = element(contents, "Key").ok_or("an object has no Key")?;
@@ -859,6 +863,8 @@ mod tests {
             })
         );
         assert!(Page::parse("<Contents><Key>x</Key></Contents>").is_err());
+        let buckets = "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>";
+        assert!(Page::parse(buckets).is_err());
         assert_eq!(encode_component("t+1/="), "t%2B1%2F%3D");
     }
 

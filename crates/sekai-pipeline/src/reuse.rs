@@ -2,9 +2,9 @@
 //!
 //! The result of a unit follows from the bytes of the bundles of its window and from what the
 //! evaluation runs with: the converters, the class layouts, the size limit of assets, the naming
-//! of roots and the evaluator itself. When the manifest declares a hash for every bundle of a
-//! window, the unit is keyed by those hashes and by the rest of these, and the result a run gives
-//! the unit is recorded under that key. A later run takes the recorded result instead, and fetches
+//! of roots and the evaluator itself. When the content of every bundle of a window is identified
+//! ([`Entry::content`]), the unit is keyed by those contents and by the rest of these, and the
+//! result a run gives the unit is recorded under that key. A later run takes the recorded result instead, and fetches
 //! and evaluates only the windows of the units it has none for. A unit is recorded only when no
 //! bundle of its window had an error.
 //!
@@ -199,15 +199,15 @@ fn context(stream: &Stream<'_>) -> String {
     text
 }
 
-/// The key of `unit`, when the manifest declares a hash for every bundle of its window.
+/// The key of `unit`, when the content of every bundle of its window is identified.
 fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<[u8; 32]> {
     let mut text = format!("{context}unit {}\n", units.entries[unit].name);
     for &entry in &units.windows[unit] {
         let entry = units.entries[entry];
-        if entry.declared.is_empty() {
+        if entry.content.is_empty() {
             return None;
         }
-        text.push_str(&format!("bundle {} {}\n", entry.name, entry.declared));
+        text.push_str(&format!("bundle {} {}\n", entry.name, entry.content));
     }
     Some(Sha256::digest(text.as_bytes()).into())
 }

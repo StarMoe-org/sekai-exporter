@@ -115,9 +115,10 @@ commands:
       <output>/published with their path indexes; --tree and --storage also
       write them as path trees. A version that matches the last complete run is
       left alone unless --force or --verify is given. Each bundle is evaluated
-      with the bundles it depends on, and when the manifest declares the same
-      hashes for all of them as in an earlier run, the result that run recorded
-      is taken instead, so only the bundles of changed units are fetched;
+      with the bundles it depends on, and when all of them hold the same content
+      as in an earlier run, the result that run recorded is taken instead, so
+      only the bundles of changed units are fetched. Content is the hash the
+      manifest declares, or else the bytes, which are fetched to compare;
       --force evaluates every bundle again and records the results anew. With a
       bucket, the run starts from the catalog the bucket keeps under state/ and
       writes it back when it is done, so <output> needs nothing from earlier

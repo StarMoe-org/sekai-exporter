@@ -56,7 +56,7 @@ pub(crate) fn source(
     let manifest = vec![Entry {
         name: PLAYER_BUNDLE.to_owned(),
         size: bundle.len() as u64,
-        declared: String::new(),
+        content: String::new(),
         dependencies: Vec::new(),
     }];
     let player = Player {

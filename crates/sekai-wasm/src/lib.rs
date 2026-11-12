@@ -115,7 +115,7 @@ fn memory(bundles: Vec<(String, Vec<u8>)>) -> (Memory, Vec<Entry>, Vec<(String, 
                 manifest.push(Entry {
                     name: name.clone(),
                     size: bytes.len() as u64,
-                    declared: String::new(),
+                    content: String::new(),
                     dependencies: Vec::new(),
                 });
                 let sha256 = Sha256::digest(&bytes).into();

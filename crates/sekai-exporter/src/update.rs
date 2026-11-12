@@ -1,6 +1,6 @@
 //! `sekai-exporter update`: the current version of a region, from its source to a publication.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -342,6 +342,8 @@ struct Fetcher<'r> {
     earlier: &'r [EarlierRun],
     region: &'r str,
     monitor: &'r Monitor,
+    /// The key of each bundle this run has fetched, by name, so that none is fetched twice.
+    fetched: Mutex<HashMap<String, Key>>,
 }
 
 impl Fetcher<'_> {
@@ -386,9 +388,54 @@ impl Fetcher<'_> {
         Ok(failed)
     }
 
-    /// The key of `entry` in the input store, and whether this run placed it there: found in the
-    /// catalog, linked from an earlier run, or downloaded.
+    /// Fetches `entries` into the input store, `concurrency` at a time, and returns the key of
+    /// each bundle that could be fetched, by name. A bundle that cannot be fetched is left out;
+    /// fetching it again reports why.
+    fn fetch_keys(
+        &self,
+        entries: &[BundleEntry],
+        concurrency: usize,
+    ) -> Result<HashMap<String, Key>, String> {
+        let rows = Mutex::new(Vec::new());
+        let keys = parallel(
+            entries.len(),
+            concurrency,
+            |i| -> Result<Option<Key>, String> {
+                let entry = &entries[i];
+                let Ok((key, placed)) = self.fetch(entry) else {
+                    return Ok(None);
+                };
+                if placed {
+                    self.place(&rows, entry, &key)?;
+                }
+                Ok(Some(key))
+            },
+        );
+        self.record(&rows.into_inner().unwrap_or_else(PoisonError::into_inner))?;
+        let mut fetched = HashMap::new();
+        for (entry, key) in entries.iter().zip(keys) {
+            if let Some(key) = key? {
+                fetched.insert(entry.name.clone(), key);
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// The key of `entry` in the input store, and whether this call placed it there: fetched
+    /// earlier in this run, found in the catalog, linked from an earlier run, or downloaded.
     fn fetch(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
+        let fetched = || self.fetched.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(key) = fetched().get(&entry.name) {
+            return Ok((key.clone(), false));
+        }
+        let (key, placed) = self.locate(entry)?;
+        fetched().insert(entry.name.clone(), key.clone());
+        Ok((key, placed))
+    }
+
+    /// The key of `entry` in the input store, and whether this call placed it there: found in the
+    /// catalog, linked from an earlier run, or downloaded.
+    fn locate(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
         let error = |e: io::Error| e.to_string();
         if let Some(key) =
             already_stored(self.catalog, self.region, entry, self.inputs).map_err(error)?
@@ -468,6 +515,52 @@ fn in_opening_order(all: &[BundleEntry], manifest: &[Entry]) -> Vec<BundleEntry>
         .collect();
     entries.sort_by_key(|entry| rank.get(entry.name.as_str()).copied().unwrap_or(usize::MAX));
     entries
+}
+
+/// What identifies the content of a bundle whose manifest entry declares the hash `declared`:
+/// that hash, or nothing when it is empty.
+fn declared_content(declared: &str) -> String {
+    if declared.is_empty() {
+        String::new()
+    } else {
+        format!("declared {declared}")
+    }
+}
+
+/// Identifies the content of each entry of `manifest` that declares no hash by the bytes of its
+/// bundle, which are fetched for that from the entries of `all`. An entry whose bundle cannot be
+/// fetched stays unidentified.
+fn identify(
+    fetcher: &Fetcher<'_>,
+    all: &[BundleEntry],
+    manifest: &mut [Entry],
+    concurrency: usize,
+) -> Result<(), String> {
+    let undeclared: HashSet<&str> = manifest
+        .iter()
+        .filter(|entry| entry.content.is_empty())
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    let entries: Vec<BundleEntry> = all
+        .iter()
+        .filter(|entry| undeclared.contains(entry.name.as_str()))
+        .cloned()
+        .collect();
+    let keys = fetcher.fetch_keys(&entries, concurrency)?;
+    println!(
+        "bundles without a declared hash {} identified {}",
+        entries.len(),
+        keys.len()
+    );
+    for entry in manifest {
+        if let Some(key) = keys.get(&entry.name) {
+            entry.content = format!("bytes {key}");
+        }
+    }
+    Ok(())
 }
 
 /// What a run evaluates.
@@ -732,12 +825,23 @@ fn export_version(
         .map(|entry| Entry {
             name: entry.name.clone(),
             size: entry.size,
-            declared: entry.declared.clone(),
+            content: declared_content(&entry.declared),
             dependencies: entry.dependencies.clone(),
         })
         .collect();
+    let fetcher = Fetcher {
+        source: source.as_ref(),
+        identity: &identity,
+        inputs: &inputs,
+        catalog,
+        earlier: &earlier,
+        region: region_name,
+        monitor,
+        fetched: Mutex::default(),
+    };
     if listed {
         manifest = select(manifest, &options.only);
+        identify(&fetcher, &all, &mut manifest, concurrency)?;
     }
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     let indexes = catalog.bundle_indexes();
@@ -777,15 +881,6 @@ fn export_version(
         }
     };
     let entries = in_opening_order(&all, evaluating.entries());
-    let fetcher = Fetcher {
-        source: source.as_ref(),
-        identity: &identity,
-        inputs: &inputs,
-        catalog,
-        earlier: &earlier,
-        region: region_name,
-        monitor,
-    };
     let (mut streamed, failed) =
         fetch_and_evaluate(&fetcher, &entries, concurrency, evaluating, &stream)?;
     if failed > 0 || report(&streamed) > 0 {
@@ -959,6 +1054,115 @@ mod tests {
         entries.iter().map(|e| e.name.as_str()).collect()
     }
 
+    /// Bundles in memory, counting how often each is fetched.
+    #[derive(Default)]
+    struct Bundles {
+        bytes: HashMap<String, Vec<u8>>,
+        fetched: Mutex<HashMap<String, usize>>,
+    }
+
+    impl Source for Bundles {
+        fn identity(
+            &self,
+            _previous: Option<&VersionIdentity>,
+        ) -> Result<VersionIdentity, cdn::SourceError> {
+            unreachable!("the tests name the version")
+        }
+
+        fn manifest(&self, _: &VersionIdentity) -> Result<Vec<BundleEntry>, cdn::SourceError> {
+            unreachable!("the tests list the manifest")
+        }
+
+        fn fetch(
+            &self,
+            _: &VersionIdentity,
+            entry: &BundleEntry,
+            sink: &mut dyn Sink,
+        ) -> Result<u64, cdn::SourceError> {
+            *self
+                .fetched
+                .lock()
+                .unwrap()
+                .entry(entry.name.clone())
+                .or_default() += 1;
+            let bytes = self.bytes.get(&entry.name).ok_or(cdn::SourceError {
+                code: "status",
+                message: format!("{} is missing", entry.name),
+                status: Some(404),
+            })?;
+            sink.write_all(bytes).unwrap();
+            Ok(bytes.len() as u64)
+        }
+    }
+
+    #[test]
+    fn bundles_without_a_declared_hash_are_identified_by_their_bytes() {
+        let root = std::env::temp_dir().join(format!("sekai-identify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = LocalStore::open(root.join("store")).unwrap();
+        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
+        let inputs = LocalStore::open(root.join("inputs")).unwrap();
+        let source = Bundles {
+            bytes: HashMap::from([("b/plain".to_owned(), b"UnityFS\0plain".to_vec())]),
+            ..Bundles::default()
+        };
+        let identity = VersionIdentity {
+            asset: sekai_format::identity::AssetIdentity::Nuverse {
+                application_version: "1.0.0".to_owned(),
+                value: "1".to_owned(),
+            },
+            client: sekai_format::identity::ClientIdentity {
+                application_version: "1.0.0".to_owned(),
+                application_hash: None,
+                multiplayer_version: None,
+            },
+            tables: None,
+        };
+        let mut undeclared = entry("b/plain", &[]);
+        undeclared.declared = String::new();
+        let mut lost = entry("c/lost", &[]);
+        lost.declared = String::new();
+        let all = [entry("a/declared", &[]), undeclared, lost];
+        let mut manifest: Vec<Entry> = all
+            .iter()
+            .map(|entry| Entry {
+                name: entry.name.clone(),
+                size: entry.size,
+                content: declared_content(&entry.declared),
+                dependencies: entry.dependencies.clone(),
+            })
+            .collect();
+
+        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
+            let fetcher = Fetcher {
+                source: &source,
+                identity: &identity,
+                inputs: &inputs,
+                catalog: &catalog,
+                earlier: &[],
+                region: "r",
+                monitor,
+                fetched: Mutex::default(),
+            };
+            identify(&fetcher, &all, &mut manifest, 2).unwrap();
+            let key = Key::of(b"UnityFS\0plain", INPUT_EXTENSION);
+            assert_eq!(manifest[0].content, "declared h");
+            assert_eq!(manifest[1].content, format!("bytes {key}"));
+            assert_eq!(manifest[2].content, "");
+            // The identified bundle is not fetched again; the lost one is tried again.
+            assert_eq!(fetcher.fetch(&all[1]).unwrap(), (key, false));
+            assert!(fetcher.fetch(&all[2]).is_err());
+        })
+        .unwrap();
+        let fetched = source.fetched.into_inner().unwrap();
+        assert_eq!(
+            fetched,
+            HashMap::from([("b/plain".to_owned(), 1), ("c/lost".to_owned(), 2)])
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn a_bundle_is_taken_from_an_earlier_run_with_the_same_declared_hash() {
         let root = std::env::temp_dir().join(format!("sekai-earlier-{}", std::process::id()));
@@ -1031,7 +1235,7 @@ mod tests {
         .map(|entry| Entry {
             name: entry.name,
             size: entry.size,
-            declared: entry.declared,
+            content: entry.declared,
             dependencies: entry.dependencies,
         })
         .collect();

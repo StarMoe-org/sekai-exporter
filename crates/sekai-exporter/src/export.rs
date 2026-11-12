@@ -331,7 +331,7 @@ fn walk(directory: &Path, prefix: &str, out: &mut Vec<Entry>) -> io::Result<()> 
             out.push(Entry {
                 name,
                 size: metadata.len(),
-                declared: String::new(),
+                content: String::new(),
                 dependencies: Vec::new(),
             });
         }

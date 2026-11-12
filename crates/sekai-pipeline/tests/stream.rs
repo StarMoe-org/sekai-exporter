@@ -53,7 +53,7 @@ fn entry(name: &str, dependencies: &[&str]) -> Entry {
     Entry {
         name: name.to_owned(),
         size: 1,
-        declared: String::new(),
+        content: String::new(),
         dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
     }
 }
@@ -224,10 +224,10 @@ fn content(streamed: &Streamed) -> Streamed {
 
 /// Two independent units: the data object refers to a material of `fixture_scene`, which its
 /// unit does not depend on, so that asset fails.
-fn declared_manifest(data: &str, scene: &str) -> Vec<Entry> {
+fn identified_manifest(data: &str, scene: &str) -> Vec<Entry> {
     let mut manifest = vec![entry("fixture_data", &[]), entry("fixture_scene", &[])];
-    manifest[0].declared = data.to_owned();
-    manifest[1].declared = scene.to_owned();
+    manifest[0].content = data.to_owned();
+    manifest[1].content = scene.to_owned();
     manifest
 }
 
@@ -239,10 +239,10 @@ fn recorded_units_give_the_result_of_evaluating_them() {
         manifest,
         ..Run::default()
     };
-    let whole = streamed(&root, &run(declared_manifest("d1", "s1")));
+    let whole = streamed(&root, &run(identified_manifest("d1", "s1")));
 
     let (evaluated, reused, first) =
-        streamed_reusing(&root, &run(declared_manifest("d1", "s1")), &records);
+        streamed_reusing(&root, &run(identified_manifest("d1", "s1")), &records);
     assert_eq!(evaluated, ["fixture_data", "fixture_scene"]);
     assert_eq!(reused, 0);
     assert_eq!(content(&first), content(&whole));
@@ -251,7 +251,7 @@ fn recorded_units_give_the_result_of_evaluating_them() {
     let inputs = Fixtures::default();
     let again = Run {
         inputs: &inputs,
-        ..run(declared_manifest("d1", "s1"))
+        ..run(identified_manifest("d1", "s1"))
     };
     let (evaluated, reused, second) = streamed_reusing(&root, &again, &records);
     assert!(evaluated.is_empty());
@@ -262,7 +262,7 @@ fn recorded_units_give_the_result_of_evaluating_them() {
 
     // A new hash of one bundle evaluates its unit alone.
     let (evaluated, reused, third) =
-        streamed_reusing(&root, &run(declared_manifest("d2", "s1")), &records);
+        streamed_reusing(&root, &run(identified_manifest("d2", "s1")), &records);
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
     assert_eq!(content(&third), content(&whole));
@@ -270,20 +270,20 @@ fn recorded_units_give_the_result_of_evaluating_them() {
 }
 
 #[test]
-fn a_unit_without_declared_hashes_or_with_errors_is_not_recorded() {
+fn a_unit_without_identified_contents_or_with_errors_is_not_recorded() {
     let root = scratch("unrecorded");
     let records = MemoryUnitRecords::default();
     let run = Run {
-        manifest: declared_manifest("", "s1"),
+        manifest: identified_manifest("", "s1"),
         ..Run::default()
     };
     streamed_reusing(&root, &run, &records);
     assert_eq!(records.len(), 1);
 
-    let mut manifest = declared_manifest("d1", "s1");
+    let mut manifest = identified_manifest("d1", "s1");
     manifest[0].dependencies = vec!["absent".to_owned()];
     manifest.push(entry("absent", &[]));
-    manifest[2].declared = "a1".to_owned();
+    manifest[2].content = "a1".to_owned();
     let records = MemoryUnitRecords::default();
     let run = Run {
         manifest,

@@ -52,7 +52,7 @@ fn the_in_memory_run_writes_what_a_native_run_writes() {
         .map(|name| Entry {
             name: (*name).to_owned(),
             size: 1,
-            declared: String::new(),
+            content: String::new(),
             dependencies: Vec::new(),
         })
         .collect();

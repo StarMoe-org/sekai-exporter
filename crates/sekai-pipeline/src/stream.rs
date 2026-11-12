@@ -47,8 +47,10 @@ pub struct Entry {
     pub name: String,
     /// The size of the bundle in bytes, as the manifest declares it.
     pub size: u64,
-    /// The hash the manifest declares for the bytes of the bundle, or empty when it declares none.
-    pub declared: String,
+    /// What identifies the bytes of the bundle, such as a hash the manifest declares for them or
+    /// their SHA-256, or empty when nothing does. Entries with the same name and content hold the
+    /// same bytes.
+    pub content: String,
     /// The names of the bundles this one depends on.
     pub dependencies: Vec<String>,
 }
@@ -1075,7 +1077,7 @@ mod tests {
         Entry {
             name: name.to_owned(),
             size,
-            declared: String::new(),
+            content: String::new(),
             dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
         }
     }

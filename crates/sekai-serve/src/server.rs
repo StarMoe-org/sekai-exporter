@@ -7,7 +7,7 @@
 
 use std::convert::Infallible;
 use std::fmt;
-use std::io::{self, SeekFrom};
+use std::io::{self, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -139,9 +139,12 @@ impl Server {
         let listener = TcpListener::from_std(listener)?;
         let connections = Arc::new(Semaphore::new(options.connections.max(1)));
         let mut http = http1::Builder::new();
+        // A client may end its side of the connection once its request is sent, as simple
+        // clients do, and is answered all the same.
         http.timer(TokioTimer::new())
             .header_read_timeout(options.head_timeout)
-            .max_buf_size(HEAD_BYTES);
+            .max_buf_size(HEAD_BYTES)
+            .half_close(true);
         loop {
             // A connection is accepted only once there is room for it, so the connections the
             // server does not hold wait in the queue of the listener.
@@ -328,9 +331,11 @@ fn never(never: Infallible) -> io::Error {
     match never {}
 }
 
-/// Writes a line about something that went wrong to the standard error stream.
+/// Writes a line about something that went wrong to the standard error stream. A stream that
+/// takes no line, such as a pipe whose reader is gone, loses the line and nothing else: the
+/// request that the line is about is answered, and the server goes on.
 fn report(message: impl fmt::Display) {
-    eprintln!("{message}");
+    let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
 /// A stream that fails once no byte has been read or written for a time, so a client that

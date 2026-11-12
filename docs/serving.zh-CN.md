@@ -61,7 +61,7 @@
 
 ## 响应
 
-解析器回答 `GET` 和 `HEAD`，对 `OPTIONS` 以 `204` 和允许的方法回答。没有路由匹配或视图中没有的路径返回 `404`，附带 `Cache-Control: public, max-age=<max_age>`。其他方法返回 `405`，超过 8192 字节的 URL 路径返回 `414`。无法读取的文件返回 `500`，附带 `Cache-Control: no-store`，原因列于[解析器检查什么](#解析器检查什么)。每个响应都带有 `X-Content-Type-Options: nosniff`，因此客户端只按给出的媒体类型看待文件。
+解析器回答 `GET`；对 `HEAD` 以 `GET` 的头回答，不带正文；对 `OPTIONS` 以 `204` 和允许的方法回答。没有路由匹配或视图中没有的路径返回 `404`，附带 `Cache-Control: public, max-age=<max_age>`。其他方法返回 `405`，超过 8192 字节的 URL 路径返回 `414`。无法读取的文件返回 `500`，附带 `Cache-Control: no-store`，原因列于[解析器检查什么](#解析器检查什么)。每个响应都带有 `X-Content-Type-Options: nosniff`，因此客户端只按给出的媒体类型看待文件。
 
 使用 `"bytes"` 时，文件以 `200` 返回，附带：
 
@@ -80,7 +80,9 @@
 
 设置 `cors` 时，每个响应都带有 `Access-Control-Allow-Origin`，并公开 `Accept-Ranges`、`Content-Disposition`、`Content-Range` 与 `ETag`；`OPTIONS` 允许请求头 `Range`、`If-None-Match` 与 `If-Range`。
 
-视图的指针至多每 `max_age` 秒重新读取一次，因此新发布在这段时间内到达视图的每个路径，并且一次查找绝不会混用两个版本。不存在的指针也被记住同样长的时间，因此区服、视图或版本在首次发布后的 `max_age` 之内开始应答。指定版本的指针一旦存在就不再改变，因此在被记住期间不再读取。
+视图的指针至多每 `max_age` 秒重新读取一次，因此新发布在这段时间内到达视图的每个路径，并且一次查找绝不会混用两个版本。不存在的指针也被记住同样长的时间，因此区服、视图或版本在首次发布后的 `max_age` 之内开始应答。
+
+指定版本的指针也按同样的间隔重新读取，因为一个版本可以用同一个名称再次发布：`export` 每次运行都发布 `local`，`update --force` 把它找到的版本再发布一遍，转换器在此期间有改动时文件也随之不同。解析器在 `max_age` 之内以新文件应答。已经持有该指定版本响应的客户端或缓存，按其 `Cache-Control` 保留它，最长一年：解析器前面的缓存需要清除，浏览器则保留已有的内容。
 
 ## 解析器检查什么
 
@@ -124,7 +126,9 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。
+该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
+
+服务每以 `500` 回答一个请求，就向标准错误流写一行，给出指针或对象及其问题所在。标准错误流无法写入时，例如读取端已经离开的管道，这些行被丢弃，请求照常得到应答。
 
 ## 其他宿主
 

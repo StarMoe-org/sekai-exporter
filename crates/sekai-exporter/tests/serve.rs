@@ -1,5 +1,6 @@
 //! `sekai-exporter serve` over the export of the fixture bundles of `sekai-unity`: every path of
-//! the published tree is served with its bytes, by the current and by the named version.
+//! the published tree is served with its bytes, by the current and by the named version, and a
+//! file that cannot be read is answered as such.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -43,6 +44,8 @@ impl Server {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
+        // The first line gives the address. The stream is closed once it is read, so the
+        // server goes on with nobody to read what it reports.
         let mut line = String::new();
         BufReader::new(child.stderr.take().unwrap())
             .read_line(&mut line)
@@ -131,9 +134,10 @@ fn encode(path: &str) -> String {
         .collect()
 }
 
-#[test]
-fn published_paths_are_served_with_their_bytes() {
-    let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join("serve");
+/// Exports the fixture bundles to the output directory `name`, with a tree beside the store,
+/// and returns the directory and a routes file for its canonical view.
+fn exported(name: &str) -> (PathBuf, PathBuf) {
+    let output = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
     let _ = std::fs::remove_dir_all(&output);
     let status = Command::new(env!("CARGO_BIN_EXE_sekai-exporter"))
         .arg("export")
@@ -154,6 +158,12 @@ fn published_paths_are_served_with_their_bytes() {
         ] }"#,
     )
     .unwrap();
+    (output, routes)
+}
+
+#[test]
+fn published_paths_are_served_with_their_bytes() {
+    let (output, routes) = exported("serve");
     let pointer =
         std::fs::read_to_string(output.join("published/local/canonical/current.json")).unwrap();
     let pointer: serde_json::Value = serde_json::from_str(&pointer).unwrap();
@@ -202,4 +212,52 @@ fn published_paths_are_served_with_their_bytes() {
         assert_eq!(server.request("GET", missing, &[]).status, 404, "{missing}");
     }
     assert_eq!(server.request("DELETE", "/local/a.png", &[]).status, 405);
+}
+
+#[test]
+fn a_file_whose_object_is_gone_is_answered_with_nobody_reading_the_log() {
+    let (output, routes) = exported("serve-damaged");
+    let files = tree(&output.join("tree"));
+    let server = Server::start(&output, &routes);
+
+    // The object of the first file that has bytes, which the hash in its `ETag` names.
+    let (path, bytes) = files.iter().find(|(_, bytes)| !bytes.is_empty()).unwrap();
+    let url = format!("/local/{}", encode(path));
+    let head = server.request("HEAD", &url, &[]);
+    let hash = head.header("etag").trim_matches('"').to_owned();
+    assert_eq!((head.status, hash.len()), (200, 64), "{path}");
+    let directory = output.join("store").join(&hash[..2]);
+    let objects: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap())
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(&hash))
+        .map(|entry| entry.path())
+        .collect();
+    assert!(!objects.is_empty(), "{path}");
+    let kept: Vec<Vec<u8>> = objects
+        .iter()
+        .map(|object| std::fs::read(object).unwrap())
+        .collect();
+    for object in &objects {
+        std::fs::remove_file(object).unwrap();
+    }
+
+    // The server reports the object on its standard error stream, which is closed. The line
+    // is lost, and the request is answered: nothing ends with the stream.
+    for _ in 0..3 {
+        let reply = server.request("GET", &url, &[]);
+        assert!(
+            reply.is(500, b"the file could not be read\n"),
+            "{path}: {}",
+            reply.status
+        );
+        assert_eq!(reply.header("cache-control"), "no-store");
+    }
+
+    // Nothing of the failure is remembered: the file is served once its object is back.
+    for (object, content) in objects.iter().zip(&kept) {
+        std::fs::write(object, content).unwrap();
+    }
+    let reply = server.request("GET", &url, &[]);
+    assert!(reply.is(200, bytes), "{path}: {}", reply.status);
 }

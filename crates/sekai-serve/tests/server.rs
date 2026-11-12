@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{Shutdown, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -330,6 +330,11 @@ fn published_files_are_served_with_their_bytes_and_headers() {
             (reply.status, reply.body.as_slice()),
             (404, &b"not found\n"[..])
         );
+        // The answer to `HEAD` gives the length of the text it leaves out.
+        let head = server.request("HEAD", missing, &[]);
+        assert_eq!((head.status, head.body.len()), (404, 0), "{missing}");
+        assert_eq!(head.header("content-length"), "10", "{missing}");
+        assert_eq!(reply.header("content-length"), "10", "{missing}");
     }
     assert_eq!(server.request("DELETE", "/jp/a.txt", &[]).status, 405);
     assert_eq!(server.request("OPTIONS", "/jp/a.txt", &[]).status, 204);
@@ -365,6 +370,49 @@ fn a_new_publication_answers_and_the_old_one_keeps_its_name() {
     assert_eq!(server.get("/jp/b.txt").body, b"added");
     assert_eq!(server.get("/jp@1/a.txt").body, b"first");
     assert_eq!(server.get("/jp@1/b.txt").status, 404);
+}
+
+#[test]
+fn a_version_published_again_under_its_name_answers_with_its_new_files() {
+    let output = Output::new("same-name");
+    output.publish("jp", "local", &[("a.txt", b"first")]);
+    let server = Running::start(&output, options());
+    assert_eq!(server.get("/jp@local/a.txt").body, b"first");
+    assert_eq!(server.get("/jp@local/b.txt").status, 404);
+
+    // The name stays and the files change, as on every run of `export`.
+    output.publish("jp", "local", &[("a.txt", b"changed"), ("b.txt", b"added")]);
+    assert_eq!(server.get("/jp@local/a.txt").body, b"changed");
+    assert_eq!(server.get("/jp@local/b.txt").body, b"added");
+    assert_eq!(server.get("/jp/a.txt").body, b"changed");
+}
+
+#[test]
+fn a_client_that_ends_its_side_after_its_request_is_answered() {
+    let output = Output::new("half-closed");
+    let large = large();
+    output.publish("jp", "1", &[("a.txt", b"first"), ("large.bin", &large)]);
+    let server = Running::start(&output, options());
+
+    // The client sends its request and shuts down its sending side, as simple clients do. The
+    // server sees the end of the stream while it looks the file up, and still answers.
+    let cases: [(&str, u16, &[u8]); 3] = [
+        ("/jp/a.txt", 200, b"first"),
+        ("/jp/large.bin", 200, &large),
+        ("/jp/none.txt", 404, b"not found\n"),
+    ];
+    for (path, status, bytes) in cases {
+        for _ in 0..8 {
+            let mut stream = server.connect(Duration::from_secs(30));
+            send(&mut stream, "GET", path, &[]);
+            stream.shutdown(Shutdown::Write).unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            let reply = Reply::parse(&reply);
+            assert_eq!(reply.status, status, "{path}");
+            assert!(reply.body == bytes, "{path}");
+        }
+    }
 }
 
 #[test]

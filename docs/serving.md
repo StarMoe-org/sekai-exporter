@@ -61,7 +61,7 @@ A routes file with another key, an invalid pattern, or a route that gives the re
 
 ## Responses
 
-The resolver answers `GET` and `HEAD`, and `OPTIONS` with `204` and the methods it allows. A path that no route matches, or that the view does not have, is `404` with `Cache-Control: public, max-age=<max_age>`. Other methods are `405`, and a URL path longer than 8192 bytes is `414`. A file that cannot be read is `500` with `Cache-Control: no-store`; [What the resolver checks](#what-the-resolver-checks) lists the reasons. Every response has `X-Content-Type-Options: nosniff`, so a client takes a file for nothing but its media type.
+The resolver answers `GET`, `HEAD` with the headers of `GET` and no body, and `OPTIONS` with `204` and the methods it allows. A path that no route matches, or that the view does not have, is `404` with `Cache-Control: public, max-age=<max_age>`. Other methods are `405`, and a URL path longer than 8192 bytes is `414`. A file that cannot be read is `500` with `Cache-Control: no-store`; [What the resolver checks](#what-the-resolver-checks) lists the reasons. Every response has `X-Content-Type-Options: nosniff`, so a client takes a file for nothing but its media type.
 
 With `"bytes"`, a file is `200` with:
 
@@ -80,7 +80,9 @@ With `"redirect"`, a file is `302` to its object, with the same `Cache-Control`.
 
 With `cors`, every response has `Access-Control-Allow-Origin` and exposes `Accept-Ranges`, `Content-Disposition`, `Content-Range` and `ETag`, and `OPTIONS` allows the `Range`, `If-None-Match` and `If-Range` request headers.
 
-The pointer of a view is read again at most every `max_age` seconds, so a new publication reaches every path of the view within that time and never mixes two versions in one lookup. A pointer that does not exist is remembered for as long, so a region, a view or a version answers within `max_age` of its first publication. The pointer of a named version does not change once it exists, so it is not read again while it is remembered.
+The pointer of a view is read again at most every `max_age` seconds, so a new publication reaches every path of the view within that time and never mixes two versions in one lookup. A pointer that does not exist is remembered for as long, so a region, a view or a version answers within `max_age` of its first publication.
+
+The pointer of a named version is read again as often, because a version can be published again under its name: `export` publishes `local` on every run, and `update --force` publishes the version it finds once more, with other files when the converters have changed since. The resolver answers with the new files within `max_age`. A client or a cache that already holds a response for the named version keeps it for as long as its `Cache-Control` allows, up to a year: the caches in front of the resolver have to be purged, and a browser keeps what it holds.
 
 ## What the resolver checks
 
@@ -124,7 +126,9 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `512M`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it.
+The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `512M`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it. A client may close its sending side of a connection once its request is sent, and is answered all the same.
+
+The server writes one line to its standard error stream for each request it answers with `500`, with the pointer or the object and what is wrong with it. When the stream takes no line, as a pipe does whose reader is gone, the lines are lost and the requests are answered as before.
 
 ## Other hosts
 

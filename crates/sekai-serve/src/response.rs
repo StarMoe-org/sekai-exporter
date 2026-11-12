@@ -42,7 +42,8 @@ pub struct Request<'a> {
 pub struct Response {
     /// The status code.
     pub status: u16,
-    /// The headers, with lowercase names.
+    /// The headers, with lowercase names. `content-length` is among them whenever the response
+    /// to `GET` has a body, and then in the response to `HEAD` as well, which has none.
     pub headers: Vec<(&'static str, String)>,
     /// The body.
     pub body: Body,
@@ -260,14 +261,19 @@ impl Routes {
         self.finish(status, headers, body)
     }
 
-    /// A response with a short text.
+    /// A response with a short text. It gives the length of the text, as a response with a file
+    /// gives the length of the file, so the answer to `HEAD` has the headers that the answer to
+    /// `GET` has.
     fn reply(
         &self,
         status: u16,
         mut headers: Vec<(&'static str, String)>,
         text: &'static str,
     ) -> Response {
-        headers.push(("content-type", "text/plain; charset=utf-8".to_owned()));
+        headers.extend([
+            ("content-type", "text/plain; charset=utf-8".to_owned()),
+            ("content-length", text.len().to_string()),
+        ]);
         self.finish(status, headers, Body::Text(text))
     }
 

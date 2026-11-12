@@ -33,8 +33,9 @@ use crate::plan::{Plan, PublishError, hex};
 
 /// The SHA-256 of no bytes.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-/// How many times a request is sent before its failure is reported.
-const ATTEMPTS: u32 = 3;
+/// How many times a request is sent before its failure is reported. Between attempts the client
+/// waits 1, 2, 4 and then 8 seconds, so that a busy service has time to recover.
+const ATTEMPTS: u32 = 5;
 /// Cache policy for immutable content-addressed objects under `store/`.
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Cache policy for mutable target pointers (`published/<target>/current.json`).

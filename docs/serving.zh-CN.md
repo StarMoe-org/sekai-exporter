@@ -132,6 +132,13 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
 
 服务每以 `500` 回答一个请求，就向标准错误流写一行，给出指针或对象及其问题所在。标准错误流无法写入时，例如读取端已经离开的管道，这些行被丢弃，请求照常得到应答。
 
+仓库根目录的 `Dockerfile` 构建一个镜像，其中的命令只带 `serve` feature 构建。`main` 上的每个提交都发布为 `ghcr.io/starmoe-org/sekai-exporter`，标签为 `main` 以及提交哈希的前 12 个字符。镜像以无特权用户运行，只需读取输出目录：
+
+```bash
+docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/routes.json:ro \
+    ghcr.io/starmoe-org/sekai-exporter:main serve /data --routes /routes.json --listen 0.0.0.0:8080
+```
+
 ## 其他宿主
 
 核心是一个 `Resolver`：路由、检查、记住的内容与响应。宿主为每个请求开始一次查找（`Resolver::lookup`），给出自己时钟上的时间，并完成查找要求的读取，至多三次：视图的指针、其路径索引的根和一个分块，每次读取都带有允许给出的最大字节数。查找以一个响应结束：状态码、头，以及无正文、一段短文本，或某个对象的字节范围连同该对象应有的大小。宿主提供读取与时钟并写出响应，因此所有宿主的检查、记忆与应答都相同。`sekai-exporter serve` 的服务就是一个宿主，即该 crate 的 `server` feature 之下的 `sekai_serve::server`，其他程序同样可以运行它。存储桶前的边缘 worker 从存储桶读取，并按哈希缓存对象，因此指向同一对象的所有视图的所有路径共享一份缓存。

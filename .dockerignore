@@ -1,0 +1,9 @@
+.git
+target
+data
+out
+local
+docs
+tools
+**/node_modules
+**/__pycache__

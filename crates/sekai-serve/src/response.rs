@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use sekai_format::paths::PathFile;
+use sekai_format::paths::ChunkFile;
 use sekai_format::publication::is_name;
 
 use crate::routes::{Delivery, Routes, Target, is_header_value};
@@ -148,14 +148,14 @@ impl Routes {
         &self,
         request: &Request<'_>,
         target: &Target,
-        file: Option<&PathFile>,
+        file: Option<ChunkFile<'_>>,
     ) -> Result<Response, String> {
         let Some(file) = file else {
             return Ok(self.not_found());
         };
-        let object = ObjectId::new(file.sha256, &file.extension)
+        let object = ObjectId::new(file.sha256, file.extension)
             .ok_or_else(|| format!("{:?} is not a file extension", file.extension))?;
-        if !is_header_value(&file.media_type) {
+        if !is_header_value(file.media_type) {
             return Err(format!("{:?} is not a media type", file.media_type));
         }
         // A named version is cached no longer than the current one: its name can be published
@@ -213,7 +213,7 @@ impl Routes {
         &self,
         request: &Request<'_>,
         path: &str,
-        file: &PathFile,
+        file: ChunkFile<'_>,
         object: ObjectId,
         cache_control: String,
     ) -> Response {
@@ -243,7 +243,7 @@ impl Routes {
             }
         };
         headers.extend([
-            ("content-type", file.media_type.clone()),
+            ("content-type", file.media_type.to_owned()),
             ("content-length", length.to_string()),
             ("accept-ranges", "bytes".to_owned()),
             ("content-disposition", disposition(path)),

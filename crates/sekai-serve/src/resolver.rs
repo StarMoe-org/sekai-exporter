@@ -9,7 +9,7 @@ use std::mem::size_of;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
+use sekai_format::paths::{Chunk, ChunkReference, PathIndex};
 use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 
@@ -499,25 +499,27 @@ fn parse_sha256(text: &str) -> Option<[u8; 32]> {
     Some(sha256)
 }
 
-/// The estimated memory of a decoded root.
+/// The memory of a decoded root: what it allocates, without the bookkeeping of the allocator.
 fn root_weight(index: &PathIndex) -> usize {
-    let texts = index.format.len()
-        + index.view.len()
-        + index.published_version.len()
-        + index.revision.len();
+    let texts = [
+        &index.format,
+        &index.view,
+        &index.published_version,
+        &index.revision,
+    ];
     let chunks = index
         .chunks
         .iter()
-        .map(|chunk| size_of::<ChunkReference>() + chunk.first.len() + chunk.sha256.len());
-    size_of::<PathIndex>() + texts + chunks.sum::<usize>()
+        .map(|chunk| chunk.first.capacity() + chunk.sha256.capacity());
+    size_of::<PathIndex>()
+        + texts.into_iter().map(String::capacity).sum::<usize>()
+        + index.chunks.capacity() * size_of::<ChunkReference>()
+        + chunks.sum::<usize>()
 }
 
-/// The estimated memory of a decoded chunk.
+/// The memory of a decoded chunk.
 fn chunk_weight(chunk: &Chunk) -> usize {
-    let files = chunk.files().iter().map(|file| {
-        size_of::<PathFile>() + file.path.len() + file.extension.len() + file.media_type.len()
-    });
-    size_of::<Chunk>() + files.sum::<usize>()
+    size_of::<Chunk>() + chunk.allocated()
 }
 
 #[cfg(test)]

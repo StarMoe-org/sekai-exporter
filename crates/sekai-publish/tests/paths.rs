@@ -112,10 +112,7 @@ fn every_path_resolves_to_its_file_and_no_other_path_does() {
             .or_insert_with(|| chunk(&store, &reference.sha256));
         let found = found.get(&file.path).unwrap();
         assert_eq!((found.sha256, found.size), (file.key.sha256, file.size));
-        assert_eq!(
-            (found.extension.as_str(), found.media_type.as_str()),
-            ("txt", "text/plain")
-        );
+        assert_eq!((found.extension, found.media_type), ("txt", "text/plain"));
     }
     for absent in [
         "",

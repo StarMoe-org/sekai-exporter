@@ -54,7 +54,7 @@ A region, view or version without a publication is not found.
 |---|---|
 | `delivery` | `"bytes"`: the response carries the file. `"redirect"`: the response redirects to the object in the store at `store_url` |
 | `store_url` | With `"redirect"`, the URL of the store, such that an object is at `<store_url>/<aa>/<sha256>.<extension>` |
-| `max_age` | How many seconds a response for the current version may be cached. Default 60 |
+| `max_age` | How many seconds a response may be cached, for the current version and for a named one. Default 60 |
 | `cors` | When present, the value of `Access-Control-Allow-Origin` |
 
 A routes file with another key, an invalid pattern, or a route that gives the region or the view twice or not at all is refused when the resolver starts.
@@ -72,7 +72,7 @@ With `"bytes"`, a file is `200` with:
 | `ETag` | `"<sha256>"`, the hash of the file |
 | `Accept-Ranges` | `bytes` |
 | `Content-Disposition` | `inline` with the last segment of the path as the file name, also as `filename*` in UTF-8 when it is not ASCII, so a saved file keeps its name |
-| `Cache-Control` | `public, max-age=<max_age>` for the current version, `public, max-age=31536000, immutable` for a named version |
+| `Cache-Control` | `public, max-age=<max_age>`, for the current version and for a named one |
 
 A single byte range, `bytes=<first>-<last>`, `bytes=<first>-` or `bytes=-<length>`, is `206` with `Content-Range`. A range that starts past the end is `416`. A request with several ranges, or with an `If-Range` that is not the file's `ETag`, gets the whole file. An `If-None-Match` that names the file's `ETag`, or `*`, is `304`.
 
@@ -82,7 +82,7 @@ With `cors`, every response has `Access-Control-Allow-Origin` and exposes `Accep
 
 The pointer of a view is read again at most every `max_age` seconds, so a new publication reaches every path of the view within that time and never mixes two versions in one lookup. A pointer that does not exist is remembered for as long, so a region, a view or a version answers within `max_age` of its first publication.
 
-The pointer of a named version is read again as often, because a version can be published again under its name: `export` publishes `local` on every run, and `update --force` publishes the version it finds once more, with other files when the converters have changed since. The resolver answers with the new files within `max_age`. A client or a cache that already holds a response for the named version keeps it for as long as its `Cache-Control` allows, up to a year: the caches in front of the resolver have to be purged, and a browser keeps what it holds.
+The pointer of a named version is read again as often, because a version can be published again under its name: `export` publishes `local` on every run, and `update --force` publishes the version it finds once more, with other files when the converters have changed since. The resolver answers with the new files within `max_age`, and a response for a named version may be cached no longer than one for the current version, so a client or a cache gets the new files within twice `max_age`. A file that has not changed keeps its `ETag`, the hash of the file, so asking for it again with `If-None-Match` is `304` without a body.
 
 ## What the resolver checks
 

@@ -7,9 +7,6 @@ use sekai_format::publication::is_name;
 
 use crate::routes::{Delivery, Routes, Target, is_header_value};
 
-/// How long a response for a named version may be cached: a year, the longest that caches keep.
-const PINNED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
-
 /// The methods the resolver answers.
 const ALLOW: &str = "GET, HEAD, OPTIONS";
 
@@ -161,10 +158,9 @@ impl Routes {
         if !is_header_value(&file.media_type) {
             return Err(format!("{:?} is not a media type", file.media_type));
         }
-        let cache_control = match target.version {
-            Some(_) => PINNED_CACHE_CONTROL.to_owned(),
-            None => format!("public, max-age={}", self.max_age),
-        };
+        // A named version is cached no longer than the current one: its name can be published
+        // again with other files, and the resolver answers with them within `max_age`.
+        let cache_control = format!("public, max-age={}", self.max_age);
         Ok(match &self.delivery {
             Delivery::Bytes => self.file(request, &target.path, file, object, cache_control),
             Delivery::Redirect(store_url) => {

@@ -54,7 +54,7 @@
 |---|---|
 | `delivery` | `"bytes"`：响应携带文件。`"redirect"`：响应重定向到 `store_url` 下 store 中的对象 |
 | `store_url` | 使用 `"redirect"` 时 store 的 URL，对象位于 `<store_url>/<aa>/<sha256>.<extension>` |
-| `max_age` | 当前版本的响应可缓存的秒数。默认 60 |
+| `max_age` | 响应可缓存的秒数，当前版本与指定版本相同。默认 60 |
 | `cors` | 存在时，作为 `Access-Control-Allow-Origin` 的值 |
 
 路由文件若有其他键、有无效的模式，或某条路由重复给出或未给出区服或视图，解析器在启动时拒绝它。
@@ -72,7 +72,7 @@
 | `ETag` | `"<sha256>"`，文件的哈希 |
 | `Accept-Ranges` | `bytes` |
 | `Content-Disposition` | `inline`，以路径的最后一段为文件名；不是 ASCII 时另以 UTF-8 的 `filename*` 给出，因此保存下来的文件保留其名称 |
-| `Cache-Control` | 当前版本为 `public, max-age=<max_age>`，指定版本为 `public, max-age=31536000, immutable` |
+| `Cache-Control` | `public, max-age=<max_age>`，当前版本与指定版本相同 |
 
 单个字节范围 `bytes=<first>-<last>`、`bytes=<first>-` 或 `bytes=-<length>` 返回 `206`，附带 `Content-Range`。起点越过末尾的范围返回 `416`。请求多个范围，或 `If-Range` 不是文件的 `ETag` 时，返回整个文件。`If-None-Match` 列出文件的 `ETag` 或 `*` 时返回 `304`。
 
@@ -82,7 +82,7 @@
 
 视图的指针至多每 `max_age` 秒重新读取一次，因此新发布在这段时间内到达视图的每个路径，并且一次查找绝不会混用两个版本。不存在的指针也被记住同样长的时间，因此区服、视图或版本在首次发布后的 `max_age` 之内开始应答。
 
-指定版本的指针也按同样的间隔重新读取，因为一个版本可以用同一个名称再次发布：`export` 每次运行都发布 `local`，`update --force` 把它找到的版本再发布一遍，转换器在此期间有改动时文件也随之不同。解析器在 `max_age` 之内以新文件应答。已经持有该指定版本响应的客户端或缓存，按其 `Cache-Control` 保留它，最长一年：解析器前面的缓存需要清除，浏览器则保留已有的内容。
+指定版本的指针也按同样的间隔重新读取，因为一个版本可以用同一个名称再次发布：`export` 每次运行都发布 `local`，`update --force` 把它找到的版本再发布一遍，转换器在此期间有改动时文件也随之不同。解析器在 `max_age` 之内以新文件应答；指定版本的响应可缓存的时间不超过当前版本的响应，因此客户端或缓存在两倍 `max_age` 之内拿到新文件。没有改变的文件保留其 `ETag`，即文件的哈希，所以带 `If-None-Match` 再次请求得到不带正文的 `304`。
 
 ## 解析器检查什么
 

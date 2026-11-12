@@ -297,10 +297,7 @@ fn published_files_are_served_with_their_bytes_and_headers() {
         let pinned = server.get(&url.replacen("/jp/", "/jp@1/", 1));
         assert_eq!(pinned.status, 200, "{path}");
         assert!(pinned.body == bytes, "{path}");
-        assert_eq!(
-            pinned.header("cache-control"),
-            "public, max-age=31536000, immutable"
-        );
+        assert_eq!(pinned.header("cache-control"), "public, max-age=0");
 
         let cached = server.request("GET", &url, &[("If-None-Match", &etag)]);
         assert_eq!((cached.status, cached.body.len()), (304, 0), "{path}");

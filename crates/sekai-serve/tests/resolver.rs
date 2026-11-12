@@ -310,14 +310,11 @@ mod responses {
     }
 
     #[test]
-    fn a_named_version_is_cached_for_good() {
+    fn a_named_version_is_cached_as_long_as_the_current_one() {
         let (resolver, published) = (resolver(""), published());
         let pinned = answer(&resolver, &published, &get("/jp@6.1.0/storage/music/a.mp3"));
         assert_eq!(pinned.status, 200);
-        assert_eq!(
-            header(&pinned, "cache-control"),
-            Some("public, max-age=31536000, immutable")
-        );
+        assert_eq!(header(&pinned, "cache-control"), Some("public, max-age=60"));
     }
 
     /// The response to a request for `range` of the file of eleven bytes.

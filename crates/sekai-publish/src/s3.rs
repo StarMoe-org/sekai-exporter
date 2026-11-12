@@ -659,10 +659,13 @@ struct Page {
 
 impl Page {
     /// Reads the XML of a `ListObjectsV2` response. Any other response, such as the list of
-    /// buckets that a request outside every bucket gets, is an error rather than an empty page.
+    /// buckets that a request outside every bucket gets, or one cut short, is an error rather
+    /// than a page with fewer names.
     fn parse(xml: &str) -> Result<Self, String> {
-        if !xml.contains("<ListBucketResult") {
-            return Err("the response is not a listing of objects".to_owned());
+        let complete =
+            xml.contains("<ListBucketResult") && xml.trim_end().ends_with("</ListBucketResult>");
+        if !complete {
+            return Err("the response is not a whole listing of objects".to_owned());
         }
         let names = elements(xml, "Contents")
             .map(|contents| {
@@ -867,6 +870,7 @@ mod tests {
         assert!(Page::parse("<Contents><Key>x</Key></Contents>").is_err());
         let buckets = "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>";
         assert!(Page::parse(buckets).is_err());
+        assert!(Page::parse(&xml[..xml.len() - 20]).is_err());
         assert_eq!(encode_component("t+1/="), "t%2B1%2F%3D");
     }
 

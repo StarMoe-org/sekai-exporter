@@ -15,7 +15,7 @@ use sekai_format::identity::VersionIdentity;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
-use sekai_pipeline::metrics::Recorder;
+use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
 use sekai_publish::Plan;
@@ -45,6 +45,8 @@ struct Options {
     force: bool,
     /// Whether the bucket is checked against a listing of its store, trusting nothing else.
     verify: bool,
+    /// Whether the version of the source is only compared with the last one recorded.
+    check: bool,
 }
 
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error> {
@@ -61,6 +63,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut plain = false;
     let mut force = false;
     let mut verify = false;
+    let mut check = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -73,6 +76,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("plain") => plain = true,
             Long("force") => force = true,
             Long("verify") => verify = true,
+            Long("check") => check = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
         }
@@ -82,6 +86,16 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         .map_err(|_| lexopt::Error::from("expected <region> and <output>"))?;
     if verify && !only.is_empty() {
         return Err("--verify checks a bucket, and a selection is not sent to one".into());
+    }
+    let acts = [
+        ("--force", force),
+        ("--verify", verify),
+        ("--only", !only.is_empty()),
+        ("--tree", tree.is_some()),
+        ("--storage", storage.is_some()),
+    ];
+    if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
+        return Err(format!("--check only compares the version, and {flag} acts on it").into());
     }
     Ok(Options {
         region: region.string()?,
@@ -96,11 +110,15 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         plain,
         force,
         verify,
+        check,
     })
 }
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
     let options = parse(args)?;
+    if options.check {
+        return check(&options).map_err(lexopt::Error::from);
+    }
     std::fs::create_dir_all(&options.output)
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
     Monitor::watch(&options.output.join("metrics.jsonl"), |monitor| {
@@ -500,11 +518,79 @@ fn fetch_and_evaluate(
     })
 }
 
-fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let region_name = options.region.as_str();
+/// The text of the configuration, and the region `options.region` it describes.
+fn configuration(options: &Options) -> Result<(String, Region), String> {
     let config = std::fs::read_to_string(&options.config)
         .map_err(|e| format!("{}: {e}", options.config.display()))?;
-    let region = Region::load(region_name, &config).map_err(|e| e.to_string())?;
+    let region = Region::load(&options.region, &config).map_err(|e| e.to_string())?;
+    Ok((config, region))
+}
+
+/// The tables of `region`, when its configuration names a source for them.
+fn open_tables(region: &Region) -> Result<Option<Tables>, String> {
+    region
+        .tables
+        .as_ref()
+        .map(|source| Tables::open(source, &region.network))
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+/// The current version of the region `name`, with the revision of its tables. What `source`
+/// looks up may depend on the `previous` version.
+fn current_identity(
+    name: &str,
+    source: &dyn Source,
+    tables: Option<&Tables>,
+    previous: Option<&VersionIdentity>,
+    recorder: &dyn Recorder,
+) -> Result<VersionIdentity, String> {
+    let mut identity = {
+        let _span = recorder.span("plan", "identity", name);
+        source.identity(previous).map_err(|e| e.to_string())?
+    };
+    identity.tables = tables.map(|tables| tables.revision().to_owned());
+    Ok(identity)
+}
+
+/// The last version of `region` that `output` recorded, when it holds a catalog.
+fn recorded_identity(output: &Path, region: &str) -> io::Result<Option<VersionIdentity>> {
+    let database = output.join("catalog.redb");
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let store = LocalStore::open(output.join("store"))?;
+    previous_identity(&Catalog::open_or_rebuild(&database, &store)?, region)
+}
+
+/// Prints whether the content of the current version differs from the last one that
+/// `options.output` recorded. Nothing is downloaded or written.
+fn check(options: &Options) -> Result<bool, String> {
+    let name = options.region.as_str();
+    let (_, region) = configuration(options)?;
+    let tables = open_tables(&region)?;
+    let secrets = Secrets::new(options.secrets.clone());
+    let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
+    let previous = recorded_identity(&options.output, name).map_err(|e| e.to_string())?;
+    let identity = current_identity(
+        name,
+        source.as_ref(),
+        tables.as_ref(),
+        previous.as_ref(),
+        &NoRecorder,
+    )?;
+    let change = match previous {
+        Some(previous) if previous.same_content(&identity) => "unchanged".to_owned(),
+        Some(previous) => format!("changed from {}", previous.name()),
+        None => "changed".to_owned(),
+    };
+    println!("{name} {} {change}", identity.name());
+    Ok(true)
+}
+
+fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
+    let region_name = options.region.as_str();
+    let (config, region) = configuration(options)?;
     // A directory lists no dependencies; they are read from the bundles once they are fetched.
     let listed = region.kind != Kind::Dir;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
@@ -517,12 +603,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let hca_key = secrets
         .hca_key(&region.secrets)
         .map_err(|e| e.to_string())?;
-    let tables = region
-        .tables
-        .as_ref()
-        .map(|source| Tables::open(source, &region.network))
-        .transpose()
-        .map_err(|e| e.to_string())?;
+    let tables = open_tables(&region)?;
     let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
 
     let directory = |name: &str| {
@@ -545,13 +626,13 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             return Err(conflict.into());
         }
     }
-    let mut identity = {
-        let _span = monitor.span("plan", "identity", region_name);
-        source
-            .identity(previous.as_ref())
-            .map_err(|e| e.to_string())?
-    };
-    identity.tables = tables.as_ref().map(|tables| tables.revision().to_owned());
+    let identity = current_identity(
+        region_name,
+        source.as_ref(),
+        tables.as_ref(),
+        previous.as_ref(),
+        monitor,
+    )?;
     let name = identity.name();
     if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");

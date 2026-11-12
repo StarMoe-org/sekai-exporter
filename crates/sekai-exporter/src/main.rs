@@ -106,7 +106,7 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
-         [--plain] [--force] [--verify]
+         [--plain] [--force] [--verify] [--check]
       Bring <output> up to the current version of a region of the configuration.
       Bundles go to <output>/inputs, which holds game data and must stay private.
       The canonical and the storage view are published under <output>/published
@@ -116,7 +116,10 @@ commands:
       of its store and uploads what it lacks, whatever its pointer says. --only
       selects bundles by name prefix, with their dependencies. A selection is
       neither recorded as a version nor sent to a bucket; it needs an <output>
-      without a complete run and empty --tree and --storage folders.
+      without a complete run and empty --tree and --storage folders. --check
+      only looks up the current version and prints whether it differs from the
+      last one recorded in <output>; it downloads and writes nothing, and
+      cannot be combined with --force, --verify, --only, --tree or --storage.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

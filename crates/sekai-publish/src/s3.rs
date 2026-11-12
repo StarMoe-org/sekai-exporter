@@ -4,26 +4,21 @@
 //! `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer of a target at
 //! `<prefix>published/<target>/current.json`. Requests are signed with AWS Signature Version 4.
 //!
-//! An object is uploaded only when the bucket does not already hold it with its size. Each upload
-//! is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects bytes
-//! that do not match. The pointer is written last, and only when it changes.
-//!
-//! What the bucket holds is learned as [`Check`] says: by default from the live pointer, whose
-//! publication the local store describes, and for the other objects by asking for each or by
-//! listing the store, whichever takes fewer requests; or, to verify a bucket, by listing the
-//! whole store and trusting nothing else.
+//! What the bucket holds is recorded in [`Holdings`] as each upload is accepted, and a publication
+//! uploads only the objects that are not recorded, without asking the bucket about them. Each
+//! upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects
+//! bytes that do not match. The pointer is written last, and only when it changes. When the record
+//! cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Key, LocalStore};
-use sekai_format::paths::{Chunk, PathIndex};
-use sekai_format::publication::{IndexRoot, IndexShard, Pointer};
+use sekai_catalog::{Holdings, Key, LocalStore, Objects, Remote};
+use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
@@ -39,8 +34,6 @@ const ATTEMPTS: u32 = 3;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Cache policy for mutable target pointers (`published/<target>/current.json`).
 const POINTER_CACHE_CONTROL: &str = "no-cache";
-/// The most names one listing request returns.
-const LIST_PAGE: usize = 1000;
 /// The store directories: the first two hexadecimal digits of the names.
 const SHARDS: usize = 256;
 
@@ -97,24 +90,10 @@ impl fmt::Debug for S3 {
 pub struct S3Report {
     /// The objects uploaded.
     pub uploaded: usize,
-    /// The objects the bucket already held.
+    /// The objects recorded as held, which were not uploaded again.
     pub present: usize,
     /// Whether the pointer was written; it is not when it already pointed at the publication.
     pub pointer_written: bool,
-}
-
-/// How a publication learns which objects the bucket holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum Check {
-    /// A pointer that already names the publication means the bucket holds all of it, and the
-    /// objects of the live publication that the local store describes are taken as held. The
-    /// other objects are asked for one by one or found by listing the store, whichever takes
-    /// fewer requests.
-    #[default]
-    Pointer,
-    /// Every object is looked up in a listing of the whole store, and the pointer is not
-    /// trusted: a bucket that lost objects gets them back.
-    Listing,
 }
 
 impl S3 {
@@ -165,6 +144,17 @@ impl S3 {
             bucket,
             credentials,
         })
+    }
+
+    /// Every object of the store in the bucket with its size, from a listing of the whole store,
+    /// one store directory per connection.
+    pub fn holdings(&self) -> Result<BTreeMap<Key, u64>, PublishError> {
+        let listed = self.list_store()?;
+        let objects = listed.into_iter().filter_map(|(name, size)| {
+            let key = name.rsplit('/').next()?.parse().ok()?;
+            Some((key, size))
+        });
+        Ok(objects.collect())
     }
 
     /// The name of `key` in the bucket.
@@ -248,27 +238,6 @@ impl S3 {
                 return Err(failure);
             }
             std::thread::sleep(Duration::from_millis(500 << attempt));
-        }
-    }
-
-    /// The size of `name`, or `None` when the bucket does not hold it.
-    fn head(&self, name: &str) -> Result<Option<u64>, String> {
-        let response = self.send("HEAD", name, "", EMPTY, |url, headers| {
-            let mut request = self.agent.head(url);
-            for (header, value) in headers {
-                request = request.header(header, value);
-            }
-            request.call()
-        })?;
-        match response.status().as_u16() {
-            200 => response
-                .headers()
-                .get("content-length")
-                .and_then(|value| value.to_str().ok()?.parse().ok())
-                .map(Some)
-                .ok_or_else(|| format!("HEAD {name}: no length")),
-            404 => Ok(None),
-            status => Err(format!("HEAD {name}: HTTP {status}")),
         }
     }
 
@@ -377,122 +346,67 @@ impl S3 {
     }
 }
 
-/// Publishes `plan` as `target` in the `index` layout to the bucket of `s3`, learning what the
-/// bucket holds from its pointer. See [`publish_with`].
+impl Remote for S3 {
+    fn fetch(&self, key: &Key) -> std::io::Result<Option<Vec<u8>>> {
+        self.get(&self.object(key)).map_err(std::io::Error::other)
+    }
+}
+
+/// Publishes `plan` as `target` in the `index` layout to the bucket of `s3`. See [`publish_with`].
 pub fn publish(
-    store: &LocalStore,
+    objects: &Objects<'_>,
     s3: &S3,
     target: &str,
     plan: &Plan,
     threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
-    publish_with(
-        store,
-        s3,
-        target,
-        plan,
-        Layout::Index,
-        Check::Pointer,
-        threads,
-    )
+    publish_with(objects, s3, target, plan, Layout::Index, threads)
 }
 
 /// Publishes `plan` as `target` in `layout` to the bucket of `s3`: the objects first, then the
-/// pointer of its version, then the current pointer of `target`. The documents are written to
-/// `store` first, and every object the bucket lacks is read from `store`. A failed stage leaves
-/// the previous pointer in place, and running the publication again uploads only what is still
-/// missing. What the bucket holds is learned as `check` says. The documents are written on up
-/// to `threads` threads.
+/// pointer of its version, then the current pointer of `target`. The documents are written to the
+/// local store of `objects`, whose holdings record what the bucket holds. Every object they do not
+/// record is uploaded from the local store, and recorded once the bucket accepts it, also when the
+/// publication fails later. A failed stage leaves the previous pointer in place, and running the
+/// publication again uploads only what is still unrecorded. The documents are written on up to
+/// `threads` threads.
 pub fn publish_with(
-    store: &LocalStore,
+    objects: &Objects<'_>,
     s3: &S3,
     target: &str,
     plan: &Plan,
     layout: Layout,
-    check: Check,
     threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
     check_version(&plan.version)?;
-    let Publication { pointer, objects } = documents(store, target, plan, layout, threads)?;
-    let all: BTreeMap<Key, (u64, String)> = objects
+    let Publication {
+        pointer,
+        objects: referred,
+    } = documents(objects.local, target, plan, layout, threads)?;
+    let referred: BTreeMap<Key, (u64, String)> = referred
         .into_iter()
         .map(|object| (object.key, (object.size, object.media_type)))
         .collect();
-    let all: Vec<_> = all.into_iter().collect();
+    let referred: Vec<_> = referred.into_iter().collect();
     let pointer_bytes =
         serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
     let pointer_name = s3.pointer(target);
-
-    // Pre-verify local store presence so missing store objects always surface as `verify` even
-    // when the remote pointer already holds parts of the publication.
-    for (key, (size, _)) in &all {
-        let path = store.path(key);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
-            return Err(PublishError::new(
-                "verify",
-                format!("{key} is not in the store with {size} bytes"),
-            ));
-        }
-    }
-
     let remote_pointer = s3
         .get(&pointer_name)
         .map_err(|e| PublishError::new("pointer", e))?;
-    let pointer_current = remote_pointer.as_deref() == Some(pointer_bytes.as_slice());
-    if check == Check::Pointer && pointer_current {
-        return Ok((
-            pointer,
-            S3Report {
-                uploaded: 0,
-                present: all.len(),
-                pointer_written: false,
-            },
-        ));
-    }
-    let live = match check {
-        Check::Pointer => remote_pointer
-            .as_deref()
-            .and_then(|raw| serde_json::from_slice::<Pointer>(raw).ok())
-            .map(|previous| live_keys_from_pointer(store, &previous))
-            .unwrap_or_default(),
-        Check::Listing => BTreeSet::new(),
-    };
-    let unknown: Vec<_> = all.iter().filter(|(key, _)| !live.contains(key)).collect();
-    // A listing takes at least one request per store directory, a lookup one per object.
-    let listing_requests = SHARDS * all.len().div_ceil(SHARDS * LIST_PAGE).max(1);
-    let listed = if check == Check::Listing || unknown.len() > listing_requests {
-        Some(s3.list_store()?)
-    } else {
-        None
-    };
 
-    let uploaded = AtomicUsize::new(0);
-    each(unknown.len(), s3.bucket.connections, |i| {
-        let (key, (size, media_type)) = unknown[i];
-        let name = s3.object(key);
-        let failed = |message: String| PublishError::new("files", message);
-        let held = match &listed {
-            Some(listed) => listed.get(&name).copied(),
-            None => s3.head(&name).map_err(failed)?,
-        };
-        if held == Some(*size) {
-            return Ok(());
-        }
-        let path = store.path(key);
-        s3.put(
-            &name,
-            &hex(&key.sha256),
-            media_type,
-            IMMUTABLE_CACHE_CONTROL,
-            || File::open(&path).map_err(|e| format!("{key}: {e}")),
-        )
-        .map_err(failed)?;
-        uploaded.fetch_add(1, Ordering::Relaxed);
-        Ok(())
-    })?;
+    let unrecorded = unrecorded(objects.held, &referred)?;
+    let confirmed = Mutex::new(Vec::with_capacity(unrecorded.len()));
+    let uploading = upload(objects.local, s3, &unrecorded, &confirmed);
+    let confirmed = confirmed.into_inner().unwrap_or_else(|e| e.into_inner());
+    objects
+        .held
+        .hold(&confirmed)
+        .map_err(PublishError::wrap("holdings"))?;
+    uploading?;
+    let uploaded = unrecorded.len();
 
-    let failed = |message: String| PublishError::new("pointer", message);
-    let pointer_written = !pointer_current;
+    let pointer_written = remote_pointer.as_deref() != Some(pointer_bytes.as_slice());
     if pointer_written {
         let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
         let sha256 = hex(&digest);
@@ -509,81 +423,73 @@ pub fn publish_with(
                 POINTER_CACHE_CONTROL,
                 || Ok(pointer_bytes.as_slice()),
             )
-            .map_err(failed)?;
+            .map_err(|e| PublishError::new("pointer", e))?;
         }
     }
-    let uploaded = uploaded.into_inner();
     Ok((
         pointer,
         S3Report {
             uploaded,
-            present: all.len() - uploaded,
+            present: referred.len() - uploaded,
             pointer_written,
         },
     ))
 }
 
-/// Reads the object `<sha256>.<extension>` from `store` and records it in `live`.
-fn read_live(
-    store: &LocalStore,
-    live: &mut BTreeSet<Key>,
-    sha256: &str,
-    extension: &str,
-) -> Option<Vec<u8>> {
-    let key = Key {
-        sha256: parse_hex(sha256)?,
-        extension: extension.to_owned(),
-    };
-    let bytes = store.read(&key).ok()?;
-    live.insert(key);
-    Some(bytes)
+/// An object a publication refers to: its key, its size and its media type.
+type Referred = (Key, (u64, String));
+
+/// The objects of `referred`, in key order, that `held` does not record with their size.
+fn unrecorded<'a>(
+    held: &dyn Holdings,
+    referred: &'a [Referred],
+) -> Result<Vec<&'a Referred>, PublishError> {
+    let mut unknown = Vec::new();
+    for directory in referred.chunk_by(|(a, _), (b, _)| a.sha256[0] == b.sha256[0]) {
+        let sizes = held
+            .sizes(directory[0].0.sha256[0])
+            .map_err(PublishError::wrap("holdings"))?;
+        unknown.extend(
+            directory
+                .iter()
+                .filter(|(key, (size, _))| sizes.get(key) != Some(size)),
+        );
+    }
+    Ok(unknown)
 }
 
-/// The objects of the publication `previous` names, as far as the local store describes them: its
-/// documents and every file its index shards or path index list.
-fn live_keys_from_pointer(store: &LocalStore, previous: &Pointer) -> BTreeSet<Key> {
-    let mut live = BTreeSet::new();
-    if let Some(sqlite) = &previous.sqlite {
-        read_live(store, &mut live, sqlite, "sqlite");
-    }
-    let root = (previous.root.as_deref())
-        .and_then(|root| read_live(store, &mut live, root, "json"))
-        .and_then(|bytes| serde_json::from_slice::<IndexRoot>(&bytes).ok());
-    for listing in root.iter().flat_map(|root| &root.listings) {
-        read_live(store, &mut live, &listing.sha256, "json");
-    }
-    for shard in root.iter().flat_map(|root| &root.shards) {
-        let Some(shard) = read_live(store, &mut live, &shard.sha256, "json")
-            .and_then(|bytes| serde_json::from_slice::<IndexShard>(&bytes).ok())
-        else {
-            continue;
-        };
-        for entry in shard.entries {
-            if let Some(sha256) = parse_hex(&entry.sha256) {
-                live.insert(Key {
-                    sha256,
-                    extension: entry.extension,
-                });
-            }
+/// Uploads each of `unrecorded` from `local`, adding every object the bucket then holds to
+/// `confirmed`. The bucket is not asked first: an object is named by its bytes, so writing it
+/// again changes nothing.
+fn upload(
+    local: &LocalStore,
+    s3: &S3,
+    unrecorded: &[&Referred],
+    confirmed: &Mutex<Vec<(Key, u64)>>,
+) -> Result<(), PublishError> {
+    each(unrecorded.len(), s3.bucket.connections, |i| {
+        let (key, (size, media_type)) = unrecorded[i];
+        let path = local.path(key);
+        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
+            return Err(PublishError::new(
+                "verify",
+                format!("{key} is neither in the store with {size} bytes nor recorded as held"),
+            ));
         }
-    }
-    let paths = (previous.paths.as_deref())
-        .and_then(|paths| read_live(store, &mut live, paths, "json"))
-        .and_then(|bytes| PathIndex::from_bytes(&bytes).ok());
-    for chunk in paths.iter().flat_map(|paths| &paths.chunks) {
-        let Some(chunk) = read_live(store, &mut live, &chunk.sha256, "paths")
-            .and_then(|bytes| Chunk::decode(&bytes).ok())
-        else {
-            continue;
-        };
-        for file in chunk.files() {
-            live.insert(Key {
-                sha256: file.sha256,
-                extension: file.extension.to_owned(),
-            });
-        }
-    }
-    live
+        s3.put(
+            &s3.object(key),
+            &hex(&key.sha256),
+            media_type,
+            IMMUTABLE_CACHE_CONTROL,
+            || File::open(&path).map_err(|e| format!("{key}: {e}")),
+        )
+        .map_err(|message| PublishError::new("files", message))?;
+        confirmed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push((key.clone(), *size));
+        Ok(())
+    })
 }
 
 /// Runs `job` for indices `0..n` on up to `threads` threads, stopping after the first failure.

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::io;
 
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Derivations, Derived, Key, LocalStore, Store};
+use sekai_catalog::{Derivations, Derived, Key, LocalStore, Objects, Store};
 use sekai_convert::Asset;
 use sekai_format::AssetDocument;
 use sekai_format::publication::AssetFailure;
@@ -90,10 +90,10 @@ impl sekai_pipeline::Fusion for Fusion<'_> {
     }
 }
 
-/// Makes a file of the view, or finds it from an earlier run.
+/// Makes a file of the view, or finds it from an earlier run among `objects`.
 fn make(
     job: &Job,
-    store: &LocalStore,
+    objects: &Objects<'_>,
     derivations: &dyn Derivations,
     monitor: &Monitor,
 ) -> std::io::Result<Result<(Key, u64, bool), storage_view::ViewError>> {
@@ -103,18 +103,18 @@ fn make(
     }
     let fingerprint = fingerprint(transform, &job.source);
     if let Some(Derived::Document(key)) = derivations.get(&fingerprint)?
-        && let Some(size) = store.size(&key)?
+        && let Some(size) = objects.size(&key)?
     {
         return Ok(Ok((key, size, false)));
     }
     let mut span = monitor.span("transform", "storage", &job.file.path);
-    let member = store.read(&job.source)?;
+    let member = objects.read(&job.source)?;
     let bytes = match storage_view::apply(transform, &member) {
         Ok(bytes) => bytes,
         Err(e) => return Ok(Err(e)),
     };
     let extension = transform.extension().unwrap_or(&job.source.extension);
-    let key = store.put(&bytes, extension)?;
+    let key = objects.put(&bytes, extension)?;
     span.bytes(member.len() as u64, bytes.len() as u64);
     derivations.put(fingerprint, Derived::Document(key.clone()))?;
     Ok(Ok((key, bytes.len() as u64, true)))
@@ -169,7 +169,7 @@ pub(crate) fn publish(
     index: &Plan,
     target: &str,
     destination: &Destination<'_>,
-    store: &LocalStore,
+    objects: &Objects<'_>,
     derivations: &dyn Derivations,
     threads: usize,
     monitor: &Monitor,
@@ -178,7 +178,7 @@ pub(crate) fn publish(
     let (jobs, shadowed) = jobs(index)?;
     let mut failures = index.failures.clone();
     let results = parallel(jobs.len(), threads, |i| {
-        isolated(|| make(&jobs[i], store, derivations, monitor)).unwrap_or_else(|message| {
+        isolated(|| make(&jobs[i], objects, derivations, monitor)).unwrap_or_else(|message| {
             Ok(Err(storage_view::ViewError {
                 code: PANICKED,
                 message,
@@ -226,7 +226,7 @@ pub(crate) fn publish(
         revision: revision.iter().map(|b| format!("{b:02x}")).collect(),
     };
     sekai_publish::publish(
-        store,
+        objects,
         &destination.output.join("published"),
         target,
         &plan,
@@ -241,7 +241,8 @@ pub(crate) fn publish(
         plan.revision
     );
     if let Some(root) = destination.tree {
-        let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
+        let report =
+            tree::publish(objects.local, root, &plan, threads).map_err(|e| e.to_string())?;
         println!(
             "storage tree written {} unchanged {} deleted {}",
             report.written, report.unchanged, report.deleted

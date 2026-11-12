@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sekai_catalog::{Derivations, LocalStore};
+use sekai_catalog::{Derivations, LocalStore, Objects};
 use sekai_convert::Converter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
@@ -403,7 +403,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             output: &options.output,
             tree: options.tree.as_deref(),
         },
-        &store,
+        &Objects::local(&store),
         options.threads,
         monitor,
     )?;
@@ -495,15 +495,15 @@ pub(crate) struct Destination<'a> {
     pub(crate) tree: Option<&'a Path>,
 }
 
-/// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,
-/// with a tree root, a path tree, working on up to `threads` threads. Returns the pointer and the
-/// plan of the publication.
+/// Lists `evaluation` in `<output>/assets.tsv`, publishes the index of `objects` under
+/// `<output>/published` and, with a tree root, a path tree, working on up to `threads` threads.
+/// Returns the pointer and the plan of the publication.
 pub(crate) fn publish(
     evaluation: &Evaluation,
     version: &str,
     target: &str,
     destination: &Destination<'_>,
-    store: &LocalStore,
+    objects: &Objects<'_>,
     threads: usize,
     monitor: &Monitor,
 ) -> Result<(Pointer, Plan), lexopt::Error> {
@@ -528,9 +528,9 @@ pub(crate) fn publish(
         })
         .collect();
     let publishing = monitor.span("publish", "index", "");
-    let plan = plan(version, &bindings, store, threads).map_err(|e| e.to_string())?;
+    let plan = plan(version, &bindings, objects.local, threads).map_err(|e| e.to_string())?;
     let pointer = sekai_publish::publish(
-        store,
+        objects,
         &output.join("published"),
         target,
         &plan,
@@ -542,7 +542,8 @@ pub(crate) fn publish(
     println!("published revision {}", pointer.revision);
     if let Some(root) = destination.tree {
         let _span = monitor.span("publish", "tree", "");
-        let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
+        let report =
+            tree::publish(objects.local, root, &plan, threads).map_err(|e| e.to_string())?;
         println!(
             "tree written {} unchanged {} deleted {}",
             report.written, report.unchanged, report.deleted

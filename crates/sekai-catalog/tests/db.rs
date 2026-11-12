@@ -1,10 +1,11 @@
 //! The catalog database: batches, snapshots and rebuilding.
 #![cfg(feature = "catalog-db")]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use sekai_catalog::db::{AssetRow, BundleRow, Catalog, PublicationRow};
-use sekai_catalog::{Derivations, Derived, Key, LocalStore};
+use sekai_catalog::{Derivations, Derived, Holdings, Key, LocalStore};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError};
 
@@ -126,6 +127,24 @@ fn readers_do_not_see_an_uncommitted_batch() {
     assert_eq!(catalog.pointer("jp").unwrap(), None);
     batch.commit().unwrap();
     assert_eq!(catalog.pointer("jp").unwrap().as_deref(), Some("v1"));
+}
+
+#[test]
+fn holdings_are_listed_by_store_directory_and_replaced_whole() {
+    let s = Scratch::new("holdings");
+    let catalog = Catalog::open_or_rebuild(&s.file(), &s.store()).unwrap();
+    let held = catalog.holdings();
+    held.hold(&[(key(0x10), 3), (key(0x11), 4)]).unwrap();
+
+    assert_eq!(held.size(&key(0x10)).unwrap(), Some(3));
+    assert_eq!(held.size(&key(0x12)).unwrap(), None);
+    let sizes = held.sizes(0x11).unwrap();
+    assert_eq!(sizes.into_iter().collect::<Vec<_>>(), [(key(0x11), 4)]);
+    assert!(held.sizes(0xff).unwrap().is_empty());
+
+    held.replace(&BTreeMap::from([(key(0xff), 6)])).unwrap();
+    assert_eq!(held.size(&key(0x10)).unwrap(), None);
+    assert_eq!(held.sizes(0xff).unwrap().get(&key(0xff)), Some(&6));
 }
 
 #[test]

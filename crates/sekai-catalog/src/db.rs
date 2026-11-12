@@ -3,7 +3,7 @@
 //! The catalog is an index. Derivations can be rebuilt from the asset documents in the store, so
 //! a damaged file is set aside and rebuilt instead of stopping a run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
@@ -14,6 +14,7 @@ use redb::{
 use sekai_format::AssetDocument;
 
 use crate::derivation::{BundleIndexes, Derivations, Derived};
+use crate::holdings::Holdings;
 use crate::store::{Key, LocalStore, parse_hex};
 
 const DERIVATIONS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("derivations");
@@ -30,6 +31,8 @@ const VERSIONS: TableDefinition<'_, (&str, &str), &str> = TableDefinition::new("
 const POINTERS: TableDefinition<'_, &str, &str> = TableDefinition::new("pointers");
 const PUBLICATIONS: TableDefinition<'_, (&str, &str), (&str, &str)> =
     TableDefinition::new("publications");
+/// The size of each object the bucket of the catalog holds, by object name.
+const OBJECTS: TableDefinition<'_, &str, u64> = TableDefinition::new("objects");
 
 /// How many outputs [`CatalogDerivations`] holds before it writes them.
 const BATCH: usize = 1024;
@@ -141,6 +144,7 @@ impl Catalog {
         tx.open_table(VERSIONS).map_err(other)?;
         tx.open_table(POINTERS).map_err(other)?;
         tx.open_table(PUBLICATIONS).map_err(other)?;
+        tx.open_table(OBJECTS).map_err(other)?;
         tx.commit().map_err(other)?;
         Ok(Self { db })
     }
@@ -286,6 +290,11 @@ impl Catalog {
         }))
     }
 
+    /// What the bucket of the catalog holds, as recorded.
+    pub fn holdings(&self) -> CatalogHoldings<'_> {
+        CatalogHoldings { catalog: self }
+    }
+
     /// The catalog as the [`BundleIndexes`] of opening a version.
     pub fn bundle_indexes(&self) -> CatalogBundleIndexes<'_> {
         CatalogBundleIndexes {
@@ -400,6 +409,21 @@ impl Batch {
         Ok(())
     }
 
+    /// Records that the bucket holds `key` with `size` bytes.
+    pub fn hold(&mut self, key: &Key, size: u64) -> io::Result<()> {
+        let mut table = self.0.open_table(OBJECTS).map_err(other)?;
+        table
+            .insert(key.to_string().as_str(), size)
+            .map_err(other)?;
+        Ok(())
+    }
+
+    /// Forgets every object recorded as held.
+    pub fn release_all(&mut self) -> io::Result<()> {
+        let mut table = self.0.open_table(OBJECTS).map_err(other)?;
+        table.retain(|_, _| false).map_err(other)
+    }
+
     /// Makes the batch visible and durable.
     pub fn commit(self) -> io::Result<()> {
         self.0.commit().map_err(other)
@@ -491,5 +515,56 @@ impl Derivations for CatalogDerivations {
 
     fn flush(&self) -> io::Result<()> {
         self.write(&mut self.pending.lock().unwrap())
+    }
+}
+
+/// What the bucket of the catalog holds, kept in the catalog.
+pub struct CatalogHoldings<'c> {
+    catalog: &'c Catalog,
+}
+
+impl CatalogHoldings<'_> {
+    /// Records that the bucket holds exactly `objects`, such as a listing of it, in place of what
+    /// was recorded.
+    pub fn replace(&self, objects: &BTreeMap<Key, u64>) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        batch.release_all()?;
+        for (key, &size) in objects {
+            batch.hold(key, size)?;
+        }
+        batch.commit()
+    }
+}
+
+impl Holdings for CatalogHoldings<'_> {
+    fn size(&self, key: &Key) -> io::Result<Option<u64>> {
+        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let table = tx.open_table(OBJECTS).map_err(other)?;
+        let value = table.get(key.to_string().as_str()).map_err(other)?;
+        Ok(value.map(|v| v.value()))
+    }
+
+    fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>> {
+        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let table = tx.open_table(OBJECTS).map_err(other)?;
+        let start = format!("{prefix:02x}");
+        let mut sizes = HashMap::new();
+        for entry in table.range(start.as_str()..).map_err(other)? {
+            let (name, size) = entry.map_err(other)?;
+            let name = name.value();
+            if !name.starts_with(&start) {
+                break;
+            }
+            sizes.insert(name.parse().map_err(other)?, size.value());
+        }
+        Ok(sizes)
+    }
+
+    fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        for (key, size) in objects {
+            batch.hold(key, *size)?;
+        }
+        batch.commit()
     }
 }

@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::publication::{Pointer, VERSION, is_name};
 use sha2::{Digest, Sha256};
 
@@ -105,12 +105,12 @@ pub(crate) fn version_pointer(target: &str, version: &str) -> String {
     format!("{target}/versions/{version}.json")
 }
 
-/// Writes the documents of `plan` in `layout` to `store`, checks that every object it refers to
-/// is in `store`, and then writes the pointer of its version and makes it current at
-/// `<root>/<target>/current.json`. The store is written and checked on up to `threads` threads.
-/// A failed stage leaves the previous pointer in place.
+/// Writes the documents of `plan` in `layout` to the local store of `objects`, checks that every
+/// object it refers to is among `objects`, and then writes the pointer of its version and makes it
+/// current at `<root>/<target>/current.json`. The store is written and checked on up to `threads`
+/// threads. A failed stage leaves the previous pointer in place.
 pub fn publish(
-    store: &LocalStore,
+    objects: &Objects<'_>,
     root: &Path,
     target: &str,
     plan: &Plan,
@@ -118,8 +118,11 @@ pub fn publish(
     threads: usize,
 ) -> Result<Pointer, PublishError> {
     check_version(&plan.version)?;
-    let Publication { pointer, objects } = documents(store, target, plan, layout, threads)?;
-    if let Some(object) = index::missing(store, &objects, threads, |o| (&o.key, o.size))? {
+    let Publication {
+        pointer,
+        objects: referred,
+    } = documents(objects.local, target, plan, layout, threads)?;
+    if let Some(object) = index::missing(objects, &referred, threads, |o| (&o.key, o.size))? {
         return Err(PublishError::new(
             "verify",
             format!("{} is not in the store", object.key),

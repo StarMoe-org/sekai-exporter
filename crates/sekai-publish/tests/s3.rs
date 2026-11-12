@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
-use sekai_publish::s3::{Bucket, Check, Credentials, S3, publish, publish_with};
+use sekai_publish::s3::{Bucket, Credentials, S3, publish, publish_with};
 use sekai_publish::{Binding, Layout, Plan, documents, plan};
 use sha2::{Digest, Sha256};
 
@@ -403,11 +403,17 @@ const POINTER: &str = "out/published/jp/canonical/current.json";
 fn a_second_publication_uploads_nothing() {
     let s = Scratch::new("twice");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     // Seven files, three shards, one listing and the root, and a path index of one chunk.
     assert_eq!((report.uploaded, report.present), (14, 0));
     assert!(report.pointer_written);
@@ -430,7 +436,7 @@ fn a_second_publication_uploads_nothing() {
     assert!(server.object(&object_name(&root)).is_some());
 
     let puts = server.state.puts.load(Ordering::SeqCst);
-    let (again, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (again, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(again, pointer);
     assert_eq!((report.uploaded, report.present), (0, 14));
     assert!(!report.pointer_written);
@@ -441,9 +447,15 @@ fn a_second_publication_uploads_nothing() {
 fn a_wrong_key_is_refused_and_writes_no_pointer() {
     let s = Scratch::new("signature");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
-    let e = publish(&store, &server.client("wrong"), "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan, 2).unwrap_err();
     // Reading the live pointer is the first signed request, and its refusal stops the publication.
     assert_eq!(e.stage, "pointer");
     assert!(server.object(POINTER).is_none());
@@ -454,17 +466,23 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
 fn an_interrupted_publication_converges() {
     let s = Scratch::new("interrupted");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
     server.refuse_after(Some(4));
-    let e = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap_err();
     assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
 
     server.refuse_after(None);
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(report.uploaded + report.present, 14);
     assert!(report.present >= 4);
     assert_eq!(
@@ -477,10 +495,16 @@ fn an_interrupted_publication_converges() {
 fn a_failed_publication_keeps_the_previous_pointer() {
     let s = Scratch::new("keeps");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
@@ -491,7 +515,7 @@ fn a_failed_publication_keeps_the_previous_pointer() {
 
     server.refuse_after(Some(0));
     let e = publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v2", b"new"),
@@ -506,6 +530,12 @@ fn a_failed_publication_keeps_the_previous_pointer() {
 fn an_object_missing_from_the_store_stops_before_the_pointer() {
     let s = Scratch::new("missing");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
     let file = plan
@@ -514,20 +544,33 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
-    let e = publish(&store, &server.client(SECRET_KEY), "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(
+        &objects,
+        &server.client(SECRET_KEY),
+        "jp/canonical",
+        &plan,
+        2,
+    )
+    .unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
 }
 
 #[test]
-fn incremental_publication_skips_head_for_live_objects() {
+fn a_publication_uploads_only_unrecorded_objects() {
     let s = Scratch::new("incremental");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
 
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
@@ -538,7 +581,7 @@ fn incremental_publication_skips_head_for_live_objects() {
 
     // Identical publication sends 0 HEADs and 0 PUTs.
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
@@ -547,11 +590,11 @@ fn incremental_publication_skips_head_for_live_objects() {
     .unwrap();
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 
-    // Changing one member checks only the 8 changed objects (1 member, 1 document, the shards "a"
-    // and "a/two", 1 listing, the root, and the chunk and root of the path index), skipping HEAD
-    // on the 6 unchanged objects of v1.
+    // Changing one member uploads only the 8 changed objects (1 member, 1 document, the shards "a"
+    // and "a/two", 1 listing, the root, and the chunk and root of the path index): the 6
+    // unchanged objects of v1 are recorded as held. The bucket is never asked about an object.
     let (_, report) = publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v2", b"mask2"),
@@ -559,36 +602,41 @@ fn incremental_publication_skips_head_for_live_objects() {
     )
     .unwrap();
     assert_eq!((report.uploaded, report.present), (8, 6));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 8);
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn verifying_lists_the_store_and_restores_lost_objects() {
+fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
     let s = Scratch::new("verify");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
-    publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     let lost = object_name(&plan.files[0].key);
     server.remove(&lost);
 
-    // The pointer names the publication, so a plain publication trusts it.
-    let (_, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    // The holdings record the lost object, so a plain publication trusts them.
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!(report.uploaded, 0);
     assert!(server.object(&lost).is_none());
 
+    let listed = MemoryHoldings::new(s3.holdings().unwrap());
+    // One request for each empty store directory, and more where a directory fills pages.
+    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
     server.state.heads.store(0, Ordering::SeqCst);
-    let (_, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &plan,
-        Layout::Index,
-        Check::Listing,
-        2,
-    )
-    .unwrap();
+    let objects = Objects {
+        local: &store,
+        held: &listed,
+        remote: &NoRemote,
+    };
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     assert_eq!((report.uploaded, report.present), (1, 13));
     assert!(!report.pointer_written);
     assert_eq!(
@@ -596,14 +644,53 @@ fn verifying_lists_the_store_and_restores_lost_objects() {
         Some(store.read(&plan.files[0].key).unwrap())
     );
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
-    // One request for each empty store directory, and more where a directory fills pages.
-    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
+    assert_eq!(
+        listed.size(&plan.files[0].key).unwrap(),
+        Some(plan.files[0].size)
+    );
 }
 
 #[test]
-fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
+fn an_object_the_bucket_holds_may_leave_the_store() {
+    let s = Scratch::new("evicted");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    publish(
+        &objects,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v1", b"mask"),
+        2,
+    )
+    .unwrap();
+    let plan = sample(&store, "v2", b"mask");
+    for file in &plan.files {
+        std::fs::remove_file(store.path(&file.key)).unwrap();
+    }
+
+    // The evicted files are held, so only the documents of the new version go up.
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
+    assert!(report.present >= plan.files.len());
+    assert!(report.pointer_written);
+}
+
+#[test]
+fn sqlite_layout_sets_cache_control_and_uploads_only_new_objects() {
     let s = Scratch::new("sqlite-s3");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
 
@@ -652,22 +739,14 @@ fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
     };
     let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
 
-    let objects = |plan: &Plan| -> BTreeSet<Key> {
+    let referred = |plan: &Plan| -> BTreeSet<Key> {
         let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
         publication.objects.into_iter().map(|o| o.key).collect()
     };
     let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
-    let (pointer, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &v1,
-        Layout::Sqlite,
-        Check::Pointer,
-        2,
-    )
-    .unwrap();
-    assert_eq!((report.uploaded, report.present), (objects(&v1).len(), 0));
+    let (pointer, report) =
+        publish_with(&objects, &s3, "jp/canonical", &v1, Layout::Sqlite, 2).unwrap();
+    assert_eq!((report.uploaded, report.present), (referred(&v1).len(), 0));
     assert!(pointer.sqlite.is_some() && pointer.paths.is_some());
 
     let sqlite_key = Key {
@@ -683,22 +762,13 @@ fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
     );
     assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
 
-    // A second version asks only about the objects the first did not have.
+    // A second version uploads only the objects the first did not have.
     server.state.heads.store(0, Ordering::SeqCst);
     let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
     let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
-    let (_, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &v2,
-        Layout::Sqlite,
-        Check::Pointer,
-        2,
-    )
-    .unwrap();
-    let all = objects(&v2);
-    let new = all.difference(&objects(&v1)).count();
+    let (_, report) = publish_with(&objects, &s3, "jp/canonical", &v2, Layout::Sqlite, 2).unwrap();
+    let all = referred(&v2);
+    let new = all.difference(&referred(&v1)).count();
     assert_eq!((report.uploaded, report.present), (new, all.len() - new));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), new);
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }

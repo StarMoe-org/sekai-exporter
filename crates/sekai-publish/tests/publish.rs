@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
@@ -136,9 +136,25 @@ fn an_index_publication_is_reproducible() {
     let bindings = [asset(&store, "a/one", &[("image", b"1")])];
     let plan = plan("v1", &bindings, &store, 2).unwrap();
     let root = s.0.join("published");
-    let first = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
+    let first = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     let bytes = std::fs::read(root.join("jp/canonical/current.json")).unwrap();
-    let second = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
+    let second = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     assert_eq!(first, second);
     assert_eq!(
         bytes,
@@ -154,19 +170,61 @@ fn a_missing_object_stops_the_pointer() {
     let store = s.store();
     let root = s.0.join("published");
     let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
-    publish(&store, &root, "jp/t", &good, Layout::Index, 2).unwrap();
+    publish(
+        &Objects::local(&store),
+        &root,
+        "jp/t",
+        &good,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     let before = std::fs::read(root.join("jp/t/current.json")).unwrap();
 
     let binding = asset(&store, "b", &[("image", b"gone")]);
     let plan = plan("v2", &[binding], &store, 2).unwrap();
     let member = plan.files.iter().find(|f| f.role == "image").unwrap();
     std::fs::remove_file(store.path(&member.key)).unwrap();
-    let error = publish(&store, &root, "jp/t", &plan, Layout::Index, 2).unwrap_err();
+    let error = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/t",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap_err();
     assert_eq!(error.stage, "verify");
     assert_eq!(
         before,
         std::fs::read(root.join("jp/t/current.json")).unwrap()
     );
+}
+
+#[test]
+fn an_object_the_destination_holds_may_leave_the_store() {
+    let s = Scratch::new("held");
+    let store = s.store();
+    let root = s.0.join("published");
+    let plan = plan(
+        "v1",
+        &[asset(&store, "a", &[("image", b"evicted")])],
+        &store,
+        2,
+    )
+    .unwrap();
+    let member = plan.files.iter().find(|f| f.role == "image").unwrap();
+    std::fs::remove_file(store.path(&member.key)).unwrap();
+    let held = MemoryHoldings::default();
+    held.hold(&[(member.key.clone(), member.size)]).unwrap();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+
+    let pointer = publish(&objects, &root, "jp/t", &plan, Layout::Index, 2).unwrap();
+    assert_eq!(pointer.revision, plan.revision);
 }
 
 #[test]
@@ -343,7 +401,15 @@ fn sqlite_index_is_deterministic_and_valid() {
     };
     let sqlite = sqlite_of(&forward);
     assert_eq!(sqlite, sqlite_of(&backward));
-    let pointer = publish(&store, &root, "jp/canonical", &forward, Layout::Sqlite, 2).unwrap();
+    let pointer = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &forward,
+        Layout::Sqlite,
+        2,
+    )
+    .unwrap();
     assert_eq!(pointer.sqlite.as_deref(), Some(sqlite.as_str()));
 
     // SQLite itself checks the database, through the `sqlite3` module of Python.

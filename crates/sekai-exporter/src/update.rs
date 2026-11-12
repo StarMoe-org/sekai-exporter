@@ -9,7 +9,7 @@ use std::thread;
 
 use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_convert::tables::TableConverter;
 use sekai_format::identity::VersionIdentity;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
@@ -18,9 +18,9 @@ use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
-use sekai_publish::Plan;
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
+use crate::bucket::Bucket;
 use crate::budget;
 use crate::export::{
     BLOCK_CACHE_BYTES, Destination, IGNORED, converters, publish, report, write_ledger,
@@ -639,6 +639,29 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         return Ok(true);
     }
 
+    // A selection is not sent to the bucket, so it is checked against the local store alone.
+    let bucket = if selection {
+        None
+    } else {
+        Bucket::open(&config, options.secrets.as_deref())?
+    };
+    let held = catalog.holdings();
+    if options.verify
+        && let Some(bucket) = &bucket
+    {
+        let listed = bucket.holdings(monitor)?;
+        held.replace(&listed).map_err(|e| e.to_string())?;
+        println!("bucket holds {} objects", listed.len());
+    }
+    let objects = match &bucket {
+        Some(bucket) => Objects {
+            local: &store,
+            held: &held,
+            remote: bucket.remote(),
+        },
+        None => Objects::local(&store),
+    };
+
     let all = {
         let _span = monitor.span("manifest", "manifest", region_name);
         source.manifest(&identity).map_err(|e| e.to_string())?
@@ -684,7 +707,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Stream {
             converters: &converters,
             naming: &InBundle,
-            store: &store,
+            store: &objects,
             derivations: &derivations,
             indexes: &indexes,
             cache: &cache,
@@ -709,7 +732,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             &sekai_pipeline::tables::TableStage {
                 converters: &table_converters(),
                 read: &read,
-                store: &store,
+                store: &objects,
                 recorder: monitor,
                 threads: options.threads,
             },
@@ -727,7 +750,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             output: &options.output,
             tree: options.tree.as_deref(),
         },
-        &store,
+        &objects,
         options.threads,
         monitor,
     )?;
@@ -740,14 +763,20 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             output: &options.output,
             tree: options.storage.as_deref(),
         },
-        &store,
+        &objects,
         &derivations,
         options.threads,
         monitor,
     )?;
-    if !selection {
+    if let Some(bucket) = &bucket {
         let storage = storage.as_ref().map(|plan| (storage_target.as_str(), plan));
-        publish_bucket(&config, options, &store, (&target, &plan), storage, monitor)?;
+        bucket.publish(
+            &objects,
+            (&target, &plan),
+            storage,
+            options.threads,
+            monitor,
+        )?;
     }
 
     let record = || -> io::Result<()> {
@@ -794,14 +823,6 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     Ok(true)
 }
 
-/// The `publish.s3` section of the configuration, if there is one.
-fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
-    let config: serde_json::Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
-    Ok(config.get("publish").and_then(|p| p.get("s3")).cloned())
-}
-
-/// The value of the secret `name`: the environment variable of that name, or else the file of that
-/// name in `secrets`, without surrounding whitespace.
 /// The converters that build assets from game data tables.
 fn table_converters() -> Vec<Box<dyn TableConverter>> {
     let mut converters = episode_converters();
@@ -853,134 +874,6 @@ fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
 #[cfg(not(feature = "mysekai"))]
 fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
     Vec::new()
-}
-
-#[cfg(feature = "s3")]
-fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
-    if let Ok(value) = std::env::var(name) {
-        return Ok(value.trim().to_owned());
-    }
-    secrets
-        .and_then(|directory| std::fs::read_to_string(directory.join(name)).ok())
-        .map(|value| value.trim().to_owned())
-        .ok_or_else(|| format!("the secret {name} is not set").into())
-}
-
-/// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one, to
-/// the bucket that the `publish.s3` section of the configuration describes, with the secrets of
-/// `options`. The canonical view is published in the layout the section names, and the storage
-/// view with its path index alone. With `--verify`, what the bucket holds is learned from a
-/// listing of its whole store.
-#[cfg(feature = "s3")]
-fn publish_bucket(
-    config: &str,
-    options: &Options,
-    store: &LocalStore,
-    canonical: (&str, &Plan),
-    storage: Option<(&str, &Plan)>,
-    monitor: &Monitor,
-) -> Result<(), lexopt::Error> {
-    use sekai_publish::Layout;
-    use sekai_publish::s3::{self, Bucket, Check, Credentials, S3};
-
-    let secrets = options.secrets.as_deref();
-
-    let Some(section) = bucket_section(config)? else {
-        return Ok(());
-    };
-    let text = |value: Option<&serde_json::Value>, key: &str| {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| lexopt::Error::from(format!("publish.s3.{key} is not a string")))
-    };
-    let names = section.get("secrets");
-    let credentials = Credentials {
-        access_key_id: secret(
-            &text(
-                names.and_then(|n| n.get("access_key_id")),
-                "secrets.access_key_id",
-            )?,
-            secrets,
-        )?,
-        secret_access_key: secret(
-            &text(
-                names.and_then(|n| n.get("secret_access_key")),
-                "secrets.secret_access_key",
-            )?,
-            secrets,
-        )?,
-    };
-    let bucket = Bucket {
-        endpoint: text(section.get("endpoint"), "endpoint")?,
-        region: text(section.get("region"), "region")?,
-        prefix: match section.get("prefix") {
-            None => String::new(),
-            value => text(value, "prefix")?,
-        },
-        connections: match section.get("connections") {
-            None => 8,
-            Some(value) => value
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or("publish.s3.connections is not a number")?,
-        },
-    };
-    let layout = match section.get("layout") {
-        None => Layout::Sqlite,
-        Some(value) => match text(Some(value), "layout")?.as_str() {
-            "sqlite" => Layout::Sqlite,
-            "index" => Layout::Index,
-            other => {
-                return Err(
-                    format!("publish.s3.layout {other:?} must be \"sqlite\" or \"index\"").into(),
-                );
-            }
-        },
-    };
-    let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
-    let check = if options.verify {
-        Check::Listing
-    } else {
-        Check::Pointer
-    };
-    let views =
-        std::iter::once((canonical, layout)).chain(storage.map(|view| (view, Layout::Paths)));
-    for ((target, plan), layout) in views {
-        let _span = monitor.span("publish", "s3", target);
-        let (_, report) =
-            s3::publish_with(store, &s3, target, plan, layout, check, options.threads)
-                .map_err(|e| e.to_string())?;
-        println!(
-            "bucket {target} uploaded {} present {} pointer {}",
-            report.uploaded,
-            report.present,
-            if report.pointer_written {
-                "written"
-            } else {
-                "unchanged"
-            }
-        );
-    }
-    Ok(())
-}
-
-/// Refuses a configuration that names a bucket, which this build cannot publish to.
-#[cfg(not(feature = "s3"))]
-fn publish_bucket(
-    config: &str,
-    _options: &Options,
-    _store: &LocalStore,
-    _canonical: (&str, &Plan),
-    _storage: Option<(&str, &Plan)>,
-    _monitor: &Monitor,
-) -> Result<(), lexopt::Error> {
-    match bucket_section(config)? {
-        Some(_) => {
-            Err("the configuration names an S3 bucket, but this build has no s3 feature".into())
-        }
-        None => Ok(()),
-    }
 }
 
 #[cfg(test)]

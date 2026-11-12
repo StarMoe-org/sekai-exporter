@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::publication::{
     IndexEntry, IndexRoot, IndexShard, Listing, ListingReference, ShardReference, VERSION,
 };
@@ -27,11 +27,11 @@ fn put(store: &LocalStore, document: &impl Serialize) -> Result<Object, PublishE
     })
 }
 
-/// The first of `files` that is not in `store`; `key` gives the key and size of a file. The files
-/// are checked against listings of the store, a directory of it at a time on up to `threads`
-/// threads.
+/// The first of `files` that is not among `objects`; `key` gives the key and size of a file. The
+/// files are checked against listings of the objects, a store directory at a time on up to
+/// `threads` threads.
 pub(crate) fn missing<'a, T: Sync>(
-    store: &LocalStore,
+    objects: &Objects<'_>,
     files: &'a [T],
     threads: usize,
     key: impl Fn(&T) -> (&Key, u64) + Sync,
@@ -45,7 +45,7 @@ pub(crate) fn missing<'a, T: Sync>(
         if indices.is_empty() {
             return Ok(None);
         }
-        let sizes = store.sizes(*prefix)?;
+        let sizes = objects.sizes(*prefix)?;
         Ok(indices.iter().copied().find(|&index| {
             let (key, size) = key(&files[index]);
             sizes.get(key) != Some(&size)

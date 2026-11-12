@@ -15,6 +15,8 @@ sekai-convert.workspace = true
 sekai-encode.workspace = true
 sekai-catalog.workspace = true
 sekai-game.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 sha2 = "0.11.1"
 
 [dev-dependencies]

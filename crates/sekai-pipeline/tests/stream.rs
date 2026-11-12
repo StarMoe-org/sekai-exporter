@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::LocalStore;
+use sekai_catalog::{LocalStore, MemoryUnitRecords};
 use sekai_convert::image::Texture;
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex,
@@ -17,6 +17,7 @@ use sekai_convert::{
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
+use sekai_pipeline::reuse::Reuse;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
 use sekai_unity::{NoBlockCache, NoClasses};
@@ -52,6 +53,7 @@ fn entry(name: &str, dependencies: &[&str]) -> Entry {
     Entry {
         name: name.to_owned(),
         size: 1,
+        declared: String::new(),
         dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
     }
 }
@@ -165,11 +167,23 @@ fn streamed_in_segments(
 ) -> Streamed {
     let store = LocalStore::open(root).unwrap();
     let converters = converters();
-    let stream = Stream {
-        converters: &converters,
+    let derivations = MemoryDerivations::default();
+    let stream = stream_of(run, &store, &converters, &derivations);
+    stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, segment_done).unwrap()
+}
+
+/// The stream of `run`, which writes to `store` and records derivations in `derivations`.
+fn stream_of<'a>(
+    run: &Run<'a>,
+    store: &'a LocalStore,
+    converters: &'a [Box<dyn Converter>],
+    derivations: &'a MemoryDerivations,
+) -> Stream<'a> {
+    Stream {
+        converters,
         naming: run.naming,
-        store: &store,
-        derivations: &MemoryDerivations::default(),
+        store,
+        derivations,
         indexes: &NoBundleIndexes,
         cache: &NoBlockCache,
         classes: &NoClasses,
@@ -179,8 +193,107 @@ fn streamed_in_segments(
         segment: run.segment,
         ledger: None,
         limit: run.limit,
+    }
+}
+
+/// What an evaluation of `run` that takes the results `records` hold gives: the names of the
+/// entries it evaluated, how many units took a recorded result, and the result.
+fn streamed_reusing(
+    root: &Path,
+    run: &Run<'_>,
+    records: &MemoryUnitRecords,
+) -> (Vec<String>, usize, Streamed) {
+    let store = LocalStore::open(root).unwrap();
+    let converters = converters();
+    let derivations = MemoryDerivations::default();
+    let stream = stream_of(run, &store, &converters, &derivations);
+    let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
+    let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
+    let reused = reuse.reused();
+    let streamed = reuse.evaluate(run.inputs, &stream).unwrap();
+    (evaluated, reused, streamed)
+}
+
+/// `streamed` without the counts of derivations, which follow from what earlier runs recorded.
+fn content(streamed: &Streamed) -> Streamed {
+    let mut content = streamed.clone();
+    content.evaluation.converted = 0;
+    content.evaluation.reused = 0;
+    content
+}
+
+/// Two independent units: the data object refers to a material of `fixture_scene`, which its
+/// unit does not depend on, so that asset fails.
+fn declared_manifest(data: &str, scene: &str) -> Vec<Entry> {
+    let mut manifest = vec![entry("fixture_data", &[]), entry("fixture_scene", &[])];
+    manifest[0].declared = data.to_owned();
+    manifest[1].declared = scene.to_owned();
+    manifest
+}
+
+#[test]
+fn recorded_units_give_the_result_of_evaluating_them() {
+    let root = scratch("reuse");
+    let records = MemoryUnitRecords::default();
+    let run = |manifest| Run {
+        manifest,
+        ..Run::default()
     };
-    stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, segment_done).unwrap()
+    let whole = streamed(&root, &run(declared_manifest("d1", "s1")));
+
+    let (evaluated, reused, first) =
+        streamed_reusing(&root, &run(declared_manifest("d1", "s1")), &records);
+    assert_eq!(evaluated, ["fixture_data", "fixture_scene"]);
+    assert_eq!(reused, 0);
+    assert_eq!(content(&first), content(&whole));
+    assert_eq!(records.len(), 2);
+
+    let inputs = Fixtures::default();
+    let again = Run {
+        inputs: &inputs,
+        ..run(declared_manifest("d1", "s1"))
+    };
+    let (evaluated, reused, second) = streamed_reusing(&root, &again, &records);
+    assert!(evaluated.is_empty());
+    assert_eq!(reused, 2);
+    assert!(inputs.0.lock().unwrap().is_empty());
+    assert_eq!(content(&second), content(&whole));
+    assert_eq!(second.evaluation.converted, 0);
+
+    // A new hash of one bundle evaluates its unit alone.
+    let (evaluated, reused, third) =
+        streamed_reusing(&root, &run(declared_manifest("d2", "s1")), &records);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+    assert_eq!(content(&third), content(&whole));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_unit_without_declared_hashes_or_with_errors_is_not_recorded() {
+    let root = scratch("unrecorded");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: declared_manifest("", "s1"),
+        ..Run::default()
+    };
+    streamed_reusing(&root, &run, &records);
+    assert_eq!(records.len(), 1);
+
+    let mut manifest = declared_manifest("d1", "s1");
+    manifest[0].dependencies = vec!["absent".to_owned()];
+    manifest.push(entry("absent", &[]));
+    manifest[2].declared = "a1".to_owned();
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest,
+        ..Run::default()
+    };
+    let (_, _, streamed) = streamed_reusing(&root, &run, &records);
+    assert!(streamed.errors.iter().any(|e| e.name == "absent"));
+    // fixture_data and absent read the missing bundle; fixture_scene alone is recorded.
+    assert_eq!(records.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

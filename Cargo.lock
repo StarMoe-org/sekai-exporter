@@ -1411,6 +1411,8 @@ dependencies = [
  "sekai-format",
  "sekai-game",
  "sekai-unity",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

@@ -51,6 +51,7 @@ fn manifest() -> Vec<Entry> {
         .map(|name| Entry {
             name: (*name).to_owned(),
             size: 1,
+            declared: String::new(),
             dependencies: FIXTURES
                 .iter()
                 .filter(|other| *other != name)

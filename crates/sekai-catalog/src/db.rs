@@ -13,7 +13,7 @@ use redb::{
 };
 use sekai_format::AssetDocument;
 
-use crate::derivation::{BundleIndexes, Derivations, Derived};
+use crate::derivation::{BundleIndexes, Derivations, Derived, UnitRecords};
 use crate::holdings::Holdings;
 use crate::store::{Key, LocalStore, parse_hex};
 
@@ -31,6 +31,8 @@ const VERSIONS: TableDefinition<'_, (&str, &str), &str> = TableDefinition::new("
 const POINTERS: TableDefinition<'_, &str, &str> = TableDefinition::new("pointers");
 const PUBLICATIONS: TableDefinition<'_, (&str, &str), (&str, &str)> =
     TableDefinition::new("publications");
+/// The recorded result of each unit of an evaluation, by unit key.
+const UNITS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("units");
 /// The size of each object the bucket of the catalog holds, by object name.
 const OBJECTS: TableDefinition<'_, &str, u64> = TableDefinition::new("objects");
 
@@ -145,6 +147,7 @@ impl Catalog {
         tx.open_table(POINTERS).map_err(other)?;
         tx.open_table(PUBLICATIONS).map_err(other)?;
         tx.open_table(OBJECTS).map_err(other)?;
+        tx.open_table(UNITS).map_err(other)?;
         tx.commit().map_err(other)?;
         Ok(Self { db })
     }
@@ -325,6 +328,13 @@ impl Batch {
         Ok(())
     }
 
+    /// Records the result of the unit `key`.
+    pub fn put_unit(&mut self, key: &[u8; 32], result: &[u8]) -> io::Result<()> {
+        let mut table = self.0.open_table(UNITS).map_err(other)?;
+        table.insert(key, result).map_err(other)?;
+        Ok(())
+    }
+
     /// Stores the index of a bundle.
     pub fn put_bundle_index(&mut self, bundle: &[u8; 32], index: &[u8]) -> io::Result<()> {
         let mut table = self.0.open_table(BUNDLE_INDEXES).map_err(other)?;
@@ -445,6 +455,23 @@ impl CatalogBundleIndexes<'_> {
         batch.commit()?;
         pending.clear();
         Ok(())
+    }
+}
+
+impl UnitRecords for Catalog {
+    fn get(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(UNITS).map_err(other)?;
+        let value = table.get(key).map_err(other)?;
+        Ok(value.map(|v| v.value().to_vec()))
+    }
+
+    fn put(&self, results: &[([u8; 32], Vec<u8>)]) -> io::Result<()> {
+        let mut batch = self.write()?;
+        for (key, result) in results {
+            batch.put_unit(key, result)?;
+        }
+        batch.commit()
     }
 }
 

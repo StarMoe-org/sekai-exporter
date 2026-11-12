@@ -16,6 +16,7 @@ use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
+use sekai_pipeline::reuse::Reuse;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
@@ -469,24 +470,37 @@ fn in_opening_order(all: &[BundleEntry], manifest: &[Entry]) -> Vec<BundleEntry>
     entries
 }
 
-/// Where the dependencies of the bundles of a manifest come from.
-enum Dependencies<'a> {
-    /// The source lists them.
-    Listed,
-    /// They are read from the bundles themselves, and then the entries whose names start with one
-    /// of `only` are selected, with what they depend on.
-    Read { only: &'a [String] },
+/// What a run evaluates.
+enum Evaluating<'m> {
+    /// The units of a manifest that lists the dependencies of its bundles, taking the results
+    /// that earlier runs recorded.
+    Listed(Reuse<'m>),
+    /// A manifest without dependencies. They are read from the bundles themselves, and then the
+    /// entries whose names start with one of `only` are selected, with what they depend on.
+    Read {
+        manifest: Vec<Entry>,
+        only: &'m [String],
+    },
 }
 
-/// Fetches `entries` while `manifest` is evaluated, so the first segments convert while later
-/// bundles are still on their way. Returns the evaluation and how many bundles could not be
-/// fetched. Fails if the store, the records or the catalog do.
+impl Evaluating<'_> {
+    /// The entries whose bundles the evaluation needs.
+    fn entries(&self) -> &[Entry] {
+        match self {
+            Evaluating::Listed(reuse) => reuse.rest(),
+            Evaluating::Read { manifest, .. } => manifest,
+        }
+    }
+}
+
+/// Fetches `entries` while `evaluating` runs, so the first segments convert while later bundles
+/// are still on their way. Returns the evaluation and how many bundles could not be fetched.
+/// Fails if the store, the records or the catalog do.
 fn fetch_and_evaluate(
     fetcher: &Fetcher<'_>,
     entries: &[BundleEntry],
     concurrency: usize,
-    mut manifest: Vec<Entry>,
-    dependencies: Dependencies<'_>,
+    evaluating: Evaluating<'_>,
     stream: &Stream<'_>,
 ) -> Result<(Streamed, usize), String> {
     let arriving = Arriving::new(fetcher.inputs);
@@ -495,8 +509,9 @@ fn fetch_and_evaluate(
             let _ending = arriving.ending();
             fetcher.fetch_all(entries, concurrency, &arriving)
         });
-        let evaluate = || {
-            if let Dependencies::Read { only } = dependencies {
+        let evaluate = || match evaluating {
+            Evaluating::Listed(reuse) => reuse.evaluate(&arriving, stream),
+            Evaluating::Read { mut manifest, only } => {
                 let _span = stream.recorder.span("manifest", "dependencies", "");
                 let threads = stream.options.threads;
                 stream::with_dependencies(
@@ -506,9 +521,8 @@ fn fetch_and_evaluate(
                     stream.indexes,
                     threads,
                 )?;
-                manifest = select(manifest, only);
+                stream::evaluate(&select(manifest, only), &arriving, stream)
             }
-            stream::evaluate(&manifest, &arriving, stream)
         };
         let streamed = evaluate().map_err(|e| e.to_string());
         let failed = fetching
@@ -718,13 +732,51 @@ fn export_version(
         .map(|entry| Entry {
             name: entry.name.clone(),
             size: entry.size,
+            declared: entry.declared.clone(),
             dependencies: entry.dependencies.clone(),
         })
         .collect();
     if listed {
         manifest = select(manifest, &options.only);
     }
-    let entries = in_opening_order(&all, &manifest);
+    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+    let indexes = catalog.bundle_indexes();
+    let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
+    let converters = converters(hca_key);
+    let stream = Stream {
+        converters: &converters,
+        naming: &InBundle,
+        store: &objects,
+        derivations: &derivations,
+        indexes: &indexes,
+        cache: &cache,
+        classes: &NoClasses,
+        recorder: monitor,
+        fusion: options
+            .storage
+            .is_some()
+            .then_some(&fusion as &dyn sekai_pipeline::Fusion),
+        options: budget::options(options.threads, options.memory, options.plain),
+        segment: Segment::default(),
+        ledger: Some(IGNORED),
+        limit: None,
+    };
+    let evaluating = if listed {
+        let reuse = if options.force {
+            Reuse::refresh(&manifest, &stream, catalog)
+        } else {
+            Reuse::new(&manifest, &stream, catalog)
+        };
+        let reuse = reuse.map_err(|e| e.to_string())?;
+        println!("units {} recorded {}", manifest.len(), reuse.reused());
+        Evaluating::Listed(reuse)
+    } else {
+        Evaluating::Read {
+            manifest,
+            only: &options.only,
+        }
+    };
+    let entries = in_opening_order(&all, evaluating.entries());
     let fetcher = Fetcher {
         source: source.as_ref(),
         identity: &identity,
@@ -734,42 +786,8 @@ fn export_version(
         region: region_name,
         monitor,
     };
-    let dependencies = if listed {
-        Dependencies::Listed
-    } else {
-        Dependencies::Read {
-            only: &options.only,
-        }
-    };
-    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let indexes = catalog.bundle_indexes();
-    let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
-    let converters = converters(hca_key);
-    let (mut streamed, failed) = fetch_and_evaluate(
-        &fetcher,
-        &entries,
-        concurrency,
-        manifest,
-        dependencies,
-        &Stream {
-            converters: &converters,
-            naming: &InBundle,
-            store: &objects,
-            derivations: &derivations,
-            indexes: &indexes,
-            cache: &cache,
-            classes: &NoClasses,
-            recorder: monitor,
-            fusion: options
-                .storage
-                .is_some()
-                .then_some(&fusion as &dyn sekai_pipeline::Fusion),
-            options: budget::options(options.threads, options.memory, options.plain),
-            segment: Segment::default(),
-            ledger: Some(IGNORED),
-            limit: None,
-        },
-    )?;
+    let (mut streamed, failed) =
+        fetch_and_evaluate(&fetcher, &entries, concurrency, evaluating, &stream)?;
     if failed > 0 || report(&streamed) > 0 {
         return Ok(Outcome::Incomplete);
     }
@@ -1013,6 +1031,7 @@ mod tests {
         .map(|entry| Entry {
             name: entry.name,
             size: entry.size,
+            declared: entry.declared,
             dependencies: entry.dependencies,
         })
         .collect();

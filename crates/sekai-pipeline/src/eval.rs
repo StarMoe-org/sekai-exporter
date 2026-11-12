@@ -128,6 +128,16 @@ impl Planned<'_> {
     }
 }
 
+/// The line of a fingerprint that names the video encoder, whose files lose information, when
+/// `converter` declares it, and otherwise nothing.
+pub(crate) fn lossy_encoder(converter: &dyn Converter) -> String {
+    if converter.encoders().video {
+        format!("encoder {} {}\n", mp4::NAME, mp4::VERSION)
+    } else {
+        String::new()
+    }
+}
+
 /// The fingerprint of a derivation: everything that determines the content of its asset.
 ///
 /// An encoder is part of it only when its files lose information, which is the video encoder,
@@ -146,9 +156,7 @@ pub(crate) fn fingerprint(
         converter.name(),
         converter.version(),
     );
-    if converter.encoders().video {
-        text.push_str(&format!("encoder {} {}\n", mp4::NAME, mp4::VERSION));
-    }
+    text.push_str(&lossy_encoder(converter));
     if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", hex(&identity)));
     }

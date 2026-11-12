@@ -28,6 +28,7 @@ use sekai_convert::{Converter, ObjectId};
 use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sekai_unity::{BlockCache, ByteSource, ClassLayouts};
+use serde::{Deserialize, Serialize};
 
 use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned, Produced, Runner};
 use crate::ledger::{BundleLedger, Tally};
@@ -46,6 +47,8 @@ pub struct Entry {
     pub name: String,
     /// The size of the bundle in bytes, as the manifest declares it.
     pub size: u64,
+    /// The hash the manifest declares for the bytes of the bundle, or empty when it declares none.
+    pub declared: String,
     /// The names of the bundles this one depends on.
     pub dependencies: Vec<String>,
 }
@@ -126,7 +129,7 @@ pub struct Stream<'a> {
 }
 
 /// A reference that leaves the window of its unit for a file of another bundle.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Outside {
     /// The bundle of the unit.
     pub unit: String,
@@ -408,14 +411,15 @@ impl Root<'_> {
 
 /// Everything gathered over the segments.
 #[derive(Default)]
-struct Gathered {
+pub(crate) struct Gathered {
     /// Each asset with the logical path and path ID of its root.
-    outputs: Vec<(Output, String, i64)>,
-    unnamed: Vec<(String, i64)>,
+    pub(crate) outputs: Vec<(Output, String, i64)>,
+    /// Each root left unnamed, as its unit, logical path and path ID.
+    pub(crate) unnamed: Vec<(String, String, i64)>,
     converted: usize,
     reused: usize,
-    errors: BTreeMap<(String, &'static str), BundleError>,
-    outside: BTreeSet<Outside>,
+    pub(crate) errors: BTreeMap<(String, &'static str), BundleError>,
+    pub(crate) outside: BTreeSet<Outside>,
     /// The account of each entry that units can still read from.
     tallies: BTreeMap<usize, Tally>,
     ledgers: Vec<BundleLedger>,
@@ -449,6 +453,17 @@ pub fn evaluate_in_segments(
     stream: &Stream<'_>,
     segment_done: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<Streamed> {
+    gather(manifest, inputs, stream, segment_done).map(finish)
+}
+
+/// Evaluates as [`evaluate_in_segments`] does, up to telling apart the assets of different
+/// bundles that are given the same name.
+pub(crate) fn gather(
+    manifest: &[Entry],
+    inputs: &dyn Inputs,
+    stream: &Stream<'_>,
+    segment_done: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<Gathered> {
     let units = Units::new(manifest);
     let runner = Runner::new(
         stream.store,
@@ -501,7 +516,7 @@ pub fn evaluate_in_segments(
                 segment_done()?;
             }
         }
-        Ok(finish(gathered))
+        Ok(gathered)
     })
 }
 
@@ -708,6 +723,7 @@ fn run_segment(
             let tally = stream
                 .ledger
                 .map(|ignored| (gathered.tallies.entry(unit).or_default(), ignored));
+            let mut unnamed = Vec::new();
             plan_unit(
                 &version,
                 bundle,
@@ -716,7 +732,13 @@ fn run_segment(
                 tally,
                 &mut roots,
                 &mut gathered.outside,
-                &mut gathered.unnamed,
+                &mut unnamed,
+            );
+            let name = &units.entries[unit].name;
+            gathered.unnamed.extend(
+                unnamed
+                    .into_iter()
+                    .map(|(logical, path_id)| (name.clone(), logical, path_id)),
             );
         }
     }
@@ -1002,10 +1024,10 @@ fn closure(
 }
 
 /// Orders the gathered assets by name and leaves out names that more than one asset received.
-fn finish(gathered: Gathered) -> Streamed {
+pub(crate) fn finish(gathered: Gathered) -> Streamed {
     let Gathered {
         mut outputs,
-        mut unnamed,
+        unnamed: roots,
         converted,
         reused,
         errors,
@@ -1013,6 +1035,10 @@ fn finish(gathered: Gathered) -> Streamed {
         tallies: _,
         mut ledgers,
     } = gathered;
+    let mut unnamed: Vec<(String, i64)> = roots
+        .into_iter()
+        .map(|(_, logical, path_id)| (logical, path_id))
+        .collect();
     outputs.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     let mut kept = Vec::with_capacity(outputs.len());
     for group in outputs.chunk_by(|a, b| a.0.name == b.0.name) {
@@ -1049,6 +1075,7 @@ mod tests {
         Entry {
             name: name.to_owned(),
             size,
+            declared: String::new(),
             dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
         }
     }

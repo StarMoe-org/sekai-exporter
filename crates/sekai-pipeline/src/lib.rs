@@ -12,6 +12,7 @@ pub mod metrics;
 pub mod naming;
 pub mod objects;
 mod reads;
+pub mod reuse;
 pub mod sched;
 pub mod stream;
 pub mod tables;

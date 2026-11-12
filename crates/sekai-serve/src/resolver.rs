@@ -56,7 +56,7 @@ pub struct Usage {
 }
 
 /// What a host reads for a lookup.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Read {
     /// The pointer of a view: the file at this path below the published root, such as
     /// `jp/storage/current.json`. The path is made of names, none of them the name of a device,
@@ -188,11 +188,11 @@ struct Pointed {
 }
 
 impl Pointed {
-    /// Whether the reading still holds at `now`: for `max_age` after it was made. That is so
-    /// for the pointer of a named version as well, which changes when the version is published
-    /// again under its name.
-    fn holds(&self, now: Duration, max_age: Duration) -> bool {
-        now.saturating_sub(self.read_at) < max_age
+    /// Whether the reading holds at `now` for a lookup that started at `started`: when it was
+    /// made since then, or less than `max_age` ago. That is so for the pointer of a named
+    /// version as well, which changes when the version is published again under its name.
+    fn holds(&self, started: Duration, now: Duration, max_age: Duration) -> bool {
+        self.read_at >= started || now.saturating_sub(self.read_at) < max_age
     }
 }
 
@@ -255,6 +255,7 @@ impl Resolver {
             resolver: self,
             request: *request,
             target,
+            started: now,
         };
         asked.pointer(now)
     }
@@ -305,6 +306,8 @@ struct Asked<'a> {
     resolver: &'a Resolver,
     request: Request<'a>,
     target: Target,
+    /// When the lookup started.
+    started: Duration,
 }
 
 impl<'a> Asked<'a> {
@@ -331,7 +334,7 @@ impl<'a> Asked<'a> {
     fn pointer(self, now: Duration) -> Lookup<'a> {
         let name = self.target.pointer();
         match self.resolver.reading(&name) {
-            Some(pointed) if pointed.holds(now, self.resolver.max_age) => {
+            Some(pointed) if pointed.holds(self.started, now, self.resolver.max_age) => {
                 self.pointed(pointed.root)
             }
             _ => self.read(Read::Pointer(name)),
@@ -360,10 +363,17 @@ impl<'a> Asked<'a> {
         let Some(at) = index.chunk_of(&self.target.path) else {
             return self.not_found();
         };
-        let Some(sha256) = parse_sha256(&index.chunks[at].sha256) else {
-            let reason = format!("chunk {at} is not named by a SHA-256");
-            return self.failed(Read::Root(ObjectId::root(root)), reason);
-        };
+        match parse_sha256(&index.chunks[at].sha256) {
+            Some(sha256) => self.chunk(sha256),
+            None => {
+                let reason = format!("chunk {at} is not named by a SHA-256");
+                self.failed(Read::Root(ObjectId::root(root)), reason)
+            }
+        }
+    }
+
+    /// Goes on from the chunk that holds the path: a decoded one, or by reading it.
+    fn chunk(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
             Some(Indexed::Chunk(chunk)) => self.found(sha256, &chunk),
             _ => self.read(Read::Chunk(ObjectId::chunk(sha256))),
@@ -391,6 +401,21 @@ impl<'a> Pending<'a> {
     /// What the host reads.
     pub fn read(&self) -> &Read {
         &self.read
+    }
+
+    /// Goes on without the read, at the time `now`, from what the resolver remembers by now.
+    ///
+    /// A host that lets one lookup make a read while others that need the same read wait calls
+    /// this on each of those once the read is made: the pointer, root or chunk it gave is then
+    /// remembered, and the lookup goes on from it. When it is not remembered, the lookup asks
+    /// for the read again.
+    pub fn resume(self, now: Duration) -> Lookup<'a> {
+        let Self { asked, read } = self;
+        match read {
+            Read::Pointer(_) => asked.pointer(now),
+            Read::Root(object) => asked.root(*object.sha256()),
+            Read::Chunk(object) => asked.chunk(*object.sha256()),
+        }
     }
 
     /// Goes on with what the read gave, at the time `now`.

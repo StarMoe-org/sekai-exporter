@@ -5,13 +5,14 @@
 //! `<output>/store`. It holds a bounded number of connections, each for a bounded time without
 //! progress, and the resolver it hosts remembers a bounded amount.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::io::{self, SeekFrom, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -27,11 +28,13 @@ use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedMutexGuard, Semaphore};
 use tokio::time::Sleep;
 use tokio_util::io::ReaderStream;
 
-use crate::{Body, Fetched, Limits, Lookup, Read, Request, Resolver, Response, Routes, Slice};
+use crate::{
+    Body, Fetched, Limits, Lookup, Pending, Read, Request, Resolver, Response, Routes, Slice,
+};
 
 /// The largest head of a request, in bytes: its request line and headers.
 const HEAD_BYTES: usize = 16 << 10;
@@ -101,6 +104,7 @@ impl Server {
         listener.set_nonblocking(true).map_err(bound)?;
         let host = Host {
             resolver: Resolver::new(routes, options.limits),
+            flights: Flights::default(),
             published: output.join("published"),
             store: output.join("store"),
             started: Instant::now(),
@@ -181,6 +185,8 @@ impl Server {
 #[derive(Debug)]
 struct Host {
     resolver: Resolver,
+    /// The reads under way.
+    flights: Flights,
     /// The directory of the pointers.
     published: PathBuf,
     /// The directory of the objects.
@@ -227,17 +233,27 @@ impl Host {
                     report(&fault);
                     return response;
                 }
-                Lookup::Read(pending) => {
-                    let read = self.read(pending.read()).await;
-                    let fetched = match &read {
-                        Ok(Some(bytes)) => Fetched::Found(bytes),
-                        Ok(None) => Fetched::Absent,
-                        Err(reason) => Fetched::Failed(reason),
-                    };
-                    pending.supply(fetched, self.started.elapsed())
-                }
+                Lookup::Read(pending) => self.make(pending).await,
             };
         }
+    }
+
+    /// Makes the read that `pending` asks for, or waits while another lookup makes it and goes
+    /// on from what that one gave.
+    async fn make<'a>(&'a self, pending: Pending<'a>) -> Lookup<'a> {
+        let Some(flight) = self.flights.board(pending.read()).await else {
+            return pending.resume(self.started.elapsed());
+        };
+        let read = self.read(pending.read()).await;
+        let fetched = match &read {
+            Ok(Some(bytes)) => Fetched::Found(bytes),
+            Ok(None) => Fetched::Absent,
+            Err(reason) => Fetched::Failed(reason),
+        };
+        let lookup = pending.supply(fetched, self.started.elapsed());
+        // The resolver remembers what the read gave, so the lookups that waited go on from it.
+        drop(flight);
+        lookup
     }
 
     /// The bytes that `read` names, none when nothing is stored under the name, or why they
@@ -273,6 +289,65 @@ impl Host {
         file.seek(SeekFrom::Start(slice.start)).await?;
         let stream = ReaderStream::with_capacity(file.take(slice.length), READ_SIZE);
         Ok(StreamBody::new(stream.map_ok(Frame::data)).boxed())
+    }
+}
+
+/// The reads that lookups make at the moment, so that lookups which need the same read at the
+/// same time make it once: a pointer, root or chunk is read and decoded once however many
+/// requests ask for it while it is not remembered.
+#[derive(Debug, Default)]
+struct Flights(Mutex<Gates>);
+
+/// For each read under way, the gate that its lookup holds until it is done.
+type Gates = HashMap<Read, Arc<tokio::sync::Mutex<()>>>;
+
+/// A read that one lookup makes while the others that need it wait.
+struct Flight<'a> {
+    flights: &'a Flights,
+    read: Read,
+    /// Held until the read is made and what it gave is remembered.
+    _making: OwnedMutexGuard<()>,
+}
+
+impl Flights {
+    /// The flight of `read` when no other lookup makes it; otherwise none, once the lookup that
+    /// makes it is done.
+    async fn board(&self, read: &Read) -> Option<Flight<'_>> {
+        let gate = {
+            let mut gates = self.gates();
+            match gates.get(read) {
+                Some(gate) => Arc::clone(gate),
+                None => return Some(self.open(&mut gates, read)),
+            }
+        };
+        drop(gate.lock().await);
+        None
+    }
+
+    /// The flight of `read`, which no lookup makes, with its gate added to `gates`.
+    fn open(&self, gates: &mut Gates, read: &Read) -> Flight<'_> {
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        let making = Arc::clone(&gate)
+            .try_lock_owned()
+            .expect("a new gate is open");
+        gates.insert(read.clone(), gate);
+        Flight {
+            flights: self,
+            read: read.clone(),
+            _making: making,
+        }
+    }
+
+    /// The gates. They are only ever changed by one insertion or removal at a time, so a panic
+    /// elsewhere leaves them whole.
+    fn gates(&self) -> MutexGuard<'_, Gates> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for Flight<'_> {
+    fn drop(&mut self) {
+        self.flights.gates().remove(&self.read);
     }
 }
 

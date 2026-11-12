@@ -132,6 +132,13 @@ The command is built with the `serve` feature, which `full` includes. `<output>`
 
 The server writes one line to its standard error stream for each request it answers with `500`, with the pointer or the object and what is wrong with it. When the stream takes no line, as a pipe does whose reader is gone, the lines are lost and the requests are answered as before.
 
+The `Dockerfile` at the root of the repository builds an image that holds the command built with the `serve` feature only. Each commit on `main` is published as `ghcr.io/starmoe-org/sekai-exporter`, tagged `main` and with the first 12 characters of the commit hash. The image runs as an unprivileged user and only needs to read the output:
+
+```bash
+docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/routes.json:ro \
+    ghcr.io/starmoe-org/sekai-exporter:main serve /data --routes /routes.json --listen 0.0.0.0:8080
+```
+
 ## Other hosts
 
 The core is a `Resolver`: the routes, the checks, what is remembered, and the responses. A host starts a lookup for each request (`Resolver::lookup`) with the time of its own clock, and makes the reads the lookup asks for, at most three: the pointer of a view, the root of its path index and a chunk, each with the most bytes it may give. The lookup ends with a response: a status, headers, and either no body, a short text, or a byte range of an object with the size the object must have. A host supplies the reads and the clock and writes the response, so every host checks, remembers and answers alike. The server of `sekai-exporter serve` is one host, `sekai_serve::server` behind the `server` feature of the crate, which another program can run as well. An edge worker in front of a bucket reads from the bucket and caches objects by their hash, so every path of every view that names one object shares one cached copy.

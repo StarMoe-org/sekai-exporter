@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
+use sekai_catalog::db::{BundleRow, Catalog, CostRow, IndexCache, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
 use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_convert::tables::TableConverter;
@@ -844,7 +844,8 @@ fn export_version(
         identify(&fetcher, &all, &mut manifest, concurrency)?;
     }
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let indexes = catalog.bundle_indexes();
+    let indexes =
+        IndexCache::open(&options.output.join("indexes.redb")).map_err(|e| e.to_string())?;
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
     let converters = converters(hca_key);
     let stream = Stream {

@@ -2,7 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects};
+use sekai_catalog::{
+    Holdings, Key, LocalStore, MemoryHoldings, MemoryStore, NoRemote, Objects, Store,
+};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
@@ -442,4 +444,32 @@ fn sqlite_index_is_deterministic_and_valid() {
         "sqlite3 integrity check failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn a_plan_reads_the_documents_that_only_the_destination_holds() {
+    let s = Scratch::new("read-back");
+    let earlier = LocalStore::open(s.0.join("earlier")).unwrap();
+    let bindings = [
+        asset(&earlier, "a", &[("image", b"1")]),
+        failed(&earlier, "b"),
+    ];
+    let remote = MemoryStore::default();
+    let held = MemoryHoldings::default();
+    for Binding { document, .. } in &bindings {
+        let bytes = earlier.read(document).unwrap();
+        remote.put(&bytes, &document.extension).unwrap();
+        held.hold(&[(document.clone(), bytes.len() as u64)])
+            .unwrap();
+    }
+    let local = s.store();
+    let objects = Objects {
+        local: &local,
+        held: &held,
+        remote: &remote,
+    };
+
+    let read_back = plan("v1", &bindings, &objects, 2).unwrap();
+    assert_eq!(read_back, plan("v1", &bindings, &earlier, 2).unwrap());
+    assert!(bindings.iter().all(|b| local.contains(&b.document)));
 }

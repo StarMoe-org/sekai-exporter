@@ -1317,6 +1317,7 @@ name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
  "cpu-time",
+ "flate2",
  "lexopt",
  "mimalloc",
  "sekai-catalog",

@@ -198,9 +198,13 @@ impl S3 {
         Ok(fetched.is_some())
     }
 
-    /// The bytes of the state file `file` of the bucket, or `None` when it keeps none.
-    pub fn read_state(&self, file: &str) -> Result<Option<Vec<u8>>, PublishError> {
-        self.get(&self.state(file))
+    /// What `read` makes of the state file `file` of the bucket, or `None` when it keeps none.
+    pub fn read_state<T>(
+        &self,
+        file: &str,
+        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+    ) -> Result<Option<T>, PublishError> {
+        self.get_with(&self.state(file), read)
             .map_err(|e| PublishError::new("state", e))
     }
 

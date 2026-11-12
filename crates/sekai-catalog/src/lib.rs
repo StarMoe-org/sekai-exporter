@@ -8,6 +8,7 @@
 pub mod db;
 pub mod derivation;
 pub mod holdings;
+pub mod pack;
 pub mod store;
 
 pub use derivation::{

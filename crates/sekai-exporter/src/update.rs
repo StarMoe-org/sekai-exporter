@@ -835,6 +835,9 @@ fn export_version(
         },
         None => Objects::local(&store),
     };
+    if let Some(bucket) = bucket {
+        bucket.pull_documents(region_name, &store, monitor)?;
+    }
 
     let all = {
         let _span = monitor.span("manifest", "manifest", region_name);
@@ -958,6 +961,7 @@ fn export_version(
             options.threads,
             monitor,
         )?;
+        bucket.push_documents(region_name, &plan, &objects, monitor)?;
     }
 
     let record = || -> io::Result<()> {

@@ -3,9 +3,14 @@
 //! between runs.
 
 use std::collections::BTreeMap;
+#[cfg(feature = "s3")]
+use std::io::{BufReader, Read};
 use std::path::Path;
 
-use sekai_catalog::{Key, Objects, Remote};
+#[cfg(feature = "s3")]
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
+
+use sekai_catalog::{Key, Objects, Remote, Store};
 use sekai_format::identity::VersionIdentity;
 #[cfg(feature = "s3")]
 use sekai_pipeline::metrics::Recorder;
@@ -21,6 +26,13 @@ const CATALOG: &str = "catalog.redb";
 #[cfg(feature = "s3")]
 fn version_file(region: &str) -> String {
     format!("versions/{region}.json")
+}
+
+/// The state file of the bucket that holds the asset documents of the last publication of
+/// `region`, as a gzipped pack.
+#[cfg(feature = "s3")]
+fn documents_file(region: &str) -> String {
+    format!("documents/{region}.pack.gz")
 }
 
 /// The `publish.s3` section of the configuration, if there is one.
@@ -137,13 +149,8 @@ impl Bucket {
         &self,
         region: &str,
     ) -> Result<Option<VersionIdentity>, lexopt::Error> {
-        let bytes = self
-            .s3
-            .read_state(&version_file(region))
-            .map_err(|e| e.to_string())?;
-        let identity = bytes
-            .map(|bytes| serde_json::from_slice(&bytes))
-            .transpose();
+        let read = |body: &mut dyn Read| Ok(serde_json::from_reader(body)?);
+        let identity = self.s3.read_state(&version_file(region), read);
         Ok(identity.map_err(|e| format!("the last version of {region}: {e}"))?)
     }
 
@@ -158,6 +165,52 @@ impl Bucket {
         Ok(self
             .s3
             .write_state(&version_file(region), &bytes)
+            .map_err(|e| e.to_string())?)
+    }
+
+    /// Stores in `store` the asset documents of the last publication of `region` that the bucket
+    /// keeps, so that the next publication reads them from there and not one by one from the
+    /// bucket.
+    pub(crate) fn pull_documents(
+        &self,
+        region: &str,
+        store: &dyn Store,
+        monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        let file = documents_file(region);
+        let _span = monitor.span("state", "pull", &file);
+        let unpack = |body: &mut dyn Read| {
+            sekai_catalog::pack::read(&mut BufReader::new(GzDecoder::new(body)), store)
+        };
+        let unpacked = self.s3.read_state(&file, unpack);
+        match unpacked.map_err(|e| e.to_string())? {
+            Some(count) => println!("bucket documents {count}"),
+            None => println!("bucket keeps no documents of {region} yet"),
+        }
+        Ok(())
+    }
+
+    /// Writes the asset documents of `plan`, read from `store`, to the bucket for the next run
+    /// of `region`.
+    pub(crate) fn push_documents(
+        &self,
+        region: &str,
+        plan: &Plan,
+        store: &dyn Store,
+        monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        let file = documents_file(region);
+        let _span = monitor.span("state", "push", &file);
+        let pack = || {
+            let mut packed = GzEncoder::new(Vec::new(), Compression::default());
+            let documents = plan.assets.iter().map(|asset| &asset.document);
+            sekai_catalog::pack::write(store, documents, &mut packed)?;
+            packed.finish()
+        };
+        let bytes = pack().map_err(|e| format!("{file}: {e}"))?;
+        Ok(self
+            .s3
+            .write_state(&file, &bytes)
             .map_err(|e| e.to_string())?)
     }
 
@@ -246,6 +299,25 @@ impl Bucket {
         &self,
         _region: &str,
         _identity: &VersionIdentity,
+    ) -> Result<(), lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn pull_documents(
+        &self,
+        _region: &str,
+        _store: &dyn Store,
+        _monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn push_documents(
+        &self,
+        _region: &str,
+        _plan: &Plan,
+        _store: &dyn Store,
+        _monitor: &Monitor,
     ) -> Result<(), lexopt::Error> {
         match *self {}
     }

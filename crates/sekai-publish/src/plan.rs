@@ -5,7 +5,7 @@ use std::fmt;
 use std::io;
 
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, Store};
 use sekai_format::AssetDocument;
 use sekai_format::publication::{AssetFailure, ListingEntry};
 use sha2::{Digest, Sha256};
@@ -115,7 +115,7 @@ fn member_path(name: &str, role: &str, extension: &str, members: usize) -> Strin
 }
 
 /// The asset document of `binding` and the size of its file.
-fn read(store: &LocalStore, binding: &Binding) -> Result<(AssetDocument, u64), PublishError> {
+fn read(store: &dyn Store, binding: &Binding) -> Result<(AssetDocument, u64), PublishError> {
     let bytes = store
         .read(&binding.document)
         .map_err(PublishError::wrap("plan"))?;
@@ -124,12 +124,12 @@ fn read(store: &LocalStore, binding: &Binding) -> Result<(AssetDocument, u64), P
     Ok((document, bytes.len() as u64))
 }
 
-/// Reads the asset documents of `bindings` on up to `threads` threads and lists what a
-/// publication of them contains.
+/// Reads the asset documents of `bindings` from `store` on up to `threads` threads and lists what
+/// a publication of them contains.
 pub fn plan(
     version: &str,
     bindings: &[Binding],
-    store: &LocalStore,
+    store: &dyn Store,
     threads: usize,
 ) -> Result<Plan, PublishError> {
     let mut files = Vec::new();

@@ -529,7 +529,7 @@ pub(crate) fn publish(
         })
         .collect();
     let publishing = monitor.span("publish", "index", "");
-    let plan = plan(version, &bindings, objects.local, threads).map_err(|e| e.to_string())?;
+    let plan = plan(version, &bindings, objects, threads).map_err(|e| e.to_string())?;
     let pointer = sekai_publish::publish(
         objects,
         &output.join("published"),

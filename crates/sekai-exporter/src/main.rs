@@ -125,15 +125,17 @@ commands:
       runs; one run per bucket goes at a time. The catalog records what the
       bucket holds as each upload is accepted, and a run uploads only what it
       does not record; --verify first replaces that record with a listing of the
-      bucket's store, so the bucket gets back what it lost. An object missing
-      from <output>/store is read back from the bucket. --only selects bundles
-      by name prefix, with their dependencies. A selection is neither recorded
-      as a version nor sent to a bucket; it needs an <output> without a complete
-      run and empty --tree and --storage folders. --check only looks up the
-      current version and prints whether it differs from the last one recorded:
-      in the bucket, which keeps it under state/ beside the catalog, or else in
-      <output>; it downloads and writes nothing, and cannot be combined with
-      --force, --verify, --only, --tree or --storage.
+      bucket's store, so the bucket gets back what it lost. The bucket also
+      keeps the asset documents of the last publication of each region under
+      state/, in one file that a run reads at its start; any other object
+      missing from <output>/store is read back from the bucket. --only selects
+      bundles by name prefix, with their dependencies. A selection is neither
+      recorded as a version nor sent to a bucket; it needs an <output> without a
+      complete run and empty --tree and --storage folders. --check only looks up
+      the current version and prints whether it differs from the last one
+      recorded: in the bucket, which keeps it under state/ beside the catalog,
+      or else in <output>; it downloads and writes nothing, and cannot be
+      combined with --force, --verify, --only, --tree or --storage.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

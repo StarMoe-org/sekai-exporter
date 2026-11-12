@@ -720,11 +720,18 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     assert_eq!(std::fs::read(&pulled).unwrap(), b"local catalog");
 
     // Small state files are read and written as bytes.
-    assert_eq!(s3.read_state("versions/jp.json").unwrap(), None);
+    let read_to_end = |body: &mut dyn std::io::Read| {
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).map(|_| bytes)
+    };
+    assert_eq!(
+        s3.read_state("versions/jp.json", read_to_end).unwrap(),
+        None
+    );
     s3.write_state("versions/jp.json", b"{}").unwrap();
     let name = "out/state/versions/jp.json";
     assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
-    let read = s3.read_state("versions/jp.json").unwrap();
+    let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
     assert_eq!(read.as_deref(), Some(&b"{}"[..]));
 }
 

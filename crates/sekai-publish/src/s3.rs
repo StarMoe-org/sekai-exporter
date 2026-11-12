@@ -130,11 +130,12 @@ impl S3 {
             return Err(invalid("there are no connections"));
         }
         let path = path.trim_end_matches('/');
+        // A listing of a large store can take minutes before the service sends anything.
         let agent = Agent::config_builder()
             .http_status_as_error(false)
             .timeout_connect(Some(Duration::from_secs(30)))
-            .timeout_recv_response(Some(Duration::from_secs(120)))
-            .timeout_per_read(Some(Duration::from_secs(60)))
+            .timeout_recv_response(Some(Duration::from_secs(300)))
+            .timeout_per_read(Some(Duration::from_secs(300)))
             .build()
             .into();
         Ok(Self {

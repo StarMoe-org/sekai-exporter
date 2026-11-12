@@ -107,7 +107,9 @@ What the resolver remembers does not grow with what requests name. When a limit 
 | Remembered | Limit |
 |---|---|
 | Pointers, whether they exist or not | 1024 |
-| Decoded roots and chunks of path indexes | 256 MiB of estimated memory, set by `--cache` |
+| Decoded roots and chunks of path indexes | 512 MiB, set by `--cache` |
+
+A decoded path index takes 72 bytes and the length of its path for each file, so a view of a million files whose paths are 60 bytes long takes about 126 MiB. A cache that holds the indexes of the views that are asked for answers every lookup without a read; a smaller one reads the chunks it dropped again.
 
 The server of `sekai-exporter serve` also limits what clients hold:
 
@@ -126,7 +128,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `512M`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it. A client may close its sending side of a connection once its request is sent, and is answered all the same.
+The command is built with the `serve` feature, which `full` includes. `<output>` is the output directory of `export` or `update`: pointers are read from `<output>/published`, and objects from `<output>/store`. The server only reads the directory, and does not start when it does not exist. `--listen` is `127.0.0.1:8080` by default, and `--threads`, the number of threads that answer requests, is the number of logical CPUs by default. `--connections` and `--cache` set the [limits](#limits); `--cache` takes a number of bytes such as `1G`. The resolver serves HTTP/1.1; TLS and HTTP/2 belong to a reverse proxy or CDN in front of it. A client may close its sending side of a connection once its request is sent, and is answered all the same.
 
 The server writes one line to its standard error stream for each request it answers with `500`, with the pointer or the object and what is wrong with it. When the stream takes no line, as a pipe does whose reader is gone, the lines are lost and the requests are answered as before.
 

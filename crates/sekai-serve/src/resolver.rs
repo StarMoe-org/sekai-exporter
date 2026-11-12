@@ -37,11 +37,11 @@ pub struct Limits {
 }
 
 impl Default for Limits {
-    /// 1024 pointers and 256 MiB of path indexes.
+    /// 1024 pointers and 512 MiB of path indexes.
     fn default() -> Self {
         Self {
             pointers: 1024,
-            index_bytes: 256 << 20,
+            index_bytes: 512 << 20,
         }
     }
 }

@@ -107,7 +107,9 @@
 | 记住的内容 | 限制 |
 |---|---|
 | 指针，无论是否存在 | 1024 个 |
-| 解码后的路径索引根与分块 | 估算内存 256 MiB，由 `--cache` 设置 |
+| 解码后的路径索引根与分块 | 512 MiB，由 `--cache` 设置 |
+
+解码后的路径索引每个文件占 72 字节加上其路径的长度，因此一百万个文件、路径长 60 字节的视图约占 126 MiB。缓存能容纳所请求视图的索引时，每次查找都无需读取；缓存更小时，被丢弃的分块会重新读取。
 
 `sekai-exporter serve` 的服务还限制客户端占用的资源：
 
@@ -126,7 +128,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
+该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `1G`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
 
 服务每以 `500` 回答一个请求，就向标准错误流写一行，给出指针或对象及其问题所在。标准错误流无法写入时，例如读取端已经离开的管道，这些行被丢弃，请求照常得到应答。
 

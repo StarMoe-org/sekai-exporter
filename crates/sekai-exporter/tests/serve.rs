@@ -179,10 +179,7 @@ fn published_paths_are_served_with_their_bytes() {
         assert_eq!(reply.header("cache-control"), "public, max-age=60");
         let pinned = server.request("GET", &format!("/local@{version}/{}", encode(path)), &[]);
         assert!(pinned.is(200, bytes), "{path}: {}", pinned.status);
-        assert_eq!(
-            pinned.header("cache-control"),
-            "public, max-age=31536000, immutable"
-        );
+        assert_eq!(pinned.header("cache-control"), "public, max-age=60");
         let etag = reply.header("etag");
         let cached = server.request("GET", &url, &[("If-None-Match", etag)]);
         assert_eq!((cached.status, cached.body.len()), (304, 0), "{path}");

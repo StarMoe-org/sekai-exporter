@@ -2,13 +2,10 @@
 
 use std::fmt;
 
-use sekai_format::paths::PathFile;
+use sekai_format::paths::ChunkFile;
 use sekai_format::publication::is_name;
 
 use crate::routes::{Delivery, Routes, Target, is_header_value};
-
-/// How long a response for a named version may be cached: a year, the longest that caches keep.
-const PINNED_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 
 /// The methods the resolver answers.
 const ALLOW: &str = "GET, HEAD, OPTIONS";
@@ -151,20 +148,19 @@ impl Routes {
         &self,
         request: &Request<'_>,
         target: &Target,
-        file: Option<&PathFile>,
+        file: Option<ChunkFile<'_>>,
     ) -> Result<Response, String> {
         let Some(file) = file else {
             return Ok(self.not_found());
         };
-        let object = ObjectId::new(file.sha256, &file.extension)
+        let object = ObjectId::new(file.sha256, file.extension)
             .ok_or_else(|| format!("{:?} is not a file extension", file.extension))?;
-        if !is_header_value(&file.media_type) {
+        if !is_header_value(file.media_type) {
             return Err(format!("{:?} is not a media type", file.media_type));
         }
-        let cache_control = match target.version {
-            Some(_) => PINNED_CACHE_CONTROL.to_owned(),
-            None => format!("public, max-age={}", self.max_age),
-        };
+        // A named version is cached no longer than the current one: its name can be published
+        // again with other files, and the resolver answers with them within `max_age`.
+        let cache_control = format!("public, max-age={}", self.max_age);
         Ok(match &self.delivery {
             Delivery::Bytes => self.file(request, &target.path, file, object, cache_control),
             Delivery::Redirect(store_url) => {
@@ -217,7 +213,7 @@ impl Routes {
         &self,
         request: &Request<'_>,
         path: &str,
-        file: &PathFile,
+        file: ChunkFile<'_>,
         object: ObjectId,
         cache_control: String,
     ) -> Response {
@@ -247,7 +243,7 @@ impl Routes {
             }
         };
         headers.extend([
-            ("content-type", file.media_type.clone()),
+            ("content-type", file.media_type.to_owned()),
             ("content-length", length.to_string()),
             ("accept-ranges", "bytes".to_owned()),
             ("content-disposition", disposition(path)),

@@ -54,7 +54,7 @@
 |---|---|
 | `delivery` | `"bytes"`：响应携带文件。`"redirect"`：响应重定向到 `store_url` 下 store 中的对象 |
 | `store_url` | 使用 `"redirect"` 时 store 的 URL，对象位于 `<store_url>/<aa>/<sha256>.<extension>` |
-| `max_age` | 当前版本的响应可缓存的秒数。默认 60 |
+| `max_age` | 响应可缓存的秒数，当前版本与指定版本相同。默认 60 |
 | `cors` | 存在时，作为 `Access-Control-Allow-Origin` 的值 |
 
 路由文件若有其他键、有无效的模式，或某条路由重复给出或未给出区服或视图，解析器在启动时拒绝它。
@@ -72,7 +72,7 @@
 | `ETag` | `"<sha256>"`，文件的哈希 |
 | `Accept-Ranges` | `bytes` |
 | `Content-Disposition` | `inline`，以路径的最后一段为文件名；不是 ASCII 时另以 UTF-8 的 `filename*` 给出，因此保存下来的文件保留其名称 |
-| `Cache-Control` | 当前版本为 `public, max-age=<max_age>`，指定版本为 `public, max-age=31536000, immutable` |
+| `Cache-Control` | `public, max-age=<max_age>`，当前版本与指定版本相同 |
 
 单个字节范围 `bytes=<first>-<last>`、`bytes=<first>-` 或 `bytes=-<length>` 返回 `206`，附带 `Content-Range`。起点越过末尾的范围返回 `416`。请求多个范围，或 `If-Range` 不是文件的 `ETag` 时，返回整个文件。`If-None-Match` 列出文件的 `ETag` 或 `*` 时返回 `304`。
 
@@ -82,7 +82,7 @@
 
 视图的指针至多每 `max_age` 秒重新读取一次，因此新发布在这段时间内到达视图的每个路径，并且一次查找绝不会混用两个版本。不存在的指针也被记住同样长的时间，因此区服、视图或版本在首次发布后的 `max_age` 之内开始应答。
 
-指定版本的指针也按同样的间隔重新读取，因为一个版本可以用同一个名称再次发布：`export` 每次运行都发布 `local`，`update --force` 把它找到的版本再发布一遍，转换器在此期间有改动时文件也随之不同。解析器在 `max_age` 之内以新文件应答。已经持有该指定版本响应的客户端或缓存，按其 `Cache-Control` 保留它，最长一年：解析器前面的缓存需要清除，浏览器则保留已有的内容。
+指定版本的指针也按同样的间隔重新读取，因为一个版本可以用同一个名称再次发布：`export` 每次运行都发布 `local`，`update --force` 把它找到的版本再发布一遍，转换器在此期间有改动时文件也随之不同。解析器在 `max_age` 之内以新文件应答；指定版本的响应可缓存的时间不超过当前版本的响应，因此客户端或缓存在两倍 `max_age` 之内拿到新文件。没有改变的文件保留其 `ETag`，即文件的哈希，所以带 `If-None-Match` 再次请求得到不带正文的 `304`。
 
 ## 解析器检查什么
 
@@ -107,7 +107,9 @@
 | 记住的内容 | 限制 |
 |---|---|
 | 指针，无论是否存在 | 1024 个 |
-| 解码后的路径索引根与分块 | 估算内存 256 MiB，由 `--cache` 设置 |
+| 解码后的路径索引根与分块 | 512 MiB，由 `--cache` 设置 |
+
+解码后的路径索引每个文件占 72 字节加上其路径的长度，因此一百万个文件、路径长 60 字节的视图约占 126 MiB。缓存能容纳所请求视图的索引时，每次查找都无需读取；缓存更小时，被丢弃的分块会重新读取。
 
 `sekai-exporter serve` 的服务还限制客户端占用的资源：
 
@@ -126,7 +128,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
     [--connections <n>] [--cache <bytes>]
 ```
 
-该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `512M`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
+该命令由 `serve` feature 构建，`full` 包含它。`<output>` 是 `export` 或 `update` 的输出目录：指针从 `<output>/published` 读取，对象从 `<output>/store` 读取。服务只读取该目录，目录不存在时不启动。`--listen` 默认为 `127.0.0.1:8080`；`--threads` 是回答请求的线程数，默认为逻辑 CPU 数。`--connections` 与 `--cache` 设置上述[限制](#限制)；`--cache` 接受字节数，例如 `1G`。解析器提供 HTTP/1.1；TLS 与 HTTP/2 由其前面的反向代理或 CDN 负责。客户端可以在发完请求后关闭连接的发送方向，仍然得到应答。
 
 服务每以 `500` 回答一个请求，就向标准错误流写一行，给出指针或对象及其问题所在。标准错误流无法写入时，例如读取端已经离开的管道，这些行被丢弃，请求照常得到应答。
 

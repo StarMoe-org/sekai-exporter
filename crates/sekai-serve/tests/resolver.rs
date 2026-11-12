@@ -8,8 +8,8 @@ use std::time::Duration;
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
 use sekai_format::publication::Pointer;
 use sekai_serve::{
-    Body, Fault, Fetched, Limits, Lookup, ObjectId, Read, Request, Resolver, Response, Routes,
-    Slice,
+    Body, Fault, Fetched, Limits, Lookup, ObjectId, Pending, Read, Request, Resolver, Response,
+    Routes, Slice,
 };
 use sha2::{Digest, Sha256};
 
@@ -310,14 +310,11 @@ mod responses {
     }
 
     #[test]
-    fn a_named_version_is_cached_for_good() {
+    fn a_named_version_is_cached_as_long_as_the_current_one() {
         let (resolver, published) = (resolver(""), published());
         let pinned = answer(&resolver, &published, &get("/jp@6.1.0/storage/music/a.mp3"));
         assert_eq!(pinned.status, 200);
-        assert_eq!(
-            header(&pinned, "cache-control"),
-            Some("public, max-age=31536000, immutable")
-        );
+        assert_eq!(header(&pinned, "cache-control"), Some("public, max-age=60"));
     }
 
     /// The response to a request for `range` of the file of eleven bytes.
@@ -556,6 +553,88 @@ mod lookups {
         assert_eq!(published.reads(), [""; 0]);
         assert_eq!(status(&resolver, &published, "/jp/storage/d/2.png", 2), 200);
         assert_eq!(published.reads(), ["chunk"]);
+    }
+
+    /// A lookup of `path` that has made its reads up to the one of its chunk, which it waits
+    /// for, as it does while another lookup of the same chunk makes that read.
+    fn waiting_for_its_chunk<'a>(
+        resolver: &'a Resolver,
+        published: &Published,
+        path: &'a str,
+    ) -> Pending<'a> {
+        let mut lookup = resolver.lookup(&get(path), Duration::ZERO);
+        loop {
+            lookup = match lookup {
+                Lookup::Read(pending) if matches!(pending.read(), Read::Chunk(_)) => {
+                    return pending;
+                }
+                Lookup::Read(pending) => {
+                    let fetched = published.fetch(pending.read());
+                    pending.supply(fetched, Duration::ZERO)
+                }
+                other => panic!("{path}: {other:?}"),
+            };
+        }
+    }
+
+    #[test]
+    fn a_lookup_that_waited_goes_on_from_what_another_one_read() {
+        let (resolver, published) = (resolver(""), published());
+        let reading = waiting_for_its_chunk(&resolver, &published, "/jp/storage/b/1.png");
+        let waiting = waiting_for_its_chunk(&resolver, &published, "/jp/storage/b/2.png");
+        assert_eq!(published.reads(), ["pointer", "root"]);
+
+        let fetched = published.fetch(reading.read());
+        let Lookup::Done(read) = reading.supply(fetched, Duration::ZERO) else {
+            panic!("the lookup that read the chunk is not done");
+        };
+        let Lookup::Done(waited) = waiting.resume(Duration::ZERO) else {
+            panic!("the lookup that waited is not done");
+        };
+        assert_eq!((read.status, waited.status), (200, 200));
+        assert_eq!(published.reads(), ["chunk"]);
+    }
+
+    #[test]
+    fn a_lookup_takes_a_pointer_read_since_it_started_whatever_max_age() {
+        let resolver = resolver(r#", "max_age": 0"#);
+        let published = published();
+        let Lookup::Read(waiting) = resolver.lookup(&get("/jp/storage/b/2.png"), Duration::ZERO)
+        else {
+            panic!("the lookup did not ask for the pointer");
+        };
+        assert!(matches!(waiting.read(), Read::Pointer(_)));
+        assert_eq!(status(&resolver, &published, "/jp/storage/b/1.png", 1), 200);
+        published.reads();
+        let Lookup::Done(waited) = waiting.resume(Duration::from_secs(1)) else {
+            panic!("the lookup that waited is not done");
+        };
+        assert_eq!(waited.status, 200);
+        assert_eq!(published.reads(), [""; 0]);
+        // A lookup that starts later reads the pointer again.
+        assert_eq!(status(&resolver, &published, "/jp/storage/b/2.png", 2), 200);
+        assert_eq!(published.reads(), ["pointer"]);
+    }
+
+    #[test]
+    fn a_lookup_that_waited_for_what_is_not_remembered_reads_it_itself() {
+        let limits = Limits {
+            index_bytes: 0,
+            ..Limits::default()
+        };
+        let (resolver, published) = (Resolver::new(routes(""), limits), published());
+        let reading = waiting_for_its_chunk(&resolver, &published, "/jp/storage/b/1.png");
+        let waiting = waiting_for_its_chunk(&resolver, &published, "/jp/storage/b/2.png");
+        let chunk = waiting.read().clone();
+        let fetched = published.fetch(reading.read());
+        assert!(matches!(
+            reading.supply(fetched, Duration::ZERO),
+            Lookup::Done(_)
+        ));
+        let Lookup::Read(again) = waiting.resume(Duration::ZERO) else {
+            panic!("the lookup that waited did not ask for its chunk");
+        };
+        assert_eq!(again.read(), &chunk);
     }
 
     #[test]

@@ -137,7 +137,7 @@ commands:
       max_age of the routes file. Here --threads is the number of threads that
       answer requests. --connections is how many connections are held at once,
       256 by default, and --cache the memory that decoded path indexes may
-      take, such as 512M, 256M by default. The server only reads <output>.
+      take, such as 1G, 512M by default. The server only reads <output>.
 
   --threads sets how many conversions and encodings run at once; a video
   encoding counts as two. --memory sets the memory the process may use, such

@@ -579,7 +579,7 @@ fn live_keys_from_pointer(store: &LocalStore, previous: &Pointer) -> BTreeSet<Ke
         for file in chunk.files() {
             live.insert(Key {
                 sha256: file.sha256,
-                extension: file.extension.clone(),
+                extension: file.extension.to_owned(),
             });
         }
     }

@@ -261,6 +261,29 @@ fn large() -> Vec<u8> {
 }
 
 #[test]
+fn simultaneous_requests_into_an_index_not_read_yet_are_all_answered() {
+    let output = Output::new("simultaneous");
+    let files: Vec<(String, Vec<u8>)> = (0..64)
+        .map(|at| (format!("f/{at:02}.txt"), format!("file {at}").into_bytes()))
+        .collect();
+    let listed: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect();
+    output.publish("jp", "1", &listed);
+    let server = &Running::start(&output, options());
+    std::thread::scope(|scope| {
+        for (path, bytes) in &files {
+            scope.spawn(move || {
+                let reply = server.get(&format!("/jp/{path}"));
+                assert_eq!(reply.status, 200, "{path}");
+                assert!(reply.body == *bytes, "{path}");
+            });
+        }
+    });
+}
+
+#[test]
 fn published_files_are_served_with_their_bytes_and_headers() {
     let output = Output::new("served");
     let large = large();
@@ -297,10 +320,7 @@ fn published_files_are_served_with_their_bytes_and_headers() {
         let pinned = server.get(&url.replacen("/jp/", "/jp@1/", 1));
         assert_eq!(pinned.status, 200, "{path}");
         assert!(pinned.body == bytes, "{path}");
-        assert_eq!(
-            pinned.header("cache-control"),
-            "public, max-age=31536000, immutable"
-        );
+        assert_eq!(pinned.header("cache-control"), "public, max-age=0");
 
         let cached = server.request("GET", &url, &[("If-None-Match", &etag)]);
         assert_eq!((cached.status, cached.body.len()), (304, 0), "{path}");

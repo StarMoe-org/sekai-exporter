@@ -27,10 +27,22 @@ fn sample() -> Vec<PathFile> {
 fn a_chunk_decodes_to_its_files() {
     let files = sample();
     let chunk = Chunk::decode(&Chunk::encode(&files)).unwrap();
-    assert_eq!(chunk.files(), files.as_slice());
-    assert_eq!(chunk.get("sprite/面板/星.webp"), Some(&files[4]));
+    let decoded: Vec<PathFile> = chunk.files().map(PathFile::from).collect();
+    assert_eq!(decoded, files);
+    let found = chunk.get("sprite/面板/星.webp").map(PathFile::from);
+    assert_eq!(found.as_ref(), Some(&files[4]));
     assert_eq!(chunk.get("sprite/面板/星"), None);
-    assert_eq!(Chunk::decode(&Chunk::encode(&[])).unwrap().files(), &[]);
+    assert_eq!(Chunk::decode(&Chunk::encode(&[])).unwrap().files().len(), 0);
+}
+
+#[test]
+fn a_decoded_chunk_allocates_its_paths_and_a_row_for_each_file() {
+    let files = sample();
+    let chunk = Chunk::decode(&Chunk::encode(&files)).unwrap();
+    let paths: usize = files.iter().map(|f| f.path.len()).sum();
+    let allocated = chunk.allocated();
+    assert!(allocated >= paths + files.len() * 32, "{allocated} bytes");
+    assert!(allocated < paths + files.len() * 128, "{allocated} bytes");
 }
 
 #[test]
@@ -60,6 +72,10 @@ fn malformed_chunks_are_rejected() {
     let mut repeated = sample();
     repeated[1] = repeated[0].clone();
     cases.push(("repeat", Chunk::encode(&repeated)));
+    // The last byte is the media type of the last file, and the chunk has three.
+    let mut untyped = good.clone();
+    *untyped.last_mut().unwrap() = 3;
+    cases.push(("string index", untyped));
     for (name, bytes) in cases {
         assert!(Chunk::decode(&bytes).is_err(), "{name}");
     }

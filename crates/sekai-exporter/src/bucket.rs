@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use sekai_catalog::{Key, Objects, Remote};
+use sekai_format::identity::VersionIdentity;
 #[cfg(feature = "s3")]
 use sekai_pipeline::metrics::Recorder;
 use sekai_publish::Plan;
@@ -15,6 +16,12 @@ use crate::monitor::Monitor;
 /// The state file of the bucket that holds the catalog.
 #[cfg(feature = "s3")]
 const CATALOG: &str = "catalog.redb";
+
+/// The state file of the bucket that holds the last version of `region`.
+#[cfg(feature = "s3")]
+fn version_file(region: &str) -> String {
+    format!("versions/{region}.json")
+}
 
 /// The `publish.s3` section of the configuration, if there is one.
 fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
@@ -125,6 +132,35 @@ impl Bucket {
             .map_err(|e| e.to_string())?)
     }
 
+    /// The last version of `region` that a run recorded in the bucket.
+    pub(crate) fn last_version(
+        &self,
+        region: &str,
+    ) -> Result<Option<VersionIdentity>, lexopt::Error> {
+        let bytes = self
+            .s3
+            .read_state(&version_file(region))
+            .map_err(|e| e.to_string())?;
+        let identity = bytes
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose();
+        Ok(identity.map_err(|e| format!("the last version of {region}: {e}"))?)
+    }
+
+    /// Records `identity` in the bucket as the last version of `region`, for checks that do not
+    /// pull the catalog.
+    pub(crate) fn set_last_version(
+        &self,
+        region: &str,
+        identity: &VersionIdentity,
+    ) -> Result<(), lexopt::Error> {
+        let bytes = serde_json::to_vec(identity).map_err(|e| e.to_string())?;
+        Ok(self
+            .s3
+            .write_state(&version_file(region), &bytes)
+            .map_err(|e| e.to_string())?)
+    }
+
     /// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one,
     /// to the bucket, whose holdings are those of `objects`. The canonical view is published in
     /// the layout of the configuration, and the storage view with its path index alone.
@@ -195,6 +231,21 @@ impl Bucket {
         &self,
         _path: &Path,
         _monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn last_version(
+        &self,
+        _region: &str,
+    ) -> Result<Option<VersionIdentity>, lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn set_last_version(
+        &self,
+        _region: &str,
+        _identity: &VersionIdentity,
     ) -> Result<(), lexopt::Error> {
         match *self {}
     }

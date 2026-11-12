@@ -198,6 +198,25 @@ impl S3 {
         Ok(fetched.is_some())
     }
 
+    /// The bytes of the state file `file` of the bucket, or `None` when it keeps none.
+    pub fn read_state(&self, file: &str) -> Result<Option<Vec<u8>>, PublishError> {
+        self.get(&self.state(file))
+            .map_err(|e| PublishError::new("state", e))
+    }
+
+    /// Writes `bytes` to the bucket as its state file `file`.
+    pub fn write_state(&self, file: &str, bytes: &[u8]) -> Result<(), PublishError> {
+        let digest = Sha256::digest(bytes);
+        self.put(
+            &self.state(file),
+            &hex(&digest),
+            "application/octet-stream",
+            STATE_CACHE_CONTROL,
+            || Ok(bytes),
+        )
+        .map_err(|e| PublishError::new("state", e))
+    }
+
     /// Writes the file at `path` to the bucket as its state file `file`.
     pub fn store_state(&self, file: &str, path: &Path) -> Result<(), PublishError> {
         let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;

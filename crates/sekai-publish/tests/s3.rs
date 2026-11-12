@@ -718,6 +718,14 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     let pulled = s.0.join("pulled.redb");
     assert!(s3.fetch_state("catalog.redb", &pulled).unwrap());
     assert_eq!(std::fs::read(&pulled).unwrap(), b"local catalog");
+
+    // Small state files are read and written as bytes.
+    assert_eq!(s3.read_state("versions/jp.json").unwrap(), None);
+    s3.write_state("versions/jp.json", b"{}").unwrap();
+    let name = "out/state/versions/jp.json";
+    assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
+    let read = s3.read_state("versions/jp.json").unwrap();
+    assert_eq!(read.as_deref(), Some(&b"{}"[..]));
 }
 
 #[test]

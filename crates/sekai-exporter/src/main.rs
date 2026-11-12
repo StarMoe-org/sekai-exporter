@@ -130,8 +130,9 @@ commands:
       by name prefix, with their dependencies. A selection is neither recorded
       as a version nor sent to a bucket; it needs an <output> without a complete
       run and empty --tree and --storage folders. --check only looks up the
-      current version and prints whether it differs from the last one recorded
-      in <output>; it downloads and writes nothing, and cannot be combined with
+      current version and prints whether it differs from the last one recorded:
+      in the bucket, which keeps it under state/ beside the catalog, or else in
+      <output>; it downloads and writes nothing, and cannot be combined with
       --force, --verify, --only, --tree or --storage.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>

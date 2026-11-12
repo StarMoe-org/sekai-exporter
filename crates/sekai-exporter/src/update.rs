@@ -118,7 +118,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
     let options = parse(args)?;
     if options.check {
-        return check(&options).map_err(lexopt::Error::from);
+        return check(&options);
     }
     std::fs::create_dir_all(&options.output)
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
@@ -670,15 +670,19 @@ fn recorded_identity(output: &Path, region: &str) -> io::Result<Option<VersionId
     previous_identity(&Catalog::open_or_rebuild(&database, &store)?, region)
 }
 
-/// Prints whether the content of the current version differs from the last one that
-/// `options.output` recorded. Nothing is downloaded or written.
-fn check(options: &Options) -> Result<bool, String> {
+/// Prints whether the content of the current version differs from the last one recorded: in the
+/// bucket of the configuration when it names one, and otherwise in `options.output`. Nothing is
+/// downloaded or written.
+fn check(options: &Options) -> Result<bool, lexopt::Error> {
     let name = options.region.as_str();
-    let (_, region) = configuration(options)?;
+    let (config, region) = configuration(options)?;
+    let previous = match Bucket::open(&config, options.secrets.as_deref())? {
+        Some(bucket) => bucket.last_version(name)?,
+        None => recorded_identity(&options.output, name).map_err(|e| e.to_string())?,
+    };
     let tables = open_tables(&region)?;
     let secrets = Secrets::new(options.secrets.clone());
     let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
-    let previous = recorded_identity(&options.output, name).map_err(|e| e.to_string())?;
     let identity = current_identity(
         name,
         source.as_ref(),
@@ -696,26 +700,36 @@ fn check(options: &Options) -> Result<bool, String> {
 }
 
 /// What a run made of the current version.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 enum Outcome {
     /// Its content is that of the last version recorded, so nothing was done.
-    Unchanged,
+    Unchanged(VersionIdentity),
     /// Some bundles could not be read, so it was neither published nor recorded as a version.
     Incomplete,
     /// It was exported, published and recorded.
-    Updated,
+    Updated(VersionIdentity),
 }
 
 impl Outcome {
     /// Whether the run did all it set out to do.
-    fn succeeded(self) -> bool {
-        self != Self::Incomplete
+    fn succeeded(&self) -> bool {
+        self.version().is_some()
+    }
+
+    /// The version now recorded as the last one, unless the run is incomplete.
+    fn version(&self) -> Option<&VersionIdentity> {
+        match self {
+            Self::Unchanged(identity) | Self::Updated(identity) => Some(identity),
+            Self::Incomplete => None,
+        }
     }
 }
 
 /// Updates `options.region`. With a bucket, the run starts from the catalog the bucket keeps and
 /// writes it back once the run has changed it, also when the run fails, since what it recorded
-/// stays true. One run per bucket goes at a time. A selection runs on the local output alone.
+/// stays true. Then the last version of the region is written beside it, for checks that do not
+/// pull the catalog. One run per bucket goes at a time. A selection runs on the local output
+/// alone.
 fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let (config, region) = configuration(options)?;
     let bucket = if options.only.is_empty() {
@@ -724,17 +738,23 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         None
     };
     let Some(bucket) = bucket else {
-        return export_version(options, region, None, monitor).map(Outcome::succeeded);
+        return export_version(options, region, None, monitor).map(|run| run.succeeded());
     };
     let catalog = options.output.join("catalog.redb");
     bucket.pull_catalog(&catalog, monitor)?;
     let run = export_version(options, region, Some(&bucket), monitor);
-    if let Ok(Outcome::Unchanged) = run {
-        return Ok(true);
-    }
-    let pushed = bucket.push_catalog(&catalog, monitor);
+    let pushed = match run {
+        Ok(Outcome::Unchanged(_)) => Ok(()),
+        _ => bucket.push_catalog(&catalog, monitor),
+    };
     match (run, pushed) {
-        (Ok(outcome), pushed) => pushed.map(|()| outcome.succeeded()),
+        (Ok(outcome), Ok(())) => {
+            if let Some(identity) = outcome.version() {
+                bucket.set_last_version(&options.region, identity)?;
+            }
+            Ok(outcome.succeeded())
+        }
+        (Ok(_), Err(push)) => Err(push),
         (Err(failure), Ok(())) => Err(failure),
         (Err(failure), Err(push)) => {
             Err(format!("{failure}; the catalog was not written back: {push}").into())
@@ -796,7 +816,7 @@ fn export_version(
     let name = identity.name();
     if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");
-        return Ok(Outcome::Unchanged);
+        return Ok(Outcome::Unchanged(identity));
     }
 
     let held = catalog.holdings();
@@ -981,7 +1001,7 @@ fn export_version(
         evaluation.converted,
         evaluation.reused
     );
-    Ok(Outcome::Updated)
+    Ok(Outcome::Updated(identity))
 }
 
 /// The converters that build assets from game data tables.

@@ -9,10 +9,15 @@
 //! upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects
 //! bytes that do not match. The pointer is written last, and only when it changes. When the record
 //! cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
+//!
+//! The bucket also keeps the state of the runs that publish to it, as files under
+//! `<prefix>state/` that no publication refers to: [`S3::fetch_state`] and [`S3::store_state`].
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read};
+use std::path::Path;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -34,6 +39,8 @@ const ATTEMPTS: u32 = 3;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Cache policy for mutable target pointers (`published/<target>/current.json`).
 const POINTER_CACHE_CONTROL: &str = "no-cache";
+/// Cache policy for the state files under `state/`, which only the exporter reads.
+const STATE_CACHE_CONTROL: &str = "private, no-store";
 /// The store directories: the first two hexadecimal digits of the names.
 const SHARDS: usize = 256;
 
@@ -167,6 +174,43 @@ impl S3 {
         format!("{}published/{target}/current.json", self.bucket.prefix)
     }
 
+    /// The name of the state file `file` in the bucket, under `state/`, which no publication
+    /// refers to.
+    fn state(&self, file: &str) -> String {
+        format!("{}state/{file}", self.bucket.prefix)
+    }
+
+    /// Copies the state file `file` of the bucket to `path`, and returns whether the bucket keeps
+    /// one. The bytes go to a file beside `path` first, which replaces it once it is complete.
+    pub fn fetch_state(&self, file: &str, path: &Path) -> Result<bool, PublishError> {
+        let mut partial = path.as_os_str().to_owned();
+        partial.push(".part");
+        let fetched = self
+            .get_with(&self.state(file), |body| {
+                let mut out = File::create(&partial)?;
+                io::copy(body, &mut out)?;
+                out.sync_all()
+            })
+            .map_err(|e| PublishError::new("state", e))?;
+        if fetched.is_some() {
+            std::fs::rename(&partial, path).map_err(PublishError::wrap("state"))?;
+        }
+        Ok(fetched.is_some())
+    }
+
+    /// Writes the file at `path` to the bucket as its state file `file`.
+    pub fn store_state(&self, file: &str, path: &Path) -> Result<(), PublishError> {
+        let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;
+        self.put(
+            &self.state(file),
+            &hex(&digest),
+            "application/octet-stream",
+            STATE_CACHE_CONTROL,
+            || File::open(path).map_err(|e| format!("{}: {e}", path.display())),
+        )
+        .map_err(|e| PublishError::new("state", e))
+    }
+
     /// The signed headers of a request for `uri` with the canonical query string `query`.
     fn headers(
         &self,
@@ -243,6 +287,19 @@ impl S3 {
 
     /// The bytes of `name`, or `None` when the bucket does not hold it.
     fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        self.get_with(name, |body| {
+            let mut bytes = Vec::new();
+            body.read_to_end(&mut bytes)?;
+            Ok(bytes)
+        })
+    }
+
+    /// What `read` makes of the bytes of `name`, or `None` when the bucket does not hold it.
+    fn get_with<T>(
+        &self,
+        name: &str,
+        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+    ) -> Result<Option<T>, String> {
         let mut response = self.send("GET", name, "", EMPTY, |url, headers| {
             let mut request = self.agent.get(url);
             for (header, value) in headers {
@@ -251,9 +308,7 @@ impl S3 {
             request.call()
         })?;
         match response.status().as_u16() {
-            200 => response
-                .body_mut()
-                .read_to_vec()
+            200 => read(&mut response.body_mut().as_reader())
                 .map(Some)
                 .map_err(|e| format!("GET {name}: {e}")),
             404 => Ok(None),
@@ -336,7 +391,7 @@ impl S3 {
             }
             match body() {
                 Ok(body) => request.send(body),
-                Err(e) => Err(ureq::Error::Io(std::io::Error::other(e))),
+                Err(e) => Err(ureq::Error::Io(io::Error::other(e))),
             }
         })?;
         match response.status().as_u16() {
@@ -347,8 +402,8 @@ impl S3 {
 }
 
 impl Remote for S3 {
-    fn fetch(&self, key: &Key) -> std::io::Result<Option<Vec<u8>>> {
-        self.get(&self.object(key)).map_err(std::io::Error::other)
+    fn fetch(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
+        self.get(&self.object(key)).map_err(io::Error::other)
     }
 }
 
@@ -525,6 +580,21 @@ fn each(
     match failures.into_iter().min_by_key(|(i, _)| *i) {
         Some((_, e)) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// The SHA-256 of the bytes of the file at `path`.
+fn file_sha256(path: &Path) -> io::Result<[u8; 32]> {
+    let mut file = BufReader::with_capacity(1 << 20, File::open(path)?);
+    let mut hasher = Sha256::new();
+    loop {
+        let chunk = file.fill_buf()?;
+        if chunk.is_empty() {
+            return Ok(hasher.finalize().into());
+        }
+        hasher.update(chunk);
+        let read = chunk.len();
+        file.consume(read);
     }
 }
 

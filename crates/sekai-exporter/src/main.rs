@@ -114,11 +114,14 @@ commands:
       The canonical and the storage view are published under <output>/published
       with their path indexes; --tree and --storage also write them as path
       trees. A version that matches the last complete run is left alone unless
-      --force or --verify is given. The catalog records what the bucket holds as
-      each upload is accepted, and a run uploads only what it does not record;
-      --verify first replaces that record with a listing of the bucket's store,
-      so the bucket gets back what it lost. An object missing from <output>/store
-      is read back from the bucket. --only selects bundles by name prefix, with
+      --force or --verify is given. With a bucket, the run starts from the
+      catalog the bucket keeps under state/ and writes it back when it is done,
+      so <output> needs nothing from earlier runs; one run per bucket goes at a
+      time. The catalog records what the bucket holds as each upload is
+      accepted, and a run uploads only what it does not record; --verify first
+      replaces that record with a listing of the bucket's store, so the bucket
+      gets back what it lost. An object missing from <output>/store is read back
+      from the bucket. --only selects bundles by name prefix, with
       their dependencies. A selection is neither recorded as a version nor sent
       to a bucket; it needs an <output> without a complete run and empty --tree
       and --storage folders. --check only looks up the current version and

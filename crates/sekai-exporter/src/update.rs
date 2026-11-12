@@ -588,9 +588,62 @@ fn check(options: &Options) -> Result<bool, String> {
     Ok(true)
 }
 
+/// What a run made of the current version.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// Its content is that of the last version recorded, so nothing was done.
+    Unchanged,
+    /// Some bundles could not be read, so it was neither published nor recorded as a version.
+    Incomplete,
+    /// It was exported, published and recorded.
+    Updated,
+}
+
+impl Outcome {
+    /// Whether the run did all it set out to do.
+    fn succeeded(self) -> bool {
+        self != Self::Incomplete
+    }
+}
+
+/// Updates `options.region`. With a bucket, the run starts from the catalog the bucket keeps and
+/// writes it back once the run has changed it, also when the run fails, since what it recorded
+/// stays true. One run per bucket goes at a time. A selection runs on the local output alone.
 fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let region_name = options.region.as_str();
     let (config, region) = configuration(options)?;
+    let bucket = if options.only.is_empty() {
+        Bucket::open(&config, options.secrets.as_deref())?
+    } else {
+        None
+    };
+    let Some(bucket) = bucket else {
+        return export_version(options, region, None, monitor).map(Outcome::succeeded);
+    };
+    let catalog = options.output.join("catalog.redb");
+    bucket.pull_catalog(&catalog, monitor)?;
+    let run = export_version(options, region, Some(&bucket), monitor);
+    if let Ok(Outcome::Unchanged) = run {
+        return Ok(true);
+    }
+    let pushed = bucket.push_catalog(&catalog, monitor);
+    match (run, pushed) {
+        (Ok(outcome), pushed) => pushed.map(|()| outcome.succeeded()),
+        (Err(failure), Ok(())) => Err(failure),
+        (Err(failure), Err(push)) => {
+            Err(format!("{failure}; the catalog was not written back: {push}").into())
+        }
+    }
+}
+
+/// Exports the current version of `region` as `options` say, and publishes it to `bucket` when
+/// there is one.
+fn export_version(
+    options: &Options,
+    region: Region,
+    bucket: Option<&Bucket>,
+    monitor: &Monitor,
+) -> Result<Outcome, lexopt::Error> {
+    let region_name = options.region.as_str();
     // A directory lists no dependencies; they are read from the bundles once they are fetched.
     let listed = region.kind != Kind::Dir;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
@@ -636,24 +689,18 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let name = identity.name();
     if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");
-        return Ok(true);
+        return Ok(Outcome::Unchanged);
     }
 
-    // A selection is not sent to the bucket, so it is checked against the local store alone.
-    let bucket = if selection {
-        None
-    } else {
-        Bucket::open(&config, options.secrets.as_deref())?
-    };
     let held = catalog.holdings();
     if options.verify
-        && let Some(bucket) = &bucket
+        && let Some(bucket) = bucket
     {
         let listed = bucket.holdings(monitor)?;
         held.replace(&listed).map_err(|e| e.to_string())?;
         println!("bucket holds {} objects", listed.len());
     }
-    let objects = match &bucket {
+    let objects = match bucket {
         Some(bucket) => Objects {
             local: &store,
             held: &held,
@@ -724,7 +771,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         },
     )?;
     if failed > 0 || report(&streamed) > 0 {
-        return Ok(false);
+        return Ok(Outcome::Incomplete);
     }
     if let Some(tables) = &tables {
         let read = |name: &str| tables.read(name).map_err(io::Error::other);
@@ -768,7 +815,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         options.threads,
         monitor,
     )?;
-    if let Some(bucket) = &bucket {
+    if let Some(bucket) = bucket {
         let storage = storage.as_ref().map(|plan| (storage_target.as_str(), plan));
         bucket.publish(
             &objects,
@@ -820,7 +867,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation.converted,
         evaluation.reused
     );
-    Ok(true)
+    Ok(Outcome::Updated)
 }
 
 /// The converters that build assets from game data tables.

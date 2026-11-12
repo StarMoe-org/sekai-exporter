@@ -1,5 +1,6 @@
 //! The bucket that the `publish.s3` section of a configuration names: where `update` publishes the
-//! views of a region, and what the catalog records as held there.
+//! views of a region, what the catalog records as held there, and where the catalog itself is kept
+//! between runs.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -10,6 +11,10 @@ use sekai_pipeline::metrics::Recorder;
 use sekai_publish::Plan;
 
 use crate::monitor::Monitor;
+
+/// The state file of the bucket that holds the catalog.
+#[cfg(feature = "s3")]
+const CATALOG: &str = "catalog.redb";
 
 /// The `publish.s3` section of the configuration, if there is one.
 fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
@@ -97,6 +102,29 @@ impl Bucket {
         Ok(self.s3.holdings().map_err(|e| e.to_string())?)
     }
 
+    /// Replaces the catalog at `path` with the one the bucket keeps. A bucket that keeps none yet
+    /// leaves the catalog at `path`, if there is one, to start from.
+    pub(crate) fn pull_catalog(&self, path: &Path, monitor: &Monitor) -> Result<(), lexopt::Error> {
+        let _span = monitor.span("state", "pull", CATALOG);
+        let pulled = self
+            .s3
+            .fetch_state(CATALOG, path)
+            .map_err(|e| e.to_string())?;
+        if !pulled {
+            println!("bucket keeps no catalog yet");
+        }
+        Ok(())
+    }
+
+    /// Writes the catalog at `path` to the bucket, for the next run to pull.
+    pub(crate) fn push_catalog(&self, path: &Path, monitor: &Monitor) -> Result<(), lexopt::Error> {
+        let _span = monitor.span("state", "push", CATALOG);
+        Ok(self
+            .s3
+            .store_state(CATALOG, path)
+            .map_err(|e| e.to_string())?)
+    }
+
     /// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one,
     /// to the bucket, whose holdings are those of `objects`. The canonical view is published in
     /// the layout of the configuration, and the storage view with its path index alone.
@@ -152,6 +180,22 @@ impl Bucket {
     }
 
     pub(crate) fn holdings(&self, _monitor: &Monitor) -> Result<BTreeMap<Key, u64>, lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn pull_catalog(
+        &self,
+        _path: &Path,
+        _monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn push_catalog(
+        &self,
+        _path: &Path,
+        _monitor: &Monitor,
+    ) -> Result<(), lexopt::Error> {
         match *self {}
     }
 

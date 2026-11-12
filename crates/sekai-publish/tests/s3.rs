@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects};
+use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects, Remote};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
 use sekai_publish::s3::{Bucket, Credentials, S3, publish, publish_with};
@@ -679,6 +679,45 @@ fn an_object_the_bucket_holds_may_leave_the_store() {
     let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
     assert!(report.present >= plan.files.len());
     assert!(report.pointer_written);
+}
+
+#[test]
+fn an_object_larger_than_ten_megabytes_is_read_back() {
+    let server = Server::start();
+    let bytes: Vec<u8> = (0..11 << 20).map(|i: u32| (i % 251) as u8).collect();
+    let key = Key::of(&bytes, "bin");
+    server
+        .state
+        .objects
+        .lock()
+        .unwrap()
+        .insert(object_name(&key), bytes.clone());
+
+    let fetched = server.client(SECRET_KEY).fetch(&key).unwrap();
+    assert_eq!(fetched.as_deref(), Some(bytes.as_slice()));
+}
+
+#[test]
+fn the_bucket_keeps_state_files_outside_its_publications() {
+    let s = Scratch::new("state");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, b"local catalog").unwrap();
+
+    // A bucket that keeps no state leaves the local file alone.
+    assert!(!s3.fetch_state("catalog.redb", &local).unwrap());
+    assert_eq!(std::fs::read(&local).unwrap(), b"local catalog");
+
+    s3.store_state("catalog.redb", &local).unwrap();
+    let name = "out/state/catalog.redb";
+    assert_eq!(server.object(name).as_deref(), Some(&b"local catalog"[..]));
+    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    assert_eq!(cache_control, "private, no-store");
+
+    let pulled = s.0.join("pulled.redb");
+    assert!(s3.fetch_state("catalog.redb", &pulled).unwrap());
+    assert_eq!(std::fs::read(&pulled).unwrap(), b"local catalog");
 }
 
 #[test]

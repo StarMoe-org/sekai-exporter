@@ -70,7 +70,8 @@ pub struct File {
     pub role: String,
 }
 
-/// A published asset and its decoded asset document.
+/// A published asset, with what the publication itself needs of its asset document. The whole
+/// document stays in the store, where [`PublishedAsset::read`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedAsset {
     /// The name of the asset.
@@ -79,8 +80,20 @@ pub struct PublishedAsset {
     pub bundle: String,
     /// The asset document in the store.
     pub document: Key,
-    /// The parsed asset document.
-    pub metadata: AssetDocument,
+    /// The asset form.
+    pub form: String,
+    /// The version of the asset form.
+    pub form_version: u32,
+    /// Whether the asset was produced. One that was not is listed among the failures and has no
+    /// member files.
+    pub produced: bool,
+}
+
+impl PublishedAsset {
+    /// The asset document, read from `store`.
+    pub fn read(&self, store: &dyn Store) -> Result<AssetDocument, PublishError> {
+        read(store, &self.name, &self.document).map(|(document, _)| document)
+    }
 }
 
 /// Everything a publication contains.
@@ -114,14 +127,87 @@ fn member_path(name: &str, role: &str, extension: &str, members: usize) -> Strin
     }
 }
 
-/// The asset document of `binding` and the size of its file.
-fn read(store: &dyn Store, binding: &Binding) -> Result<(AssetDocument, u64), PublishError> {
-    let bytes = store
-        .read(&binding.document)
-        .map_err(PublishError::wrap("plan"))?;
+/// The asset document `key` of the asset `name`, read from `store`, and the size of its file.
+fn read(store: &dyn Store, name: &str, key: &Key) -> Result<(AssetDocument, u64), PublishError> {
+    let bytes = store.read(key).map_err(PublishError::wrap("plan"))?;
     let document = AssetDocument::from_bytes(&bytes)
-        .map_err(|e| PublishError::new("plan", format!("{}: {e}", binding.name)))?;
+        .map_err(|e| PublishError::new("plan", format!("{name}: {e}")))?;
     Ok((document, bytes.len() as u64))
+}
+
+/// What one asset adds to a publication: the asset, its files, and its listing entry or, for an
+/// asset that was not produced, its failure.
+struct Contribution {
+    asset: PublishedAsset,
+    files: Vec<File>,
+    outcome: Result<ListingEntry, AssetFailure>,
+}
+
+/// The contribution of `binding`, from its asset document in `store`. The document itself is not
+/// kept, so that a publication holds only what it lists.
+fn contribution(store: &dyn Store, binding: &Binding) -> Result<Contribution, PublishError> {
+    let (document, size) = read(store, &binding.name, &binding.document)?;
+    let mut files = vec![File {
+        path: format!("{}.asset.json", binding.name),
+        key: binding.document.clone(),
+        size,
+        media_type: "application/json".to_owned(),
+        asset: binding.name.clone(),
+        role: "document".to_owned(),
+    }];
+    let outcome = match &document.error {
+        Some(error) => Err(AssetFailure {
+            name: binding.name.clone(),
+            code: error.code.clone(),
+        }),
+        None => {
+            let members = member_files(&binding.name, &document)?;
+            let total = members.iter().map(|file| file.size).sum();
+            files.extend(members);
+            Ok(ListingEntry {
+                name: binding.name.clone(),
+                fingerprint: document.fingerprint.clone(),
+                size: total,
+            })
+        }
+    };
+    let bundle = document.sources.first().map(|source| source.bundle.clone());
+    let asset = PublishedAsset {
+        name: binding.name.clone(),
+        bundle: bundle.unwrap_or_default(),
+        document: binding.document.clone(),
+        form: document.form,
+        form_version: document.form_version,
+        produced: outcome.is_ok(),
+    };
+    Ok(Contribution {
+        asset,
+        files,
+        outcome,
+    })
+}
+
+/// The member files of the asset `name`, whose asset document is `document`.
+fn member_files(name: &str, document: &AssetDocument) -> Result<Vec<File>, PublishError> {
+    let members = &document.members;
+    members
+        .iter()
+        .map(|member| {
+            let sha256 = parse_hex(&member.sha256)
+                .ok_or_else(|| PublishError::new("plan", format!("{name}: bad member hash")))?;
+            Ok(File {
+                path: member_path(name, &member.role, &member.extension, members.len()),
+                key: Key {
+                    sha256,
+                    extension: member.extension.clone(),
+                },
+                size: member.size,
+                media_type: member.media_type.clone(),
+                asset: name.to_owned(),
+                role: member.role.clone(),
+            })
+        })
+        .collect()
 }
 
 /// Reads the asset documents of `bindings` from `store` on up to `threads` threads and lists what
@@ -136,72 +222,18 @@ pub fn plan(
     let mut assets = Vec::with_capacity(bindings.len());
     let mut listings: BTreeMap<String, Vec<ListingEntry>> = BTreeMap::new();
     let mut failures = Vec::new();
-    let documents = parallel::map(bindings, threads, |binding| read(store, binding));
-    for (binding, document) in bindings.iter().zip(documents) {
-        let (document, size) = document?;
-        files.push(File {
-            path: format!("{}.asset.json", binding.name),
-            key: binding.document.clone(),
-            size,
-            media_type: "application/json".to_owned(),
-            asset: binding.name.clone(),
-            role: "document".to_owned(),
-        });
-        let bundle = document
-            .sources
-            .first()
-            .map(|source| source.bundle.clone())
-            .unwrap_or_default();
-        if let Some(error) = &document.error {
-            failures.push(AssetFailure {
-                name: binding.name.clone(),
-                code: error.code.clone(),
-            });
-            assets.push(PublishedAsset {
-                name: binding.name.clone(),
-                bundle,
-                document: binding.document.clone(),
-                metadata: document,
-            });
-            continue;
+    let contributions = parallel::map(bindings, threads, |binding| contribution(store, binding));
+    for contribution in contributions {
+        let contribution = contribution?;
+        files.extend(contribution.files);
+        match contribution.outcome {
+            Ok(entry) => listings
+                .entry(contribution.asset.form.clone())
+                .or_default()
+                .push(entry),
+            Err(failure) => failures.push(failure),
         }
-        let mut total = 0;
-        for member in &document.members {
-            let sha256 = parse_hex(&member.sha256).ok_or_else(|| {
-                PublishError::new("plan", format!("{}: bad member hash", binding.name))
-            })?;
-            total += member.size;
-            files.push(File {
-                path: member_path(
-                    &binding.name,
-                    &member.role,
-                    &member.extension,
-                    document.members.len(),
-                ),
-                key: Key {
-                    sha256,
-                    extension: member.extension.clone(),
-                },
-                size: member.size,
-                media_type: member.media_type.clone(),
-                asset: binding.name.clone(),
-                role: member.role.clone(),
-            });
-        }
-        listings
-            .entry(document.form.clone())
-            .or_default()
-            .push(ListingEntry {
-                name: binding.name.clone(),
-                fingerprint: document.fingerprint.clone(),
-                size: total,
-            });
-        assets.push(PublishedAsset {
-            name: binding.name.clone(),
-            bundle,
-            document: binding.document.clone(),
-            metadata: document,
-        });
+        assets.push(contribution.asset);
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(pair) = files.windows(2).find(|pair| pair[0].path == pair[1].path) {

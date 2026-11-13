@@ -19,6 +19,7 @@ use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::reuse::Reuse;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
+use sekai_publish::Layout;
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
 use crate::bucket::Bucket;
@@ -933,6 +934,7 @@ fn export_version(
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
+            layout: bucket.map_or(Layout::Sqlite, Bucket::layout),
         },
         &objects,
         options.threads,
@@ -946,6 +948,7 @@ fn export_version(
         &Destination {
             output: &options.output,
             tree: options.storage.as_deref(),
+            layout: Layout::Paths,
         },
         &objects,
         &derivations,

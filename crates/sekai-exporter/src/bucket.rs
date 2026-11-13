@@ -14,7 +14,7 @@ use sekai_catalog::{Key, Objects, Remote, Store};
 use sekai_format::identity::VersionIdentity;
 #[cfg(feature = "s3")]
 use sekai_pipeline::metrics::Recorder;
-use sekai_publish::Plan;
+use sekai_publish::{Layout, Plan};
 
 use crate::monitor::Monitor;
 
@@ -60,7 +60,6 @@ impl Bucket {
         config: &str,
         secrets: Option<&Path>,
     ) -> Result<Option<Self>, lexopt::Error> {
-        use sekai_publish::Layout;
         use sekai_publish::s3::{self, Credentials, S3};
 
         let Some(section) = section(config)? else {
@@ -108,6 +107,11 @@ impl Bucket {
         };
         let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
         Ok(Some(Self { s3, layout }))
+    }
+
+    /// The layout of the canonical view in the bucket.
+    pub(crate) fn layout(&self) -> Layout {
+        self.layout
     }
 
     /// The bucket as the remote that objects are read back from.
@@ -225,8 +229,6 @@ impl Bucket {
         threads: usize,
         monitor: &Monitor,
     ) -> Result<(), lexopt::Error> {
-        use sekai_publish::Layout;
-
         let views = std::iter::once((canonical, self.layout))
             .chain(storage.map(|view| (view, Layout::Paths)));
         for ((target, plan), layout) in views {
@@ -262,6 +264,10 @@ impl Bucket {
             }
             None => Ok(None),
         }
+    }
+
+    pub(crate) fn layout(&self) -> Layout {
+        match *self {}
     }
 
     pub(crate) fn remote(&self) -> &dyn Remote {

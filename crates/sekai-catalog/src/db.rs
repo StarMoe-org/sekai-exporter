@@ -44,6 +44,18 @@ fn other(e: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::other(e)
 }
 
+/// The memory each database may use to cache its pages. The files grow to gigabytes, and a cache
+/// as large as one would keep most of it in the process; the pages read recently stay in the file
+/// cache of the system either way.
+const CACHE_BYTES: usize = 64 << 20;
+
+/// Opens the database at `path`, creating it when there is none, with a cache of [`CACHE_BYTES`].
+fn create(path: &Path) -> Result<Database, DatabaseError> {
+    redb::Builder::new()
+        .set_cache_size(CACHE_BYTES)
+        .create(path)
+}
+
 fn is_damaged(error: &DatabaseError) -> bool {
     match error {
         DatabaseError::UpgradeRequired(_) | DatabaseError::RepairAborted => true,
@@ -161,13 +173,13 @@ impl Catalog {
     /// Opens the catalog at `path`, creating it if it does not exist. A damaged file is renamed
     /// to `<path>.corrupt` and its derivations are rebuilt from `store`.
     pub fn open_or_rebuild(path: &Path, store: &LocalStore) -> io::Result<Self> {
-        match Database::create(path) {
+        match create(path) {
             Ok(db) => Self::init(db),
             Err(e) if is_damaged(&e) => {
                 let mut aside = path.as_os_str().to_owned();
                 aside.push(".corrupt");
                 std::fs::rename(path, aside)?;
-                let catalog = Self::init(Database::create(path).map_err(other)?)?;
+                let catalog = Self::init(create(path).map_err(other)?)?;
                 catalog.rebuild(store)?;
                 Ok(catalog)
             }
@@ -442,11 +454,11 @@ pub struct IndexCache {
 impl IndexCache {
     /// The cache in the file at `path`, created when there is none.
     pub fn open(path: &Path) -> io::Result<Self> {
-        let db = match Database::create(path) {
+        let db = match create(path) {
             Ok(db) => db,
             Err(e) if is_damaged(&e) => {
                 std::fs::remove_file(path)?;
-                Database::create(path).map_err(other)?
+                create(path).map_err(other)?
             }
             Err(e) => return Err(other(e)),
         };

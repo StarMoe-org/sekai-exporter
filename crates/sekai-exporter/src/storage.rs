@@ -13,7 +13,7 @@ use sekai_moesekai::storage_view::{self, Transform, ViewFile};
 use sekai_pipeline::isolate::{PANICKED, isolated};
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::parallel;
-use sekai_publish::{File, Layout, Plan, tree};
+use sekai_publish::{File, Plan, PublishedAsset, tree};
 use sha2::{Digest, Sha256};
 
 use crate::export::Destination;
@@ -120,19 +120,16 @@ fn make(
     Ok(Ok((key, bytes.len() as u64, true)))
 }
 
-/// The jobs of the view of the assets of `index`, the plan of the index publication, in path
-/// order. Of the assets that land on one path, the first by name keeps it; the count of the
-/// others is returned.
-fn jobs(index: &Plan) -> Result<(Vec<Job>, usize), String> {
-    let mut by_path: BTreeMap<String, Job> = BTreeMap::new();
-    let mut shadowed = 0;
-    for asset in &index.assets {
-        let document = &asset.metadata;
-        for file in storage_view::files(document) {
+/// The jobs of the files of `asset` in the view, from its asset document in `store`.
+fn asset_jobs(asset: &PublishedAsset, store: &dyn Store) -> Result<Vec<Job>, String> {
+    let document = asset.read(store).map_err(|e| e.to_string())?;
+    storage_view::files(&document)
+        .into_iter()
+        .map(|file| {
             let member = &document.members[file.member];
             let sha256 = parse_hex(&member.sha256)
                 .ok_or_else(|| format!("{}: bad member hash", asset.name))?;
-            let job = Job {
+            Ok(Job {
                 asset: asset.name.clone(),
                 source: Key {
                     sha256,
@@ -146,7 +143,21 @@ fn jobs(index: &Plan) -> Result<(Vec<Job>, usize), String> {
                     .to_owned(),
                 role: member.role.clone(),
                 file,
-            };
+            })
+        })
+        .collect()
+}
+
+/// The jobs of the view of the assets of `index`, the plan of the index publication, in path
+/// order, with the asset documents read from `store` on up to `threads` threads. Of the assets
+/// that land on one path, the first by name keeps it; the count of the others is returned.
+fn jobs(index: &Plan, store: &dyn Store, threads: usize) -> Result<(Vec<Job>, usize), String> {
+    let assets = &index.assets;
+    let made = parallel(assets.len(), threads, |i| asset_jobs(&assets[i], store));
+    let mut by_path: BTreeMap<String, Job> = BTreeMap::new();
+    let mut shadowed = 0;
+    for jobs in made {
+        for job in jobs? {
             match by_path.get_mut(&job.file.path) {
                 Some(kept) if kept.asset <= job.asset => shadowed += 1,
                 Some(kept) => {
@@ -163,8 +174,9 @@ fn jobs(index: &Plan) -> Result<(Vec<Job>, usize), String> {
 }
 
 /// Publishes the view of the assets of `index`, the plan of the index publication, as `target`
-/// (`<region>/storage`) under `<output>/published`, with a path tree when `destination` has one,
-/// and returns the plan of the view. The assets that could not be produced are its failures.
+/// (`<region>/storage`) under `<output>/published` in the layout of `destination`, with a path
+/// tree when `destination` has one, and returns the plan of the view. The assets that could not
+/// be produced are its failures.
 pub(crate) fn publish(
     index: &Plan,
     target: &str,
@@ -175,7 +187,7 @@ pub(crate) fn publish(
     monitor: &Monitor,
 ) -> Result<Option<Plan>, lexopt::Error> {
     let span = monitor.span("publish", "storage", "");
-    let (jobs, shadowed) = jobs(index)?;
+    let (jobs, shadowed) = jobs(index, objects, threads)?;
     let mut failures = index.failures.clone();
     let results = parallel(jobs.len(), threads, |i| {
         isolated(|| make(&jobs[i], objects, derivations, monitor)).unwrap_or_else(|message| {
@@ -230,7 +242,7 @@ pub(crate) fn publish(
         &destination.output.join("published"),
         target,
         &plan,
-        Layout::Paths,
+        destination.layout,
         threads,
     )
     .map_err(|e| e.to_string())?;

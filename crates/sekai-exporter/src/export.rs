@@ -403,6 +403,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
+            layout: Layout::Sqlite,
         },
         &Objects::local(&store),
         options.threads,
@@ -489,11 +490,12 @@ pub(crate) fn write_ledger(
     Ok(())
 }
 
-/// Where a publication goes: the output folder of the run, and the root of a path tree if one is
-/// wanted.
+/// Where a publication goes: the output folder of the run, the root of a path tree if one is
+/// wanted, and the layout of the documents published there.
 pub(crate) struct Destination<'a> {
     pub(crate) output: &'a Path,
     pub(crate) tree: Option<&'a Path>,
+    pub(crate) layout: Layout,
 }
 
 /// Lists `evaluation` in `<output>/assets.tsv`, publishes the index of `objects` under
@@ -535,7 +537,7 @@ pub(crate) fn publish(
         &output.join("published"),
         target,
         &plan,
-        Layout::Sqlite,
+        destination.layout,
         threads,
     )
     .map_err(|e| e.to_string())?;

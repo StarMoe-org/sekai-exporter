@@ -134,8 +134,9 @@ commands:
       complete run and empty --tree and --storage folders. --check only looks up
       the current version and prints whether it differs from the last one
       recorded: in the bucket, which keeps it under state/ beside the catalog,
-      or else in <output>; it downloads and writes nothing, and cannot be
-      combined with --force, --verify, --only, --tree or --storage.
+      or else in <output>. It exits with 0 when the version is unchanged and 1
+      when it changed, downloads and writes nothing, and cannot be combined
+      with --force, --verify, --only, --tree or --storage.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

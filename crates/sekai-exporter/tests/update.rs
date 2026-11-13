@@ -67,6 +67,17 @@ fn succeeded(output: &Output) -> String {
     String::from_utf8(output.stdout.clone()).unwrap()
 }
 
+/// The output of a check that found a change, which exits with 1.
+fn changed(output: &Output) -> String {
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout.clone()).unwrap()
+}
+
 #[test]
 fn an_update_publishes_the_version_and_a_second_one_finds_it_unchanged() {
     let scratch = Scratch::new("update-unchanged");
@@ -87,7 +98,7 @@ fn an_update_publishes_the_version_and_a_second_one_finds_it_unchanged() {
 #[test]
 fn a_check_of_an_output_without_a_catalog_reports_a_change_and_writes_nothing() {
     let scratch = Scratch::new("update-check-fresh");
-    let checked = succeeded(&scratch.update(&["--check"]));
+    let checked = changed(&scratch.update(&["--check"]));
     assert!(checked.contains(" changed"), "{checked}");
     assert!(!checked.contains("unchanged"), "{checked}");
     assert!(!scratch.output().exists(), "{}", scratch.output().display());
@@ -113,7 +124,7 @@ fn a_check_names_the_recorded_version_when_the_source_has_changed() {
     for bundle in scratch.bundles() {
         std::fs::write(bundle, b"other bytes").unwrap();
     }
-    let checked = succeeded(&scratch.update(&["--check"]));
+    let checked = changed(&scratch.update(&["--check"]));
     assert!(
         checked.ends_with(&format!(" changed from {recorded}\n")),
         "{checked}"

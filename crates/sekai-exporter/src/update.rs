@@ -672,8 +672,8 @@ fn recorded_identity(output: &Path, region: &str) -> io::Result<Option<VersionId
 }
 
 /// Prints whether the content of the current version differs from the last one recorded: in the
-/// bucket of the configuration when it names one, and otherwise in `options.output`. Nothing is
-/// downloaded or written.
+/// bucket of the configuration when it names one, and otherwise in `options.output`. Returns
+/// whether it is unchanged. Nothing is downloaded or written.
 fn check(options: &Options) -> Result<bool, lexopt::Error> {
     let name = options.region.as_str();
     let (config, region) = configuration(options)?;
@@ -692,12 +692,13 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
         &NoRecorder,
     )?;
     let change = match previous {
-        Some(previous) if previous.same_content(&identity) => "unchanged".to_owned(),
-        Some(previous) => format!("changed from {}", previous.name()),
-        None => "changed".to_owned(),
+        Some(previous) if previous.same_content(&identity) => None,
+        Some(previous) => Some(format!("changed from {}", previous.name())),
+        None => Some("changed".to_owned()),
     };
-    println!("{name} {} {change}", identity.name());
-    Ok(true)
+    let described = change.as_deref().unwrap_or("unchanged");
+    println!("{name} {} {described}", identity.name());
+    Ok(change.is_none())
 }
 
 /// What a run made of the current version.

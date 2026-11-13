@@ -7,8 +7,10 @@
 mod astc;
 mod crunch;
 mod etc;
+mod pvrtc;
 
 use crate::{DecodeError, HdrSurface, Surface};
+use pvrtc::{Channels, Rate};
 
 /// Decodes the first image of `data` in the Unity texture format `format` (`m_TextureFormat`).
 ///
@@ -29,6 +31,10 @@ pub fn decode(format: i32, width: u32, height: u32, data: &[u8]) -> Result<Surfa
             [r << 3 | r >> 2, g << 2 | g >> 4, b << 3 | b >> 2, 255]
         }),
         29 => crunch::decode(w, h, data),
+        30 => pvrtc::decode(Rate::Two, Channels::Rgb, w, h, data),
+        31 => pvrtc::decode(Rate::Two, Channels::Rgba, w, h, data),
+        32 => pvrtc::decode(Rate::Four, Channels::Rgb, w, h, data),
+        33 => pvrtc::decode(Rate::Four, Channels::Rgba, w, h, data),
         34 => etc::decode_etc1(w, h, data),
         41 => etc::decode_eac_r(w, h, data),
         45 => etc::decode_etc2_rgb(w, h, data),

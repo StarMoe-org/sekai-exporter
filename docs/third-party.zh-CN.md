@@ -33,6 +33,7 @@
 | crunch DXT5 解码 | [crunch](https://github.com/Unity-Technologies/crunch)（`unity` 分支） | 流布局译自 `crn_decomp.h`；参考：比对解包后的块 | ZLIB |
 | BC3 解码 | Khronos Data Format Specification | 规范；DXT 块按其公式以精确算术比对 | — |
 | ETC1、ETC2 与 EAC 解码 | Khronos Data Format Specification；[texture2ddecoder](https://github.com/K0lb3/texture2ddecoder) | 规范；参考：解码像素逐字节比对 | MIT（texture2ddecoder） |
+| PVRTC 1 解码，每像素 2 位与 4 位 | [PowerVR SDK](https://github.com/powervr-graphics/Native_SDK) `PVRTDecompress.cpp`；Khronos `IMG_texture_compression_pvrtc` | 移植；参考：解码像素逐字节比对。RGB 格式的 alpha 按该扩展取 1 | MIT（PowerVR SDK） |
 | PNG 写出与读取（图片的规范形式） | [`png`](https://crates.io/crates/png) | 链接 | MIT OR Apache-2.0 |
 | 有损 WebP 写出 | [libwebp](https://chromium.googlesource.com/webm/libwebp)，经由 [`webp`](https://crates.io/crates/webp) 与 [`libwebp-sys`](https://crates.io/crates/libwebp-sys) | 在原生构建中静态链接 | BSD-3-Clause（libwebp），MIT（`libwebp-sys`） |
 

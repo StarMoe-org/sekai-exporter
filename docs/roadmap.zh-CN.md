@@ -33,7 +33,7 @@
 
 | 部分 | 状态 | 说明 |
 |---|---|---|
-| 贴图：Alpha8、R8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGB、ETC2 RGBA8、EAC R、crunch DXT5、ASTC LDR 与 HDR | 已完成 | 其他格式报告为不支持 |
+| 贴图：Alpha8、R8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGB、ETC2 RGBA8、EAC R、PVRTC 1、crunch DXT5、ASTC LDR 与 HDR | 已完成 | 其他格式报告为不支持 |
 | HCA 与 ADX 音频，ACB 与 AWB 归档，USM 容器 | 已完成 | |
 | PNG、有损 WebP、OpenEXR、MP3 | 已完成 | [功能开关](features.zh-CN.md#后端) |
 

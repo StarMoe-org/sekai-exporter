@@ -172,6 +172,29 @@ fn an_empty_image_is_malformed() {
 }
 
 #[test]
+fn a_pvrtc_image_has_sides_that_are_powers_of_two() {
+    assert!(matches!(
+        decode(33, 24, 8, &[0; 128]),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn the_rgb_pvrtc_formats_are_opaque() {
+    // Words of zeros hold translucent colours with no alpha.
+    let alphas = |format| {
+        let surface = decode(format, 16, 8, &[0; 64]).unwrap();
+        let mut alphas: Vec<u8> = surface.pixels().chunks(4).map(|p| p[3]).collect();
+        alphas.dedup();
+        alphas
+    };
+    assert_eq!(alphas(30), [255]);
+    assert_eq!(alphas(31), [0]);
+    assert_eq!(alphas(32), [255]);
+    assert_eq!(alphas(33), [0]);
+}
+
+#[test]
 fn an_unknown_format_is_unsupported() {
     assert!(matches!(
         decode(-1, 4, 4, &[0; 64]),

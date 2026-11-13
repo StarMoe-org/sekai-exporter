@@ -12,6 +12,8 @@
 //!
 //! The bucket also keeps the state of the runs that publish to it, as files under
 //! `<prefix>state/` that no publication refers to: [`S3::fetch_state`] and [`S3::store_state`].
+//! A state file larger than 16 MiB is written as a multipart upload, so that each request stays
+//! short.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -42,6 +44,11 @@ const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 const POINTER_CACHE_CONTROL: &str = "no-cache";
 /// Cache policy for the state files under `state/`, which only the exporter reads.
 const STATE_CACHE_CONTROL: &str = "private, no-store";
+/// The media type of the state files.
+const STATE_MEDIA_TYPE: &str = "application/octet-stream";
+/// The size of the parts of a large state file. Each part is a request of its own, short enough
+/// that no service between the client and the bucket cuts it off; S3 asks for at least 5 MiB.
+const PART: u64 = 16 << 20;
 /// The store directories: the first two hexadecimal digits of the names.
 const SHARDS: usize = 256;
 
@@ -210,30 +217,48 @@ impl S3 {
             .map_err(|e| PublishError::new("state", e))
     }
 
-    /// Writes `bytes` to the bucket as its state file `file`.
+    /// Writes `bytes` to the bucket as its state file `file`, in parts when there are more than
+    /// [`PART`].
     pub fn write_state(&self, file: &str, bytes: &[u8]) -> Result<(), PublishError> {
-        let digest = Sha256::digest(bytes);
-        self.put(
-            &self.state(file),
-            &hex(&digest),
-            "application/octet-stream",
-            STATE_CACHE_CONTROL,
-            || Ok(bytes),
-        )
-        .map_err(|e| PublishError::new("state", e))
+        let name = self.state(file);
+        let written = if bytes.len() as u64 > PART {
+            self.put_in_parts(&name, STATE_MEDIA_TYPE, STATE_CACHE_CONTROL, bytes)
+        } else {
+            let digest = Sha256::digest(bytes);
+            self.put(
+                &name,
+                &hex(&digest),
+                STATE_MEDIA_TYPE,
+                STATE_CACHE_CONTROL,
+                || Ok(bytes),
+            )
+        };
+        written.map_err(|e| PublishError::new("state", e))
     }
 
-    /// Writes the file at `path` to the bucket as its state file `file`.
+    /// Writes the file at `path` to the bucket as its state file `file`, in parts when it has
+    /// more than [`PART`] bytes.
     pub fn store_state(&self, file: &str, path: &Path) -> Result<(), PublishError> {
-        let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;
-        self.put(
-            &self.state(file),
-            &hex(&digest),
-            "application/octet-stream",
-            STATE_CACHE_CONTROL,
-            || File::open(path).map_err(|e| format!("{}: {e}", path.display())),
-        )
-        .map_err(|e| PublishError::new("state", e))
+        let name = self.state(file);
+        let open = || File::open(path).map_err(|e| format!("{}: {e}", path.display()));
+        let size = std::fs::metadata(path)
+            .map_err(PublishError::wrap("state"))?
+            .len();
+        let written = if size > PART {
+            open().and_then(|file| {
+                self.put_in_parts(&name, STATE_MEDIA_TYPE, STATE_CACHE_CONTROL, file)
+            })
+        } else {
+            let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;
+            self.put(
+                &name,
+                &hex(&digest),
+                STATE_MEDIA_TYPE,
+                STATE_CACHE_CONTROL,
+                open,
+            )
+        };
+        written.map_err(|e| PublishError::new("state", e))
     }
 
     /// The signed headers of a request for `uri` with the canonical query string `query`.
@@ -326,11 +351,7 @@ impl S3 {
         read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
     ) -> Result<Option<T>, String> {
         let mut response = self.send("GET", name, "", EMPTY, |url, headers| {
-            let mut request = self.agent.get(url);
-            for (header, value) in headers {
-                request = request.header(header, value);
-            }
-            request.call()
+            signed(self.agent.get(url), headers).call()
         })?;
         match response.status().as_u16() {
             200 => read(&mut response.body_mut().as_reader())
@@ -355,11 +376,7 @@ impl S3 {
                 .collect::<Vec<_>>()
                 .join("&");
             let mut response = self.send("GET", "", &query, EMPTY, |url, headers| {
-                let mut request = self.agent.get(url);
-                for (header, value) in headers {
-                    request = request.header(header, value);
-                }
-                request.call()
+                signed(self.agent.get(url), headers).call()
             })?;
             let status = response.status().as_u16();
             if status != 200 {
@@ -406,14 +423,9 @@ impl S3 {
         body: impl Fn() -> Result<B, String>,
     ) -> Result<(), String> {
         let response = self.send("PUT", name, "", sha256, |url, headers| {
-            let mut request = self
-                .agent
-                .put(url)
+            let request = signed(self.agent.put(url), headers)
                 .header("content-type", media_type)
                 .header("cache-control", cache_control);
-            for (header, value) in headers {
-                request = request.header(header, value);
-            }
             match body() {
                 Ok(body) => request.send(body),
                 Err(e) => Err(ureq::Error::Io(io::Error::other(e))),
@@ -423,6 +435,153 @@ impl S3 {
             200 | 201 | 204 => Ok(()),
             status => Err(format!("PUT {name}: HTTP {status}")),
         }
+    }
+
+    /// Writes the bytes of `source` to `name` as a multipart upload of [`PART`]-byte parts. An
+    /// upload that fails is aborted, so that the bucket does not keep its parts.
+    fn put_in_parts(
+        &self,
+        name: &str,
+        media_type: &str,
+        cache_control: &'static str,
+        source: impl Read,
+    ) -> Result<(), String> {
+        let upload = self.start_upload(name, media_type, cache_control)?;
+        self.put_parts(name, &upload, source)
+            .and_then(|tags| self.complete_upload(name, &upload, &tags))
+            .map_err(|e| match self.abort_upload(name, &upload) {
+                Ok(()) => e,
+                Err(abort) => format!("{e}; {abort}"),
+            })
+    }
+
+    /// Starts a multipart upload to `name` and returns its upload ID.
+    fn start_upload(
+        &self,
+        name: &str,
+        media_type: &str,
+        cache_control: &'static str,
+    ) -> Result<String, String> {
+        let response = self.send("POST", name, "uploads=", EMPTY, |url, headers| {
+            signed(self.agent.post(url), headers)
+                .header("content-type", media_type)
+                .header("cache-control", cache_control)
+                .send_empty()
+        })?;
+        let body = success_text("POST", name, response)?;
+        element(&body, "UploadId")
+            .map(unescape)
+            .ok_or_else(|| format!("POST {name}: the response has no UploadId"))
+    }
+
+    /// Uploads `source` as the parts of the multipart upload `upload` of `name`, one after
+    /// another, and returns the entity tags of the parts in order.
+    fn put_parts(
+        &self,
+        name: &str,
+        upload: &str,
+        mut source: impl Read,
+    ) -> Result<Vec<String>, String> {
+        let mut tags = Vec::new();
+        let mut part = Vec::new();
+        loop {
+            part.clear();
+            source
+                .by_ref()
+                .take(PART)
+                .read_to_end(&mut part)
+                .map_err(|e| format!("{name}: {e}"))?;
+            if part.is_empty() {
+                return Ok(tags);
+            }
+            tags.push(self.put_part(name, upload, tags.len() + 1, &part)?);
+        }
+    }
+
+    /// Uploads `bytes` as part `number` of the multipart upload `upload` of `name`, and returns
+    /// the entity tag of the part.
+    fn put_part(
+        &self,
+        name: &str,
+        upload: &str,
+        number: usize,
+        bytes: &[u8],
+    ) -> Result<String, String> {
+        let query = format!("partNumber={number}&uploadId={}", encode_component(upload));
+        let digest = Sha256::digest(bytes);
+        let response = self.send("PUT", name, &query, &hex(&digest), |url, headers| {
+            signed(self.agent.put(url), headers).send(bytes)
+        })?;
+        match response.status().as_u16() {
+            200 => response
+                .headers()
+                .get("etag")
+                .and_then(|tag| tag.to_str().ok())
+                .map(str::to_owned)
+                .ok_or_else(|| format!("PUT {name} part {number}: the response has no ETag")),
+            status => Err(format!("PUT {name} part {number}: HTTP {status}")),
+        }
+    }
+
+    /// Completes the multipart upload `upload` of `name` from the parts with the entity tags
+    /// `tags`, in order.
+    fn complete_upload(&self, name: &str, upload: &str, tags: &[String]) -> Result<(), String> {
+        let parts: String = tags
+            .iter()
+            .zip(1..)
+            .map(|(tag, number)| {
+                format!(
+                    "<Part><PartNumber>{number}</PartNumber><ETag>{}</ETag></Part>",
+                    escape(tag)
+                )
+            })
+            .collect();
+        let xml = format!("<CompleteMultipartUpload>{parts}</CompleteMultipartUpload>");
+        let digest = Sha256::digest(xml.as_bytes());
+        let query = format!("uploadId={}", encode_component(upload));
+        let response = self.send("POST", name, &query, &hex(&digest), |url, headers| {
+            signed(self.agent.post(url), headers).send(xml.as_bytes())
+        })?;
+        // The service may answer 200 and report a failure in the body.
+        let body = success_text("POST", name, response)?;
+        if body.contains("<CompleteMultipartUploadResult") {
+            Ok(())
+        } else {
+            Err(format!("POST {name}: the upload was not completed"))
+        }
+    }
+
+    /// Aborts the multipart upload `upload` of `name`, so that the bucket drops its parts.
+    fn abort_upload(&self, name: &str, upload: &str) -> Result<(), String> {
+        let query = format!("uploadId={}", encode_component(upload));
+        let response = self.send("DELETE", name, &query, EMPTY, |url, headers| {
+            signed(self.agent.delete(url), headers).call()
+        })?;
+        match response.status().as_u16() {
+            200 | 204 => Ok(()),
+            status => Err(format!("DELETE {name}: HTTP {status}")),
+        }
+    }
+}
+
+/// `request` with the signed `headers`.
+fn signed<B>(
+    request: ureq::RequestBuilder<B>,
+    headers: Vec<(&'static str, String)>,
+) -> ureq::RequestBuilder<B> {
+    headers.into_iter().fold(request, |request, (name, value)| {
+        request.header(name, value)
+    })
+}
+
+/// The body of `response` to `method` on `name` as text, when the response is a success.
+fn success_text(method: &str, name: &str, mut response: Response<Body>) -> Result<String, String> {
+    match response.status().as_u16() {
+        200 => response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| format!("{method} {name}: {e}")),
+        status => Err(format!("{method} {name}: HTTP {status}")),
     }
 }
 
@@ -703,6 +862,13 @@ fn elements<'a>(xml: &'a str, tag: &str) -> impl Iterator<Item = &'a str> {
 /// The text of the first element `tag` in `xml`.
 fn element<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
     elements(xml, tag).next()
+}
+
+/// `text` with `&`, `<` and `>` as XML entities.
+fn escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// `text` with the five predefined XML entities replaced by their characters.

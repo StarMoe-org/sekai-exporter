@@ -140,6 +140,89 @@ struct State {
     lists: AtomicUsize,
     /// Uploads of objects other than pointers are refused once this many have been accepted.
     refuse_after: Mutex<Option<usize>>,
+    /// The multipart uploads in progress, by upload ID.
+    uploads: Mutex<BTreeMap<String, Upload>>,
+    /// The parts accepted, of every multipart upload.
+    parts: AtomicUsize,
+}
+
+/// A multipart upload in progress.
+struct Upload {
+    name: String,
+    cache_control: Option<String>,
+    /// The bytes of each part by number, with the entity tag the server gave it.
+    parts: BTreeMap<usize, (String, Vec<u8>)>,
+}
+
+impl State {
+    /// Whether an upload to `name` is refused.
+    fn refuses(&self, name: &str) -> bool {
+        !name.ends_with("current.json")
+            && self
+                .refuse_after
+                .lock()
+                .unwrap()
+                .is_some_and(|n| self.puts.load(Ordering::SeqCst) >= n)
+    }
+
+    /// Starts a multipart upload of `request` to `name` and answers with its ID.
+    fn start_upload(&self, name: String, request: &Request) -> Vec<u8> {
+        let mut uploads = self.uploads.lock().unwrap();
+        let id = format!("upload+{}", uploads.len());
+        let upload = Upload {
+            name,
+            cache_control: request.headers.get("cache-control").cloned(),
+            parts: BTreeMap::new(),
+        };
+        uploads.insert(id.clone(), upload);
+        format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>")
+            .into_bytes()
+    }
+
+    /// Takes the body of `request` as a part of the upload `id`, and returns its entity tag.
+    fn put_part(&self, id: &str, request: &Request) -> Option<String> {
+        let number = request.query["partNumber"].parse().unwrap();
+        let tag = format!("\"{}\"", &sha256(&request.body)[..32]);
+        let mut uploads = self.uploads.lock().unwrap();
+        let upload = uploads.get_mut(id)?;
+        upload
+            .parts
+            .insert(number, (tag.clone(), request.body.clone()));
+        self.parts.fetch_add(1, Ordering::SeqCst);
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        Some(tag)
+    }
+
+    /// Joins the parts of the upload `id` that `request` lists into its object, when every part
+    /// is listed in order with its entity tag.
+    fn complete_upload(&self, id: &str, request: &Request) -> bool {
+        let listed = String::from_utf8_lossy(&request.body).into_owned();
+        let Some(upload) = self.uploads.lock().unwrap().remove(id) else {
+            return false;
+        };
+        let tags: Vec<String> = listed
+            .split("<ETag>")
+            .skip(1)
+            .map(|rest| rest.split("</ETag>").next().unwrap().to_owned())
+            .collect();
+        let held: Vec<&String> = upload.parts.values().map(|(tag, _)| tag).collect();
+        if tags.iter().collect::<Vec<_>>() != held {
+            return false;
+        }
+        let bytes = upload
+            .parts
+            .into_values()
+            .flat_map(|(_, bytes)| bytes)
+            .collect();
+        if let Some(cache_control) = upload.cache_control {
+            self.cache_controls
+                .lock()
+                .unwrap()
+                .insert(upload.name.clone(), cache_control);
+        }
+        self.objects.lock().unwrap().insert(upload.name, bytes);
+        true
+    }
 }
 
 struct Server {
@@ -269,10 +352,36 @@ fn serve(state: &State, mut stream: TcpStream) {
         .strip_prefix("/bucket/")
         .unwrap_or_default()
         .to_owned();
+    let mut etag = None;
+    let upload = request.query.get("uploadId").cloned();
     let (status, body) = if !request.signed(SECRET_KEY) {
         (403, Vec::new())
+    } else if let Some(id) = upload {
+        match request.method.as_str() {
+            "PUT" if state.refuses(&name) => (403, Vec::new()),
+            "PUT" if request.headers["x-amz-content-sha256"] != sha256(&request.body) => {
+                (400, Vec::new())
+            }
+            "PUT" => {
+                etag = state.put_part(&id, &request);
+                (if etag.is_some() { 200 } else { 404 }, Vec::new())
+            }
+            "POST" if state.complete_upload(&id, &request) => (
+                200,
+                b"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>".to_vec(),
+            ),
+            "POST" => (200, b"<Error><Code>InvalidPart</Code></Error>".to_vec()),
+            "DELETE" => {
+                state.uploads.lock().unwrap().remove(&id);
+                (204, Vec::new())
+            }
+            _ => (405, Vec::new()),
+        }
     } else {
         match request.method.as_str() {
+            "POST" if request.query.contains_key("uploads") => {
+                (200, state.start_upload(name, &request))
+            }
             "HEAD" => {
                 state.heads.fetch_add(1, Ordering::SeqCst);
                 match state.objects.lock().unwrap().get(&name) {
@@ -293,13 +402,7 @@ fn serve(state: &State, mut stream: TcpStream) {
                 None => (404, Vec::new()),
             },
             "PUT" => {
-                let refused = !name.ends_with("current.json")
-                    && state
-                        .refuse_after
-                        .lock()
-                        .unwrap()
-                        .is_some_and(|n| state.puts.load(Ordering::SeqCst) >= n);
-                if refused {
+                if state.refuses(&name) {
                     (403, Vec::new())
                 } else if request.headers["x-amz-content-sha256"] != sha256(&request.body) {
                     (400, Vec::new())
@@ -319,8 +422,9 @@ fn serve(state: &State, mut stream: TcpStream) {
             _ => (405, Vec::new()),
         }
     };
+    let etag = etag.map_or(String::new(), |tag| format!("etag: {tag}\r\n"));
     let mut response = format!(
-        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n{etag}connection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -733,6 +837,45 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
     let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
     assert_eq!(read.as_deref(), Some(&b"{}"[..]));
+}
+
+/// Bytes of 33 MiB and a few more, which make three parts.
+fn large_state() -> Vec<u8> {
+    (0..(33u32 << 20) + 5).map(|i| (i % 253) as u8).collect()
+}
+
+#[test]
+fn a_large_state_file_is_written_in_parts() {
+    let s = Scratch::new("parts");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let bytes = large_state();
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, &bytes).unwrap();
+
+    s3.store_state("catalog.redb", &local).unwrap();
+    s3.write_state("documents/jp.pack.gz", &bytes).unwrap();
+    for name in ["out/state/catalog.redb", "out/state/documents/jp.pack.gz"] {
+        assert!(server.object(name) == Some(bytes.clone()), "{name}");
+        let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+        assert_eq!(cache_control, "private, no-store");
+    }
+    assert_eq!(server.state.parts.load(Ordering::SeqCst), 6);
+    assert!(server.state.uploads.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_upload_in_parts_is_aborted() {
+    let s = Scratch::new("aborted");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, large_state()).unwrap();
+    server.refuse_after(Some(1));
+
+    assert!(s3.store_state("catalog.redb", &local).is_err());
+    assert_eq!(server.object("out/state/catalog.redb"), None);
+    assert!(server.state.uploads.lock().unwrap().is_empty());
 }
 
 #[test]

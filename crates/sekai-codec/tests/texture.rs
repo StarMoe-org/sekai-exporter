@@ -230,11 +230,15 @@ fn r8_keeps_its_value_in_red() {
 }
 
 #[test]
-fn eac_r_narrows_eleven_bits_to_eight() {
-    // Base 100, multiplier 1, table 0, and every texel selects the table value -3.
-    let block = [100, 0x10, 0, 0, 0, 0, 0, 0];
-    let surface = decode(41, 4, 4, &block).unwrap();
-    assert_eq!(surface.pixels()[..4], [97, 0, 0, 255]);
+fn eac_r_narrows_eleven_bits_to_the_nearest_eight_bit_value() {
+    // Table 0, and every texel selects the table value -3. Base 100 with multiplier 1 gives
+    // 780 of 2047, 97.2 of 255; base 255 with multiplier 0 gives 2041 of 2047, 254.3 of 255.
+    let red = |base: u8, multiplier: u8| {
+        let surface = decode(41, 4, 4, &[base, multiplier << 4, 0, 0, 0, 0, 0, 0]).unwrap();
+        surface.pixels()[..4].to_vec()
+    };
+    assert_eq!(red(100, 1), [97, 0, 0, 255]);
+    assert_eq!(red(255, 0), [254, 0, 0, 255]);
 }
 
 #[test]

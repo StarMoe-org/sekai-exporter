@@ -79,7 +79,8 @@ fn decode_opaque(
     })
 }
 
-/// Decodes EAC R11 into RGBA in stored row order, with red narrowed to eight bits.
+/// Decodes EAC R11 into RGBA in stored row order, with red narrowed to the nearest eight-bit
+/// value.
 pub(super) fn decode_eac_r(
     width: usize,
     height: usize,
@@ -299,6 +300,12 @@ fn alpha_block(bits: u64, texels: &mut [[u8; 4]; 16]) {
     }
 }
 
+/// The eight-bit value nearest an eleven-bit one: the specification makes 2047 stand for 1.0,
+/// and 255 stands for it in eight bits.
+fn narrow(eleven: i32) -> u8 {
+    ((eleven * 255 + 1023) / 2047) as u8
+}
+
 /// Fills `texels` with the red values of an EAC R11 block.
 fn red_block(bits: u64, texels: &mut [[u8; 4]; 16]) {
     let block = EacBlock::new(bits);
@@ -310,7 +317,7 @@ fn red_block(bits: u64, texels: &mut [[u8; 4]; 16]) {
     for y in 0..4 {
         for x in 0..4 {
             let red = (block.base * 8 + 4 + block.modifier(x, y) * scale).clamp(0, 2047);
-            texels[y * 4 + x] = [(red >> 3) as u8, 0, 0, 255];
+            texels[y * 4 + x] = [narrow(red), 0, 0, 255];
         }
     }
 }

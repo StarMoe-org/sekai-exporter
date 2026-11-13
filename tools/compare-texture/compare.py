@@ -1,16 +1,17 @@
 """Count the textures of bundles and compare their decoding with reference decoders.
 
 Usage:
-    python compare.py <decode_stream executable> <bundle directory>...
+    python compare.py <decode_stream executable> <block_decode executable> <bundle directory>...
 
 Every texture in the directories is read with UnityPy. The script prints the number of textures
 per format and class, the facts that decide how a format is decoded, and for each format how many
 distinct images decode to the same bytes as the reference, differ, or are rejected.
 
-References: ASTC is compared with ARM's astcenc through astc-encoder-py, other block formats with
-texture2ddecoder, and uncompressed formats with a direct expansion of the bytes.
+References: ASTC is compared with ARM's astcenc through astc-encoder-py; ETC, EAC and PVRTC with
+the decoders of their owners through `reference/block_decode.cpp`; uncompressed formats with a
+direct expansion of the bytes.
 
-Requires UnityPy (MIT), astc-encoder-py (MIT) and texture2ddecoder (MIT).
+Requires UnityPy (MIT) and astc-encoder-py (MIT).
 """
 
 import hashlib
@@ -21,26 +22,14 @@ import sys
 from collections import Counter, defaultdict
 
 import astc_encoder as ae
-import texture2ddecoder as t2d
 import UnityPy
+
+from block_reference import BlockReference, data_size
+from decode_stream import decode_ours
 
 CLASSES = {"Texture2D", "Cubemap", "Texture2DArray", "CubemapArray", "Texture3D"}
 ASTC = {48: 4, 49: 5, 50: 6, 51: 8, 52: 10, 53: 12}
-BLOCK_DECODERS = {
-    10: t2d.decode_bc1,
-    12: t2d.decode_bc3,
-    26: t2d.decode_bc4,
-    27: t2d.decode_bc5,
-    25: t2d.decode_bc7,
-    34: t2d.decode_etc1,
-    41: t2d.decode_eacr,
-    42: t2d.decode_eacr_signed,
-    43: t2d.decode_eacrg,
-    44: t2d.decode_eacrg_signed,
-    45: t2d.decode_etc2,
-    46: t2d.decode_etc2a1,
-    47: t2d.decode_etc2a8,
-}
+BLOCK_FORMATS = {30, 31, 32, 33, 34, 41, 45, 47}
 INVERTED = b"\x10\x00\x00\x00"
 PREFIXED = b"\x20\x00\x00\x00"
 
@@ -55,12 +44,6 @@ def deobfuscate(data):
                 body[i] ^= 0xFF
         return bytes(body)
     return data
-
-
-def swap_red_blue(pixels):
-    out = bytearray(pixels)
-    out[0::4], out[2::4] = pixels[2::4], pixels[0::4]
-    return bytes(out)
 
 
 def raw_rgba(fmt, width, height, data):
@@ -86,37 +69,39 @@ def raw_rgba(fmt, width, height, data):
     return None
 
 
-def reference(contexts, fmt, width, height, data):
-    if fmt in ASTC:
-        size = ASTC[fmt]
-        if size not in contexts:
+class References:
+    """The reference decoders, giving RGBA in stored row order, or None without a reference."""
+
+    def __init__(self, block_decode):
+        self.astc = {}
+        self.blocks = BlockReference(block_decode)
+
+    def decode(self, fmt, width, height, data):
+        if fmt in ASTC:
+            return self.decode_astc(ASTC[fmt], width, height, data)
+        if fmt in BLOCK_FORMATS:
+            size = data_size(fmt, width, height)
+            return self.blocks.decode(fmt, width, height, data[:size]) if len(data) >= size else None
+        return raw_rgba(fmt, width, height, data)
+
+    def decode_astc(self, size, width, height, data):
+        if size not in self.astc:
             config = ae.ASTCConfig(ae.ASTCProfile.LDR, size, size, block_z=1, quality=0)
-            contexts[size] = ae.ASTCContext(config)
+            self.astc[size] = ae.ASTCContext(config)
         image = ae.ASTCImage(ae.ASTCType.U8, width, height, 1)
         columns = (width + size - 1) // size
         rows = (height + size - 1) // size
-        contexts[size].decompress(data[: columns * rows * 16], image, ae.ASTCSwizzle.from_str("RGBA"))
+        self.astc[size].decompress(data[: columns * rows * 16], image, ae.ASTCSwizzle.from_str("RGBA"))
         return bytes(image.data)
-    if fmt in BLOCK_DECODERS:
-        return swap_red_blue(BLOCK_DECODERS[fmt](data, width, height))
-    return raw_rgba(fmt, width, height, data)
 
-
-def decode_ours(process, fmt, width, height, data):
-    process.stdin.write(struct.pack("<iIII", fmt, width, height, len(data)) + data)
-    process.stdin.flush()
-    if process.stdout.read(1)[0] == 0:
-        rows = process.stdout.read(width * height * 4)
-        stride = width * 4
-        return b"".join(rows[(height - 1 - y) * stride : (height - y) * stride] for y in range(height)), None
-    length = struct.unpack("<I", process.stdout.read(4))[0]
-    return None, process.stdout.read(length).decode()
+    def close(self):
+        self.blocks.close()
 
 
 def main():
     UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f2"
     process = subprocess.Popen([sys.argv[1]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    contexts = {}
+    references = References(sys.argv[2])
     counts = Counter()
     families = defaultdict(set)
     sizes = defaultdict(list)
@@ -125,7 +110,7 @@ def main():
     samples = defaultdict(list)
     seen = set()
     bundles = unreadable = 0
-    for root in sys.argv[2:]:
+    for root in sys.argv[3:]:
         for path in sorted(pathlib.Path(root).iterdir()):
             if not path.is_file() or path.suffix in (".lock", ".part", ".json"):
                 continue
@@ -175,7 +160,7 @@ def main():
                     if len(samples[key]) < 3:
                         samples[key].append(f"{path.name} {tex.m_Name}: {error}")
                     continue
-                theirs = reference(contexts, fmt, width, height, data)
+                theirs = references.decode(fmt, width, height, data)
                 if theirs is None:
                     results[key]["no reference"] += 1
                 elif ours == theirs:
@@ -186,6 +171,7 @@ def main():
                         changed = sum(a != b for a, b in zip(ours, theirs))
                         samples[key].append(f"{path.name} {tex.m_Name}: {changed} of {len(ours)} bytes differ")
     process.stdin.close()
+    references.close()
 
     print(f"{bundles} bundles read, {unreadable} files not read")
     failed = 0

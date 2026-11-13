@@ -15,10 +15,13 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The fixtures: format, width, height, file name and the SHA-256 of the reference pixels.
-fn fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
+/// A fixture: format, width, height, data and the SHA-256 of the reference pixels.
+type Fixture = (i32, u32, u32, Vec<u8>, String);
+
+/// The fixtures of a listing, one per line: format, width, height, file name and the SHA-256.
+fn listed(listing: &str) -> Vec<Fixture> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textures");
-    fs::read_to_string(root.join("expected.txt"))
+    fs::read_to_string(root.join(listing))
         .unwrap()
         .lines()
         .map(|line| {
@@ -32,6 +35,12 @@ fn fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
             )
         })
         .collect()
+}
+
+/// The fixtures with eight bits per channel: the textures built by Unity, and the random ETC,
+/// EAC and PVRTC images.
+fn fixtures() -> Vec<Fixture> {
+    [listed("expected.txt"), listed("blocks.txt")].concat()
 }
 
 #[test]
@@ -44,28 +53,10 @@ fn fixtures_decode_to_the_reference_pixels() {
     }
 }
 
-/// The crunch and ASTC HDR fixtures, in the form of [`fixtures`].
-fn compressed_fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textures");
-    fs::read_to_string(root.join("compressed.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| {
-            let fields: Vec<_> = line.split(' ').collect();
-            (
-                fields[0].parse().unwrap(),
-                fields[1].parse().unwrap(),
-                fields[2].parse().unwrap(),
-                fs::read(root.join(fields[3])).unwrap(),
-                fields[4].to_owned(),
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn crunch_and_hdr_fixtures_decode_to_the_reference_pixels() {
-    let fixtures = compressed_fixtures();
+    // The crunch and ASTC HDR fixtures.
+    let fixtures = listed("compressed.txt");
     assert_eq!(fixtures.len(), 4);
     for (format, width, height, data, expected) in fixtures {
         let found = if is_hdr(format) {
@@ -85,7 +76,7 @@ fn crunch_and_hdr_fixtures_decode_to_the_reference_pixels() {
 
 #[test]
 fn a_crunch_file_is_checked() {
-    let (format, width, height, data, _) = compressed_fixtures().swap_remove(0);
+    let (format, width, height, data, _) = listed("compressed.txt").swap_remove(0);
     assert_eq!(format, 29);
     assert!(matches!(
         decode(format, width, height, &data[..32]),

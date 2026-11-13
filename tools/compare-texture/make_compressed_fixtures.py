@@ -9,7 +9,7 @@ ASTC HDR is compressed and decoded with astcenc through astc-encoder-py (MIT). `
 records format, width, height, file name and the SHA-256 of the reference pixels, which are RGBA
 bytes for crunch and little-endian binary16 values for HDR, rows from top to bottom.
 
-Requires UnityPy (MIT), astc-encoder-py (MIT) and texture2ddecoder (MIT).
+Requires UnityPy (MIT) and astc-encoder-py (MIT).
 """
 
 import hashlib

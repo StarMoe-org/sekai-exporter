@@ -1,12 +1,18 @@
 //! Units whose results earlier runs recorded.
 //!
 //! The result of a unit follows from the bytes of the bundles of its window and from what the
-//! evaluation runs with: the converters, the class layouts, the size limit of assets, the naming
-//! of roots and the evaluator itself. When the content of every bundle of a window is identified
-//! ([`Entry::content`]), the unit is keyed by those contents and by the rest of these, and the
-//! result a run gives the unit is recorded under that key. A later run takes the recorded result instead, and fetches
-//! and evaluates only the windows of the units it has none for. A unit is recorded only when no
-//! bundle of its window had an error.
+//! evaluation runs with: the forms of the converters and the rules that pick their roots, the
+//! converters of the forms the unit has roots of, the class layouts, the size limit of assets, the
+//! naming of roots and the evaluator itself. When the content of every bundle of a window is
+//! identified ([`Entry::content`]), the unit is keyed by those contents and by all of these but
+//! the converters, and the result a run gives the unit is recorded under that key with the version
+//! of each converter it has roots of. A later run takes the recorded result while those versions
+//! are the same, and fetches and evaluates only the windows of the other units. A new version of
+//! a converter therefore evaluates again only the units that have roots of its form.
+//!
+//! A unit is recorded only when no bundle of its window had an error and no asset of it failed to
+//! convert. Such an asset is converted again by the next run, as its derivation is, so a converter
+//! that learns to read it needs no new version: the assets it already produced stay as they are.
 //!
 //! A record holds the assets of its unit before the assets of different bundles that are given the
 //! same name are told apart, since that depends on the other units; it happens once all of them are
@@ -16,14 +22,17 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 
 use sekai_catalog::UnitRecords;
+use sekai_convert::Converter;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::eval::{self, Output};
 use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Units};
 
-/// The revision of how units are evaluated and recorded, which is part of every unit key.
-const REVISION: &str = "unit 1";
+/// The revision of how units are evaluated and recorded, which is part of every unit key. It also
+/// changes when a rule that picks the roots of a form picks other objects, since a version of a
+/// converter does not cover its rule.
+const REVISION: &str = "unit 2";
 
 /// A manifest split into the units that take a recorded result and the entries the others need.
 pub struct Reuse<'m> {
@@ -34,6 +43,8 @@ pub struct Reuse<'m> {
     /// The entries to evaluate: the windows of the units without a recorded result, and the
     /// entries that are no unit, such as those that share a name, so their errors are reported.
     rest: Vec<Entry>,
+    /// The [`identity`] of each converter, by form.
+    identities: BTreeMap<&'static str, String>,
     records: &'m dyn UnitRecords,
 }
 
@@ -77,11 +88,13 @@ impl<'m> Reuse<'m> {
     ) -> io::Result<Self> {
         let units = Units::new(manifest);
         let context = context(stream);
+        let identities = identities(stream);
+        let current: BTreeSet<&str> = identities.values().map(String::as_str).collect();
         let found = (0..units.entries.len())
             .map(|unit| {
                 let key = key(&context, &units, unit);
                 let record = key.as_ref().map(&lookup).transpose()?.flatten();
-                Ok((key, record))
+                Ok((key, record.filter(|record| record.holds_with(&current))))
             })
             .collect::<io::Result<Vec<_>>>()?;
         let needed: BTreeSet<usize> = found
@@ -113,6 +126,7 @@ impl<'m> Reuse<'m> {
             recorded,
             keyed,
             rest: entries_to_evaluate(manifest, &units, &needed),
+            identities,
             records,
         })
     }
@@ -139,17 +153,20 @@ impl<'m> Reuse<'m> {
         Ok(stream::finish(gathered))
     }
 
-    /// Records the result of each keyed unit in `gathered` whose window had no error.
+    /// Records the result of each keyed unit in `gathered` whose window had no error and none of
+    /// whose assets failed to convert.
     fn record(&self, gathered: &Gathered) -> io::Result<()> {
-        let failed: HashSet<&str> = gathered
+        let broken: HashSet<&str> = gathered
             .errors
             .keys()
             .map(|(name, _)| name.as_str())
             .collect();
-        let mut records = Record::of_each(gathered);
+        let mut records = Record::of_each(gathered, &self.identities);
         let mut results = Vec::new();
         for keyed in &self.keyed {
-            if keyed.window.iter().any(|bundle| failed.contains(bundle)) {
+            if gathered.failed.contains(keyed.unit)
+                || keyed.window.iter().any(|bundle| broken.contains(bundle))
+            {
                 continue;
             }
             let record = records.remove(keyed.unit).unwrap_or_default();
@@ -179,16 +196,12 @@ fn entries_to_evaluate(
 }
 
 /// What every unit key of an evaluation with `stream` starts with: the revision, the forms of the
-/// converters in their order, the class layouts and the size limit of assets.
+/// converters in their order, whose names stand for the rules that pick their roots, the class
+/// layouts and the size limit of assets.
 fn context(stream: &Stream<'_>) -> String {
     let mut text = format!("{REVISION}\n");
     for converter in stream.converters {
-        text.push_str(&format!(
-            "form {} {}\n",
-            converter.name(),
-            converter.version()
-        ));
-        text.push_str(&eval::lossy_encoder(converter.as_ref()));
+        text.push_str(&format!("form {}\n", converter.name()));
     }
     if let Some(identity) = stream.classes.identity() {
         text.push_str(&format!("classes {}\n", eval::hex(&identity)));
@@ -197,6 +210,26 @@ fn context(stream: &Stream<'_>) -> String {
         text.push_str(&format!("limit {limit}\n"));
     }
     text
+}
+
+/// The identity of each converter of `stream`, by form.
+fn identities(stream: &Stream<'_>) -> BTreeMap<&'static str, String> {
+    stream
+        .converters
+        .iter()
+        .map(|converter| (converter.name(), identity(converter.as_ref())))
+        .collect()
+}
+
+/// What the assets of a form depend on of its converter: the form, the version and the encoder
+/// of its files that lose information.
+fn identity(converter: &dyn Converter) -> String {
+    format!(
+        "form {} {}\n{}",
+        converter.name(),
+        converter.version(),
+        eval::lossy_encoder(converter)
+    )
 }
 
 /// The key of `unit`, when the content of every bundle of its window is identified.
@@ -213,9 +246,11 @@ fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<[u8; 32]> {
 }
 
 /// What a unit gave: its assets, the roots it left unnamed and the references that leave its
-/// window.
+/// window, with the converters that gave them.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct Record {
+    /// The [`identity`] of each converter the unit has roots of.
+    forms: BTreeSet<String>,
     assets: Vec<RecordedAsset>,
     /// The logical path and path ID of each root left unnamed.
     unnamed: Vec<(String, i64)>,
@@ -243,9 +278,25 @@ impl Record {
         serde_json::to_vec(self).map_err(io::Error::other)
     }
 
-    /// The record of each unit that gave something in `gathered`, by unit name.
-    fn of_each(gathered: &Gathered) -> BTreeMap<&str, Record> {
+    /// Whether the record holds for an evaluation whose converters have the identities `current`:
+    /// whether each converter the unit has roots of is among them.
+    fn holds_with(&self, current: &BTreeSet<&str>) -> bool {
+        self.forms
+            .iter()
+            .all(|form| current.contains(form.as_str()))
+    }
+
+    /// The record of each unit that gave something in `gathered`, by unit name, with the
+    /// `identities` of the converters by form.
+    fn of_each<'g>(
+        gathered: &'g Gathered,
+        identities: &BTreeMap<&str, String>,
+    ) -> BTreeMap<&'g str, Record> {
         let mut records: BTreeMap<&str, Record> = BTreeMap::new();
+        for (unit, forms) in &gathered.forms {
+            records.entry(unit).or_default().forms =
+                forms.iter().map(|form| identities[form].clone()).collect();
+        }
         for (output, logical, path_id) in &gathered.outputs {
             records
                 .entry(&output.bundle)

@@ -105,6 +105,48 @@ fn converters() -> Vec<Box<dyn Converter>> {
     vec![Box::new(Texture), Box::new(Data)]
 }
 
+/// The converter of the same form at its next version, giving the same assets.
+struct Next(Box<dyn Converter>);
+
+impl Converter for Next {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn version(&self) -> u32 {
+        self.0.version() + 1
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        self.0.is_root(object, script, paths)
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        self.0.convert(root, cx)
+    }
+}
+
+/// The converter of the same form and version in a build that cannot read its roots yet.
+struct Unready(Box<dyn Converter>);
+
+impl Converter for Unready {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn version(&self) -> u32 {
+        self.0.version()
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        self.0.is_root(object, script, paths)
+    }
+
+    fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        Err(ConvertError::new("unsupported", "not readable yet"))
+    }
+}
+
 fn scratch(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -203,10 +245,19 @@ fn streamed_reusing(
     run: &Run<'_>,
     records: &MemoryUnitRecords,
 ) -> (Vec<String>, usize, Streamed) {
+    streamed_reusing_with(root, run, records, &converters())
+}
+
+/// What [`streamed_reusing`] gives with `converters`.
+fn streamed_reusing_with(
+    root: &Path,
+    run: &Run<'_>,
+    records: &MemoryUnitRecords,
+    converters: &[Box<dyn Converter>],
+) -> (Vec<String>, usize, Streamed) {
     let store = LocalStore::open(root).unwrap();
-    let converters = converters();
     let derivations = MemoryDerivations::default();
-    let stream = stream_of(run, &store, &converters, &derivations);
+    let stream = stream_of(run, &store, converters, &derivations);
     let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
     let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
     let reused = reuse.reused();
@@ -266,6 +317,62 @@ fn recorded_units_give_the_result_of_evaluating_them() {
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
     assert_eq!(content(&third), content(&whole));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_new_version_evaluates_again_only_the_units_with_roots_of_its_form() {
+    let root = scratch("versions");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    streamed_reusing(&root, &run, &records);
+    assert_eq!(records.len(), 2);
+
+    // Only fixture_data has roots of the data form.
+    let renewed: Vec<Box<dyn Converter>> = vec![Box::new(Texture), Box::new(Next(Box::new(Data)))];
+    let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+
+    let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
+    assert!(evaluated.is_empty());
+    assert_eq!(reused, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_asset_that_failed_to_convert_is_converted_again_by_the_next_run() {
+    let root = scratch("retried");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    let whole = streamed(&root, &run);
+
+    let unready: Vec<Box<dyn Converter>> =
+        vec![Box::new(Unready(Box::new(Texture))), Box::new(Data)];
+    let (_, _, first) = streamed_reusing_with(&root, &run, &records, &unready);
+    let failed = |streamed: &Streamed| {
+        let outputs = &streamed.evaluation.outputs;
+        outputs
+            .iter()
+            .any(|o| o.error.as_deref() == Some("unsupported"))
+    };
+    assert!(failed(&first));
+    // The textures are in fixture_data, which is not recorded.
+    assert_eq!(records.len(), 1);
+
+    // The same version, now able to read them, converts them.
+    let (evaluated, reused, second) = streamed_reusing(&root, &run, &records);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+    assert!(!failed(&second));
+    assert_eq!(content(&second), content(&whole));
+    assert_eq!(records.len(), 2);
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -418,6 +418,10 @@ pub(crate) struct Gathered {
     pub(crate) outputs: Vec<(Output, String, i64)>,
     /// Each root left unnamed, as its unit, logical path and path ID.
     pub(crate) unnamed: Vec<(String, String, i64)>,
+    /// The forms of the named roots of each unit that has any, by unit name.
+    pub(crate) forms: BTreeMap<String, BTreeSet<&'static str>>,
+    /// The units with an asset whose conversion failed.
+    pub(crate) failed: BTreeSet<String>,
     converted: usize,
     reused: usize,
     pub(crate) errors: BTreeMap<(String, &'static str), BundleError>,
@@ -652,6 +656,8 @@ impl Gathered {
         let Gathered {
             outputs,
             unnamed,
+            forms,
+            failed,
             converted,
             reused,
             errors,
@@ -661,6 +667,8 @@ impl Gathered {
         } = segment;
         self.outputs.extend(outputs);
         self.unnamed.extend(unnamed);
+        self.forms.extend(forms);
+        self.failed.extend(failed);
         self.converted += converted;
         self.reused += reused;
         for error in errors.into_values() {
@@ -726,6 +734,7 @@ fn run_segment(
                 .ledger
                 .map(|ignored| (gathered.tallies.entry(unit).or_default(), ignored));
             let mut unnamed = Vec::new();
+            let planned = roots.len();
             plan_unit(
                 &version,
                 bundle,
@@ -742,6 +751,13 @@ fn run_segment(
                     .into_iter()
                     .map(|(logical, path_id)| (name.clone(), logical, path_id)),
             );
+            let forms: BTreeSet<&'static str> = roots[planned..]
+                .iter()
+                .map(|root| root.planned.converter.name())
+                .collect();
+            if !forms.is_empty() {
+                gathered.forms.insert(name.clone(), forms);
+            }
         }
     }
 
@@ -790,6 +806,9 @@ fn run_segment(
                     .map_err(io::Error::other)?,
             };
             count_reads(&mut gathered.tallies, units, &document);
+        }
+        if output.error.is_some() {
+            gathered.failed.insert(output.bundle.clone());
         }
         gathered.outputs.push((output, logical, path_id));
     }
@@ -1030,6 +1049,8 @@ pub(crate) fn finish(gathered: Gathered) -> Streamed {
     let Gathered {
         mut outputs,
         unnamed: roots,
+        forms: _,
+        failed: _,
         converted,
         reused,
         errors,

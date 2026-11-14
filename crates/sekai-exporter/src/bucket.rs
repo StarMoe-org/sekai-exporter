@@ -103,6 +103,16 @@ impl Bucket {
         Ok(self.s3.holdings().map_err(|e| e.to_string())?)
     }
 
+    /// The names of the state files in the state directory `directory`, from a listing of it.
+    pub(crate) fn state_names(
+        &self,
+        directory: &str,
+        monitor: &Monitor,
+    ) -> Result<Vec<String>, lexopt::Error> {
+        let _span = monitor.span("publish", "listing", directory);
+        Ok(self.s3.state_names(directory).map_err(|e| e.to_string())?)
+    }
+
     /// The current pointer of `target` in the bucket.
     pub(crate) fn current(&self, target: &str) -> Result<Option<Pointer>, String> {
         self.s3.current(target).map_err(|e| e.to_string())
@@ -170,6 +180,14 @@ impl Bucket {
     }
 
     pub(crate) fn holdings(&self, _monitor: &Monitor) -> Result<BTreeMap<Key, u64>, lexopt::Error> {
+        match *self {}
+    }
+
+    pub(crate) fn state_names(
+        &self,
+        _directory: &str,
+        _monitor: &Monitor,
+    ) -> Result<Vec<String>, lexopt::Error> {
         match *self {}
     }
 

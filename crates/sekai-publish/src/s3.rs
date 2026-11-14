@@ -362,15 +362,37 @@ impl S3 {
         }
     }
 
-    /// Every object of the store in the bucket with its size, listed one store directory per
-    /// connection.
+    /// Every object of the store in the bucket with its size.
     fn list_store(&self) -> Result<BTreeMap<String, u64>, PublishError> {
+        let store = format!("{}store", self.bucket.prefix);
+        self.list_sharded(&store, "files")
+    }
+
+    /// The names of the state files in the state directory `directory` of the bucket, whose files
+    /// lie in subdirectories named by two hexadecimal digits, as [`S3::read_state`] names them.
+    pub fn state_names(&self, directory: &str) -> Result<Vec<String>, PublishError> {
+        let listed = self.list_sharded(&self.state(directory), "state")?;
+        let state = self.state("");
+        let names = listed
+            .into_keys()
+            .filter_map(|name| name.strip_prefix(&state).map(str::to_owned));
+        Ok(names.collect())
+    }
+
+    /// Every object under `directory` with its size, where the objects lie in subdirectories named
+    /// by two hexadecimal digits, listed one subdirectory per connection. A failure is an error of
+    /// `stage`.
+    fn list_sharded(
+        &self,
+        directory: &str,
+        stage: &'static str,
+    ) -> Result<BTreeMap<String, u64>, PublishError> {
         let names = Mutex::new(BTreeMap::new());
         each(SHARDS, self.bucket.connections, |shard| {
-            let prefix = format!("{}store/{shard:02x}/", self.bucket.prefix);
+            let prefix = format!("{directory}/{shard:02x}/");
             let listed = self
                 .list(&prefix)
-                .map_err(|e| PublishError::new("files", e))?;
+                .map_err(|e| PublishError::new(stage, e))?;
             names
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

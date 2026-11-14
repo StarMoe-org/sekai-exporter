@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
+use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Derivations, Derived, Holdings, Key, MemoryHoldings};
 use serde::{Deserialize, Serialize};
 
@@ -17,9 +18,19 @@ use crate::eval::{hex, parallel};
 use crate::reuse::{Found, Kept, Record, Recorded, UnitKey, UnitResult};
 use crate::state::{RegionState, StateFiles, UnitState};
 
+/// The directory of the unit records among the state files.
+pub const UNIT_RECORDS: &str = "records/units";
+
 fn unit_file(key: &UnitKey) -> String {
     let key = key.to_string();
-    format!("records/units/{}/{key}.json", &key[..2])
+    format!("{UNIT_RECORDS}/{}/{key}.json", &key[..2])
+}
+
+/// The key of the unit record named `file`, when it names one.
+fn unit_key(file: &str) -> Option<UnitKey> {
+    let name = file.strip_prefix(UNIT_RECORDS)?.rsplit('/').next()?;
+    let key = name.strip_suffix(".json")?;
+    parse_hex(key).map(UnitKey)
 }
 
 fn derivation_file(fingerprint: &[u8; 32]) -> String {
@@ -52,6 +63,9 @@ pub struct Records<'a> {
     made: Mutex<Vec<([u8; 32], Derived)>>,
     /// The keys of the unit records read, which need not be written again.
     read: Mutex<HashSet<UnitKey>>,
+    /// The keys of every unit record the files keep, when a listing of them tells; a unit whose
+    /// key is not among them is not looked for.
+    listed: Option<HashSet<UnitKey>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -72,6 +86,21 @@ impl<'a> Records<'a> {
             derivations: Mutex::default(),
             made: Mutex::default(),
             read: Mutex::default(),
+            listed: None,
+        }
+    }
+
+    /// [`Records::new`], for files that keep the unit records `unit_files` in [`UNIT_RECORDS`]
+    /// and no others.
+    pub fn listed(
+        files: &'a dyn StateFiles,
+        held: &'a MemoryHoldings,
+        unit_files: &[String],
+    ) -> Self {
+        let listed = unit_files.iter().filter_map(|file| unit_key(file));
+        Self {
+            listed: Some(listed.collect()),
+            ..Self::new(files, held)
         }
     }
 
@@ -188,6 +217,13 @@ impl Derivations for Records<'_> {
 
 impl Recorded for Records<'_> {
     fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
+        if self
+            .listed
+            .as_ref()
+            .is_some_and(|listed| !listed.contains(key))
+        {
+            return Ok(None);
+        }
         let bytes = self.files.read(&unit_file(key))?;
         let Some(record) = bytes.and_then(|bytes| Record::read(&bytes)) else {
             return Ok(None);
@@ -292,6 +328,18 @@ mod tests {
             Some(Found::Recorded(Record::default()))
         );
         assert_eq!(records.record("b", &key(&broken)).unwrap(), None);
+    }
+
+    #[test]
+    fn listed_records_look_only_for_the_units_the_listing_names() {
+        let files = MemoryFiles::default();
+        let held = MemoryHoldings::default();
+        let (a, b) = (unit("a", 1, true), unit("b", 2, true));
+        Records::new(&files, &held).write(&[&a, &b], 2).unwrap();
+
+        let listed = Records::listed(&files, &held, &[unit_file(&UnitKey([1; 32]))]);
+        assert!(listed.record("a", &UnitKey([1; 32])).unwrap().is_some());
+        assert_eq!(listed.record("b", &UnitKey([2; 32])).unwrap(), None);
     }
 
     #[test]

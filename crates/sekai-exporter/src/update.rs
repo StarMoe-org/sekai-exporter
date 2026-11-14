@@ -19,7 +19,7 @@ use sekai_pipeline::claims::Claims;
 use sekai_pipeline::eval::Output;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::parallel;
-use sekai_pipeline::records::{Earlier, Records};
+use sekai_pipeline::records::{Earlier, Records, UNIT_RECORDS};
 use sekai_pipeline::reuse::{self, Reuse, UnitResult};
 use sekai_pipeline::state::{
     BundleState, MemoryFiles, RegionState, Root, StateFiles, TableOutput, Written,
@@ -381,13 +381,16 @@ fn export_version(
         return Ok(Outcome::Unchanged(identity));
     }
 
-    let held = holdings(options, site, monitor)?;
+    let Listed { held, unit_records } = listed(options, site, monitor)?;
     let objects = Objects {
         local: &opened.store,
         held: &held,
         remote: site.remote(),
     };
-    let records = Records::new(files, &held);
+    let records = match &unit_records {
+        Some(unit_records) => Records::listed(files, &held, unit_records),
+        None => Records::new(files, &held),
+    };
     let backed = Backed {
         records: &records,
         catalog: &opened.catalog,
@@ -601,20 +604,36 @@ struct Evaluation {
     bundles: Vec<BundleState>,
 }
 
-/// The objects that `site` is known to hold before the run: with `--verify`, those a listing of
-/// the bucket finds, and else none until the run reads records or puts objects there.
-fn holdings(
-    options: &Options,
-    site: &Site<'_>,
-    monitor: &Monitor,
-) -> Result<MemoryHoldings, lexopt::Error> {
+/// What `site` is known to hold before the run.
+struct Listed {
+    /// The objects of the store: with `--verify`, those a listing of the bucket finds, and else
+    /// none until the run reads records or puts objects there.
+    held: MemoryHoldings,
+    /// With `--verify`, the unit records a listing of the bucket finds; else each record the run
+    /// needs is looked up.
+    unit_records: Option<Vec<String>>,
+}
+
+/// What a listing of `site` finds before the run, with `--verify`.
+fn listed(options: &Options, site: &Site<'_>, monitor: &Monitor) -> Result<Listed, lexopt::Error> {
     match site {
         Site::Bucket(bucket) if options.verify => {
-            let listed = bucket.holdings(monitor)?;
-            println!("bucket holds {} objects", listed.len());
-            Ok(MemoryHoldings::listed(listed))
+            let held = bucket.holdings(monitor)?;
+            let unit_records = bucket.state_names(UNIT_RECORDS, monitor)?;
+            println!(
+                "bucket holds {} objects and {} unit records",
+                held.len(),
+                unit_records.len()
+            );
+            Ok(Listed {
+                held: MemoryHoldings::listed(held),
+                unit_records: Some(unit_records),
+            })
         }
-        _ => Ok(MemoryHoldings::default()),
+        _ => Ok(Listed {
+            held: MemoryHoldings::default(),
+            unit_records: None,
+        }),
     }
 }
 

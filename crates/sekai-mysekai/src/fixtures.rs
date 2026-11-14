@@ -180,8 +180,8 @@ impl TableConverter for Fixtures {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        Ok(Box::new(OneAsset::new(NAME, move || {
+    fn plan(&self, _cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        Ok(Box::new(OneAsset::new(NAME, |cx| {
             build(&sorted(rows(cx, TABLE)?))
         })))
     }

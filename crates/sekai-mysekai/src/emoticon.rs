@@ -108,11 +108,11 @@ impl TableConverter for Emoticons {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if item_assets(cx).next().is_none() {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 

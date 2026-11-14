@@ -60,11 +60,11 @@ impl TableConverter for FacialTables {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if cx.assets(BUNDLE).iter().all(|entry| entry.form != FORM) {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 
@@ -223,7 +223,7 @@ mod tests {
     }
 
     fn built(cx: &dyn TableContext) -> Result<Value, ConvertError> {
-        let asset = FacialTables.plan(cx)?.convert(0)?.asset;
+        let asset = FacialTables.plan(cx)?.convert(0, cx)?.asset;
         match &asset.members[0].content {
             Content::File { bytes, .. } => Ok(serde_json::from_slice(bytes).unwrap()),
             _ => panic!("the member is not a file"),

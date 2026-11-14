@@ -45,10 +45,8 @@ impl TableConverter for ClientConfig {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        Ok(Box::new(OneAsset::new(NAME, move || {
-            build(rows(cx, TABLE)?)
-        })))
+    fn plan(&self, _cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        Ok(Box::new(OneAsset::new(NAME, |cx| build(rows(cx, TABLE)?))))
     }
 }
 
@@ -102,7 +100,7 @@ mod tests {
     fn converted(table: serde_json::Value) -> Result<serde_json::Value, ConvertError> {
         let version = FakeVersion::default().with_table(TABLE, table);
         let plan = ClientConfig.plan(&version)?;
-        Ok(json_of(&plan.convert(0)?.asset))
+        Ok(json_of(&plan.convert(0, &version)?.asset))
     }
 
     fn row(id: i64, kind: &str, value: &str) -> serde_json::Value {

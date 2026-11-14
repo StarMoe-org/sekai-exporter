@@ -37,7 +37,7 @@ impl TableConverter for CostumeRoles {
         VERSION
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         let sources = Sources::read(cx)?;
         let roles = RoleSource::read_all(&sources);
         let names = roles.iter().map(RoleSource::asset_name).collect();
@@ -58,7 +58,7 @@ impl TableConverter for Costumes {
         VERSION
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         let sources = Sources::read(cx)?;
         let roles = RoleSource::read_all(&sources);
         let numbers = CostumePlan::numbers(&roles);
@@ -86,7 +86,7 @@ impl TablePlan for RolePlan {
         &self.names
     }
 
-    fn convert(&self, index: usize) -> Result<TableAsset, ConvertError> {
+    fn convert(&self, index: usize, _cx: &dyn TableContext) -> Result<TableAsset, ConvertError> {
         let (document, referrals) = self.roles[index].document();
         Ok(TableAsset {
             asset: member(ROLE_FORMAT, document.to_bytes().map_err(malformed)?),
@@ -120,7 +120,7 @@ impl TablePlan for CostumePlan {
         &self.names
     }
 
-    fn convert(&self, index: usize) -> Result<TableAsset, ConvertError> {
+    fn convert(&self, index: usize, _cx: &dyn TableContext) -> Result<TableAsset, ConvertError> {
         let number = self.numbers.get(index).copied().ok_or_else(|| {
             malformed_table("a costume plan names a costume that the roles do not have")
         })?;

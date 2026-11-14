@@ -1,4 +1,10 @@
 //! The table stage: assets built from game data tables and the assets of the version.
+//!
+//! Each asset is built with a context that notes what it reads. An asset of a reusable plan keeps
+//! what the previous run built for it when its reads give what they gave then, and is built again
+//! otherwise.
+
+mod trace;
 
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -16,6 +22,10 @@ use sha2::{Digest, Sha256};
 use crate::canonical::encode;
 use crate::eval::{Evaluation, Output, asset_error, hex, parallel};
 use crate::metrics::Recorder;
+use crate::state::TableOutput;
+use trace::{Traced, Values};
+
+pub use trace::{Read, Trace};
 
 /// What the table stage works with.
 pub struct TableStage<'a> {
@@ -29,6 +39,19 @@ pub struct TableStage<'a> {
     pub recorder: &'a dyn Recorder,
     /// How many assets are built at once.
     pub threads: usize,
+    /// The assets that the previous run built from tables.
+    pub previous: &'a [TableOutput],
+}
+
+/// An asset built from tables, or kept from the previous run.
+#[derive(Debug, Clone)]
+pub struct Built {
+    /// The asset.
+    pub output: Output,
+    /// What it read, when its plan is reusable.
+    pub trace: Option<Trace>,
+    /// Whether it was kept from the previous run.
+    pub kept: bool,
 }
 
 /// The assets of the version that the table converters read.
@@ -52,6 +75,15 @@ fn store_failed(e: impl std::fmt::Display) -> ConvertError {
     ConvertError::new(STORE_FAILED, e.to_string())
 }
 
+impl Assets<'_> {
+    /// The key of the document of the asset `name`.
+    fn key(&self, name: &str) -> Result<Key, ConvertError> {
+        (self.version.document)(name)
+            .map_err(store_failed)?
+            .ok_or_else(|| ConvertError::new("missing_asset", format!("no asset {name}")))
+    }
+}
+
 impl TableContext for Assets<'_> {
     fn table(&self, name: &str) -> Result<Vec<u8>, ConvertError> {
         (self.read)(name).map_err(|e| ConvertError::new("table_unreadable", e.to_string()))
@@ -69,11 +101,12 @@ impl TableContext for Assets<'_> {
     }
 
     fn document(&self, name: &str) -> Result<AssetDocument, ConvertError> {
-        let key = (self.version.document)(name)
-            .map_err(store_failed)?
-            .ok_or_else(|| ConvertError::new("missing_asset", format!("no asset {name}")))?;
-        let bytes = self.store.read(&key).map_err(store_failed)?;
+        let bytes = self.store.read(&self.key(name)?).map_err(store_failed)?;
         AssetDocument::from_bytes(&bytes).map_err(store_failed)
+    }
+
+    fn identity(&self, name: &str) -> Result<String, ConvertError> {
+        Ok(self.key(name)?.to_string())
     }
 
     fn member(&self, name: &str, role: &str) -> Result<Vec<u8>, ConvertError> {
@@ -152,16 +185,52 @@ fn store_members(
     Ok(Ok(files))
 }
 
-/// Builds the asset at `index` of `plan`, a plan of `converter`.
+/// What the previous run built for the asset of `job`, when its plan is reusable and its reads
+/// give what they gave then.
+fn kept(
+    job: Job<'_>,
+    previous: &HashMap<&str, &TableOutput>,
+    values: &Values<'_>,
+) -> io::Result<Option<Built>> {
+    let name = &job.plan.names()[job.index];
+    let Some(old) = previous.get(name.as_str()).filter(|_| job.plan.reusable()) else {
+        return Ok(None);
+    };
+    let (Some(trace), Ok(document)) = (&old.trace, old.document.parse()) else {
+        return Ok(None);
+    };
+    if job.digest(values, &trace.reads)?.as_ref() != Some(&trace.digest) {
+        return Ok(None);
+    }
+    Ok(Some(Built {
+        output: Output {
+            name: name.clone(),
+            bundle: String::new(),
+            form: job.converter.name(),
+            document,
+            error: old.error.clone(),
+        },
+        trace: Some(trace.clone()),
+        kept: true,
+    }))
+}
+
+/// Builds the asset of `job` with a context on `assets` that notes its reads.
 fn build_asset(
     stage: &TableStage<'_>,
-    converter: &dyn TableConverter,
-    plan: &dyn TablePlan,
-    index: usize,
-) -> io::Result<Output> {
+    assets: &Assets<'_>,
+    values: &Values<'_>,
+    job: Job<'_>,
+) -> io::Result<Built> {
+    let Job {
+        converter,
+        plan,
+        index,
+    } = job;
     let name = &plan.names()[index];
     let _span = stage.recorder.span("convert", converter.name(), name);
-    let (members, mut references, error) = match plan.convert(index) {
+    let traced = Traced::new(assets);
+    let (members, mut references, error) = match plan.convert(index, &traced) {
         Err(e) if e.code == STORE_FAILED => return Err(io::Error::other(e.message)),
         Err(e) => (Vec::new(), Vec::new(), Some(asset_error(&e))),
         Ok(TableAsset { asset, references }) => match store_members(&asset.members, stage.store)? {
@@ -185,12 +254,24 @@ fn build_asset(
         error,
     };
     let bytes = document.to_bytes().map_err(io::Error::other)?;
-    Ok(Output {
+    let output = Output {
         name: name.clone(),
         bundle: String::new(),
         form: converter.name(),
         document: stage.store.put(&bytes, "json")?,
         error: document.error.map(|e| e.code),
+    };
+    let trace = if plan.reusable() {
+        let reads = traced.reads();
+        let digest = job.digest(values, &reads)?;
+        digest.map(|digest| Trace { reads, digest })
+    } else {
+        None
+    };
+    Ok(Built {
+        output,
+        trace,
+        kept: false,
     })
 }
 
@@ -220,8 +301,11 @@ pub fn evaluate(stage: &TableStage<'_>, evaluation: &mut Evaluation) -> io::Resu
         document: &document,
     };
     let built = build(stage, &version)?;
-    evaluation.converted += built.len();
-    evaluation.outputs.extend(built);
+    evaluation.converted += built.iter().filter(|built| !built.kept).count();
+    evaluation.reused += built.iter().filter(|built| built.kept).count();
+    evaluation
+        .outputs
+        .extend(built.into_iter().map(|built| built.output));
     evaluation.outputs.sort_by(|a, b| a.name.cmp(&b.name));
     match evaluation
         .outputs
@@ -236,12 +320,13 @@ pub fn evaluate(stage: &TableStage<'_>, evaluation: &mut Evaluation) -> io::Resu
     }
 }
 
-/// Builds the assets of the table converters from the tables and the assets of `version`, and
-/// returns them in name order.
+/// Builds the assets of the table converters from the tables and the assets of `version`, or
+/// keeps those of the previous run whose reads give what they gave then, and returns them in name
+/// order.
 ///
 /// A table that cannot be read or parsed and a failure of the store fail the run. An asset that
 /// cannot be built is an asset error.
-pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<Vec<Output>> {
+pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<Vec<Built>> {
     let assets = Assets {
         read: stage.read,
         store: stage.store,
@@ -256,16 +341,21 @@ pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<
     });
     let plans = plans.collect::<io::Result<Vec<_>>>()?;
     let jobs = jobs(stage.converters, &plans);
+    let previous: HashMap<&str, &TableOutput> = stage
+        .previous
+        .iter()
+        .map(|output| (output.name.as_str(), output))
+        .collect();
+    let values = Values::new(&assets);
     let built = parallel(jobs.len(), stage.threads, |i| {
-        let Job {
-            converter,
-            plan,
-            index,
-        } = jobs[i];
-        build_asset(stage, converter, plan, index)
+        let job = jobs[i];
+        match kept(job, &previous, &values)? {
+            Some(kept) => Ok(kept),
+            None => build_asset(stage, &assets, &values, job),
+        }
     });
     let mut built = built.into_iter().collect::<io::Result<Vec<_>>>()?;
-    built.sort_by(|a, b| a.name.cmp(&b.name));
+    built.sort_by(|a, b| a.output.name.cmp(&b.output.name));
     Ok(built)
 }
 
@@ -275,6 +365,14 @@ struct Job<'p> {
     converter: &'p dyn TableConverter,
     plan: &'p dyn TablePlan,
     index: usize,
+}
+
+impl Job<'_> {
+    /// The digest of the form of the asset and of what `reads` give for it.
+    fn digest(&self, values: &Values<'_>, reads: &[Read]) -> io::Result<Option<String>> {
+        let converter = self.converter;
+        values.digest(converter.name(), converter.version(), reads, self.plan)
+    }
 }
 
 /// Every asset of `plans`, the plans of `converters`, to be built on one pool of threads. The

@@ -200,7 +200,7 @@ fn converted(version: &Version) -> Vec<(String, TableAsset)> {
     names
         .into_iter()
         .enumerate()
-        .map(|(index, name)| (name, plan.convert(index).unwrap()))
+        .map(|(index, name)| (name, plan.convert(index, version).unwrap()))
         .collect()
 }
 
@@ -684,7 +684,7 @@ fn a_scene_that_is_not_an_object_is_an_error() {
         .table("unitStories", unit_table(&["s"]))
         .scene(UNIT, "s", json!([1]));
     let plan = Episode.plan(&version).unwrap();
-    assert_eq!(plan.convert(0).unwrap_err().code, "malformed");
+    assert_eq!(plan.convert(0, &version).unwrap_err().code, "malformed");
 }
 
 #[test]

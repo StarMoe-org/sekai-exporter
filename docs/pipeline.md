@@ -46,16 +46,17 @@ The streaming evaluator evaluates a version from its manifest, one bundle at a t
 
 Some assets, such as [episodes](features.md), have no root object: each is built from rows of the game data tables and from assets the version already holds. After the last unit, each table converter reads the tables it needs and lists its assets, and each asset is built.
 
-- **Inputs.** A table converter sees the tables, the assets of each bundle with their forms, the document of an asset and the bytes of its members. It reads no object of a bundle.
+- **Inputs.** A table converter sees the tables, the assets of each bundle with their forms, the document of an asset and the bytes of its members. It reads no object of a bundle. A converter first plans its assets from the tables; each asset is then built on its own, reading the version through a context that notes every read, and reading what its plan derived only through the plan's shared maps, by key.
 - **References.** An asset that a row needs and the version does not hold is recorded in the asset being built. A run over a selection of bundles therefore gives assets that record what the selection left out.
 - **Failures.** A table that cannot be read or parsed is a run failure. An asset that cannot be built is an asset error.
-- **Fingerprints.** These assets are built in every run and no derivation is recorded. The fingerprint is the hash of the form and its version, the name, the role and content hash of each member, the references and any error, so it changes exactly when the output changes.
+- **Reuse.** The state of a region keeps, for each asset of a plan whose assets read it only that way, what the asset read: the tables, the list of bundles, the assets of each bundle, the documents of assets and the entries of shared maps, with a digest of what they gave. A later `update` keeps the asset when its reads give what they gave, with the same form and version, and builds it again otherwise. A failure of the store is never kept.
+- **Fingerprints.** No derivation is recorded for these assets. The fingerprint is the hash of the form and its version, the name, the role and content hash of each member, the references and any error, so it changes exactly when the output changes.
 
 ## Regions
 
 Each region runs in a process of its own, named on the command line. The record of derivations keeps the fingerprint of each converted asset, and the fingerprint does not contain the region. A region converts an asset again in a later run only when its own record does not hold the output of its fingerprint, which is what reading the same objects gives. A bundle is reused from an earlier run when that run's output directories are listed in `stores` and the bundle has the same declared hash there.
 
-Game data tables are read from the region's `tables` source. Table rows are not part of the record of derivations, so the assets of the table stage are built again in every run.
+Game data tables are read from the region's `tables` source. Table rows are not part of the record of derivations: an `update` keeps the assets of the table stage as [the table stage](#table-stage) says, and `export` builds them in every run.
 
 ## The client source
 

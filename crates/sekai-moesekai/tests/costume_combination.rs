@@ -159,12 +159,13 @@ fn role_version() -> Version {
         .model("face/01/0001", "face")
 }
 
-fn converted(plan: &dyn TablePlan) -> Vec<(String, TableAsset)> {
+fn converted(plan: &dyn TablePlan, version: &Version) -> Vec<(String, TableAsset)> {
     let names = plan.names().to_vec();
+    let built = |index| plan.convert(index, version).expect("the asset is built");
     names
         .into_iter()
         .enumerate()
-        .map(|(index, name)| (name, plan.convert(index).expect("the asset is built")))
+        .map(|(index, name)| (name, built(index)))
         .collect()
 }
 
@@ -179,18 +180,18 @@ fn roles(version: &Version) -> Vec<(String, RoleDocument)> {
 /// The name and bytes of every `costume-role` asset.
 fn role_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
     let plan = CostumeRoles.plan(version).expect("the tables are read");
-    documents(plan.as_ref(), "costume-role")
+    documents(plan.as_ref(), version, "costume-role")
 }
 
 /// The name and bytes of every `costume` asset.
 fn costume_documents(version: &Version) -> Vec<(String, Vec<u8>)> {
     let plan = Costumes.plan(version).expect("the tables are read");
-    documents(plan.as_ref(), "costume")
+    documents(plan.as_ref(), version, "costume")
 }
 
 /// The name of each asset of `plan` and the bytes of its only member, whose role must be `role`.
-fn documents(plan: &dyn TablePlan, role: &str) -> Vec<(String, Vec<u8>)> {
-    converted(plan)
+fn documents(plan: &dyn TablePlan, version: &Version, role: &str) -> Vec<(String, Vec<u8>)> {
+    converted(plan, version)
         .into_iter()
         .map(|(name, asset)| {
             let [member] = <[Member; 1]>::try_from(asset.asset.members)
@@ -1059,7 +1060,7 @@ fn the_same_inputs_give_the_same_bytes() {
 fn a_look_names_every_asset_it_shows() {
     let version = school_version();
     let plan = Costumes.plan(&version).expect("the tables are read");
-    let assets = converted(plan.as_ref());
+    let assets = converted(plan.as_ref(), &version);
     let (_, school) = assets
         .iter()
         .find(|(name, _)| name == "costume/1")
@@ -1074,7 +1075,7 @@ fn a_look_names_every_asset_it_shows() {
     }
 
     let plan = CostumeRoles.plan(&version).expect("the tables are read");
-    let assets = converted(plan.as_ref());
+    let assets = converted(plan.as_ref(), &version);
     let (_, light) = assets
         .iter()
         .find(|(name, _)| name.starts_with("costume/role/"))

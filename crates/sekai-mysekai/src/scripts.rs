@@ -99,6 +99,11 @@ impl<'a> Scripts<'a> {
             .then_some(Self { cx, bundle })
     }
 
+    /// The scripts of `bundle`, which the version holds.
+    pub(crate) fn require(cx: &'a dyn TableContext, bundle: &'a str) -> Result<Self, ConvertError> {
+        Self::open(cx, bundle).ok_or_else(|| missing(bundle))
+    }
+
     fn asset(&self, name: &str) -> String {
         format!("{}/{name}.lua", self.bundle)
     }
@@ -147,17 +152,22 @@ fn parse_source(asset: &str, bytes: Vec<u8>) -> Result<Block, ConvertError> {
     lua::parse(&source).map_err(|e| malformed(format!("{asset}: {e}")))
 }
 
-/// A plan of one asset, or of none when the version holds no sources for it.
-pub(crate) struct OneAsset<F> {
-    names: Vec<String>,
-    build: F,
+/// The error of a source that the version does not hold.
+pub(crate) fn missing(what: &str) -> ConvertError {
+    ConvertError::new("missing_asset", format!("the version holds no {what}"))
 }
 
-impl<F> OneAsset<F>
-where
-    F: Fn() -> Result<Asset, ConvertError> + Sync,
-{
-    pub(crate) fn new(name: &str, build: F) -> Self {
+/// A plan of one asset, which `build` builds from what it reads of the version.
+pub(crate) struct OneAsset {
+    names: Vec<String>,
+    build: fn(&dyn TableContext) -> Result<Asset, ConvertError>,
+}
+
+impl OneAsset {
+    pub(crate) fn new(
+        name: &str,
+        build: fn(&dyn TableContext) -> Result<Asset, ConvertError>,
+    ) -> Self {
         Self {
             names: vec![name.to_owned()],
             build,
@@ -165,19 +175,20 @@ where
     }
 }
 
-impl<F> TablePlan for OneAsset<F>
-where
-    F: Fn() -> Result<Asset, ConvertError> + Sync,
-{
+impl TablePlan for OneAsset {
     fn names(&self) -> &[String] {
         &self.names
     }
 
-    fn convert(&self, _index: usize) -> Result<TableAsset, ConvertError> {
+    fn convert(&self, _index: usize, cx: &dyn TableContext) -> Result<TableAsset, ConvertError> {
         Ok(TableAsset {
-            asset: (self.build)()?,
+            asset: (self.build)(cx)?,
             references: Vec::new(),
         })
+    }
+
+    fn reusable(&self) -> bool {
+        true
     }
 }
 
@@ -189,7 +200,7 @@ impl TablePlan for NoAssets {
         &[]
     }
 
-    fn convert(&self, index: usize) -> Result<TableAsset, ConvertError> {
+    fn convert(&self, index: usize, _cx: &dyn TableContext) -> Result<TableAsset, ConvertError> {
         Err(ConvertError::new(
             "missing_asset",
             format!("no asset {index}"),

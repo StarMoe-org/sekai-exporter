@@ -1295,6 +1295,7 @@ dependencies = [
  "sekai-codec",
  "sekai-format",
  "sekai-unity",
+ "serde",
  "serde_json",
 ]
 

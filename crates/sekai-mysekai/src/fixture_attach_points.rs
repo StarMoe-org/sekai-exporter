@@ -31,11 +31,11 @@ impl TableConverter for FixtureAttachPoints {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if models(cx).next().is_none() {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 
@@ -105,7 +105,7 @@ mod tests {
         let plan = FixtureAttachPoints.plan(&version).unwrap();
         assert_eq!(plan.names(), [NAME]);
         assert_eq!(
-            json_of(&plan.convert(0).unwrap().asset),
+            json_of(&plan.convert(0, &version).unwrap().asset),
             json!({"packages": {"a": points(2), "b": points(0)}})
         );
     }
@@ -121,7 +121,7 @@ mod tests {
             member.to_vec(),
         );
         let plan = FixtureAttachPoints.plan(&version).unwrap();
-        let joined = plan.convert(0).unwrap().asset;
+        let joined = plan.convert(0, &version).unwrap().asset;
         let sekai_convert::Content::File { bytes, .. } = &joined.members[0].content else {
             panic!("the document is a file")
         };
@@ -140,7 +140,7 @@ mod tests {
             b"not json".to_vec(),
         );
         let plan = FixtureAttachPoints.plan(&version).unwrap();
-        assert_eq!(plan.convert(0).unwrap_err().code, "malformed");
+        assert_eq!(plan.convert(0, &version).unwrap_err().code, "malformed");
     }
 
     #[test]

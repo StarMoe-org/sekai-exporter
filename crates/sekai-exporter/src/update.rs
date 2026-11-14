@@ -16,7 +16,6 @@ use sekai_format::identity::VersionIdentity;
 use sekai_format::publication::Pointer;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_pipeline::claims::Claims;
-use sekai_pipeline::eval::Output;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::parallel;
 use sekai_pipeline::records::{Earlier, Records, UNIT_RECORDS};
@@ -25,7 +24,7 @@ use sekai_pipeline::state::{
     BundleState, MemoryFiles, RegionState, Root, StateFiles, TableOutput, Written,
 };
 use sekai_pipeline::stream::{self, Entry, InBundle, Segment, Stream};
-use sekai_pipeline::tables::TableStage;
+use sekai_pipeline::tables::{Built, TableStage};
 use sekai_publish::patch::{self, Change, Lookup, Previous};
 use sekai_publish::{Binding, Layout, Object, Publication};
 use sekai_unity::{BoundedBlockCache, NoClasses};
@@ -718,7 +717,7 @@ fn storage_target(region: &str) -> String {
 struct Views {
     canonical: Publication,
     storage: Publication,
-    tables: Vec<Output>,
+    tables: Vec<Built>,
 }
 
 impl Views {
@@ -779,12 +778,12 @@ impl Context<'_> {
     ) -> Result<Views, String> {
         let owners = advance.owners()?;
         let canonical = publications.canonical.lookup(self.objects);
-        let tables = self.build_tables(opened, &advance.state.claims, &owners, &canonical)?;
+        let tables = self.build_tables(opened, advance.state, &owners, &canonical)?;
         let (mut old, mut new) = advance.canonical_bindings(&canonical, &owners)?;
         old.extend(table_bindings(&advance.state.tables)?);
-        new.extend(tables.iter().map(|output| Binding {
-            name: output.name.clone(),
-            document: output.document.clone(),
+        new.extend(tables.iter().map(|built| Binding {
+            name: built.output.name.clone(),
+            document: built.output.document.clone(),
         }));
         let requests = self.requests();
         let change = {
@@ -820,16 +819,16 @@ impl Context<'_> {
         })
     }
 
-    /// The assets that the converters of tables build, with the assets that `claims` own as
-    /// those of the version: their documents are those of `owners`, or else those of the
-    /// previous publication `canonical`.
+    /// The assets that the converters of tables build, or keep from those the state lists, with
+    /// the assets that the claims of `state` own as those of the version: their documents are
+    /// those of `owners`, or else those of the previous publication `canonical`.
     fn build_tables(
         &self,
         opened: &Opened,
-        claims: &[Claims],
+        state: &RegionState,
         owners: &BTreeMap<String, Key>,
         canonical: &Lookup<'_>,
-    ) -> Result<Vec<Output>, String> {
+    ) -> Result<Vec<Built>, String> {
         let Some(tables) = &opened.tables else {
             return Ok(Vec::new());
         };
@@ -844,9 +843,10 @@ impl Context<'_> {
             store: self.objects,
             recorder: self.monitor,
             threads: self.requests(),
+            previous: &state.tables,
         };
         let forms: Vec<&'static str> = opened.converters.iter().map(|c| c.name()).collect();
-        build_tables(&stage, claims, &forms, &document)
+        build_tables(&stage, &state.claims, &forms, &document)
     }
 
     /// Applies `change` to the publication `previous` of `view`, as the version `name`.

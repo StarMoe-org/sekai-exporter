@@ -223,6 +223,14 @@ impl<'a> TalkPackages<'a> {
         })
     }
 
+    /// The packages of the version, which holds both.
+    pub(crate) fn require(cx: &'a dyn TableContext) -> Result<Self, ConvertError> {
+        Ok(Self {
+            scripts: Scripts::require(cx, TALK_BUNDLE)?,
+            library: Scripts::require(cx, LIBRARY_BUNDLE)?,
+        })
+    }
+
     /// The reader of the scripts of the packages.
     pub(crate) fn reader(self) -> Result<TalkReader<'a>, ConvertError> {
         Ok(TalkReader {

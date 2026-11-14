@@ -251,12 +251,15 @@ impl TableConverter for Talks {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(packages) = TalkPackages::open(cx) else {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        if TalkPackages::open(cx).is_none() {
             return Ok(Box::new(NoAssets));
-        };
-        Ok(Box::new(OneAsset::new(NAME, move || {
-            build(&mut packages.reader()?, &Tables::read(cx)?)
+        }
+        Ok(Box::new(OneAsset::new(NAME, |cx| {
+            build(
+                &mut TalkPackages::require(cx)?.reader()?,
+                &Tables::read(cx)?,
+            )
         })))
     }
 }
@@ -274,13 +277,13 @@ impl TableConverter for FixtureTalks {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(packages) = TalkPackages::open(cx) else {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        if TalkPackages::open(cx).is_none() {
             return Ok(Box::new(NoAssets));
-        };
-        Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, move || {
+        }
+        Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, |cx| {
             build_fixture_talks(
-                &mut packages.reader()?,
+                &mut TalkPackages::require(cx)?.reader()?,
                 &Tables::read(cx)?,
                 &no_talk_pairs(cx)?,
             )
@@ -647,7 +650,7 @@ mod tests {
         version: &Version,
     ) -> Result<Value, ConvertError> {
         let plan = converter.plan(version)?;
-        let asset = plan.convert(0)?.asset;
+        let asset = plan.convert(0, version)?.asset;
         let [member] = asset.members.as_slice() else {
             panic!("{asset:?}");
         };

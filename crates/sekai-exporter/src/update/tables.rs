@@ -6,19 +6,19 @@ use std::io;
 use sekai_catalog::Key;
 use sekai_convert::tables::{AssetEntry, TableConverter};
 use sekai_pipeline::claims::Claims;
-use sekai_pipeline::eval::Output;
 use sekai_pipeline::state::TableOutput;
-use sekai_pipeline::tables::{TableStage, VersionAssets};
+use sekai_pipeline::tables::{Built, TableStage, VersionAssets};
 use sekai_publish::Binding;
 
-/// The assets built from tables, with the produced assets that `claims` own as the assets of the
-/// version, whose forms are among `forms` and whose documents `document` finds.
+/// The assets built from tables, or kept from the previous run, with the produced assets that
+/// `claims` own as the assets of the version, whose forms are among `forms` and whose documents
+/// `document` finds.
 pub(super) fn build_tables(
     stage: &TableStage<'_>,
     claims: &[Claims],
     forms: &[&'static str],
     document: &(dyn Fn(&str) -> io::Result<Option<Key>> + Sync),
-) -> Result<Vec<Output>, String> {
+) -> Result<Vec<Built>, String> {
     let mut by_bundle: BTreeMap<String, Vec<AssetEntry>> = BTreeMap::new();
     for claims in claims {
         let Some(owner) = claims.owner().filter(|owner| !owner.failed) else {
@@ -42,12 +42,14 @@ pub(super) fn build_tables(
         document,
     };
     let built = sekai_pipeline::tables::build(stage, &version).map_err(|e| e.to_string())?;
+    let kept = built.iter().filter(|built| built.kept).count();
+    println!("table assets {} kept {kept}", built.len());
     let owned = |name: &str| {
         let found = claims.binary_search_by(|claims| claims.name.as_str().cmp(name));
         found.is_ok_and(|index| claims[index].owner().is_some())
     };
-    match built.iter().find(|output| owned(&output.name)) {
-        Some(output) => Err(format!("two assets are named {}", output.name)),
+    match built.iter().find(|built| owned(&built.output.name)) {
+        Some(built) => Err(format!("two assets are named {}", built.output.name)),
         None => Ok(built),
     }
 }

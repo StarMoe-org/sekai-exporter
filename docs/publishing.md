@@ -96,7 +96,7 @@ A run knows which objects the bucket holds from the records it reads and the upl
 |---|---|
 | `versions/<region>.json` | The identity of the last version, which `update --check` compares with |
 | `regions/<region>.json` | The root of the state of the region, which names its chunks |
-| `chunks/<aa>/<sha256>.json.gz` | The chunks of the states of every region: the bundles of the last version with their content and the files they hold, its units with their keys, the names its assets claim and which unit owns each, the assets built from tables, and the revision of each view's publication |
+| `chunks/<aa>/<sha256>.json.gz` | The chunks of the states of every region: the bundles of the last version with their content and the files they hold, its units with their keys, the names its assets claim and which unit owns each, the assets built from tables with what each read, and the revision of each view's publication |
 | `records/units/<aa>/<key>.json` | What a unit gave, under the key of its bundles' content and the evaluation, for any region whose unit has the same key |
 | `records/derivations/<aa>/<fingerprint>.json` | The object a derivation made, with its size |
 

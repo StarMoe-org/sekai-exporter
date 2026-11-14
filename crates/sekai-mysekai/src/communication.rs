@@ -76,12 +76,12 @@ impl TableConverter for CommunicationActions {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(scripts) = Scripts::open(cx, BUNDLE) else {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        if Scripts::open(cx, BUNDLE).is_none() {
             return Ok(Box::new(NoAssets));
-        };
-        Ok(Box::new(OneAsset::new(NAME, move || {
-            build(scripts, &rows::<Row>(cx, TABLE)?)
+        }
+        Ok(Box::new(OneAsset::new(NAME, |cx| {
+            build(Scripts::require(cx, BUNDLE)?, &rows::<Row>(cx, TABLE)?)
         })))
     }
 }

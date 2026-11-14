@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use sekai_convert::ConvertError;
 use sekai_convert::tables::TableContext;
 use sekai_format::episode::{Story, StoryType};
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use super::rules;
 
@@ -121,14 +121,14 @@ struct AreaPlaylist {
 }
 
 /// What a row of `character2ds` says about a character.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(super) struct Character2d {
     pub(super) asset_name: Option<String>,
     pub(super) unit: Option<String>,
 }
 
 /// A row of `costume2ds`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Costume2d {
     pub(super) group: i64,
     pub(super) from: String,
@@ -137,7 +137,7 @@ pub(super) struct Costume2d {
 }
 
 /// Where the data of an area conversation is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct AreaSource {
     pub(super) action_set_id: i64,
     pub(super) area_id: i64,
@@ -148,7 +148,7 @@ pub(super) struct AreaSource {
 }
 
 /// One episode of the tables.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct Row {
     pub(super) story: Story,
     /// The bundles that may hold the scene data, in order.

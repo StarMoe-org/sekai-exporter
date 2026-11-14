@@ -27,6 +27,7 @@ use crate::claims::{self, Claims, Ruling};
 use crate::eval::{Output, hex, parallel};
 use crate::reuse::{Outcome, UnitKey, UnitResult};
 use crate::stream::Content;
+use crate::tables::{Built, Trace};
 use crate::version::BundleFiles;
 
 /// The format version of the root of a region.
@@ -148,16 +149,21 @@ pub struct TableOutput {
     pub document: String,
     /// The error code, for an asset that could not be produced.
     pub error: Option<String>,
+    /// What it read, when its plan is reusable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
 }
 
 impl TableOutput {
-    /// The state of `output`.
-    pub fn of(output: &Output) -> Self {
+    /// The state of `built`.
+    pub fn of(built: &Built) -> Self {
+        let output = &built.output;
         Self {
             name: output.name.clone(),
             form: output.form.to_owned(),
             document: output.document.to_string(),
             error: output.error.clone(),
+            trace: built.trace.clone(),
         }
     }
 
@@ -498,6 +504,16 @@ mod tests {
                 form: "costume".to_owned(),
                 document: format!("{}.json", "ab".repeat(32)),
                 error: None,
+                trace: Some(Trace {
+                    reads: vec![
+                        crate::tables::Read::Table("costumes".to_owned()),
+                        crate::tables::Read::Shared {
+                            map: "roles".to_owned(),
+                            key: "1".to_owned(),
+                        },
+                    ],
+                    digest: "cd".repeat(32),
+                }),
             }],
         }
     }
@@ -648,7 +664,11 @@ mod tests {
             document: Key::of(b"{}", "json"),
             error: Some("missing_asset".to_owned()),
         };
-        let state = TableOutput::of(&output);
+        let state = TableOutput::of(&Built {
+            output: output.clone(),
+            trace: None,
+            kept: false,
+        });
         assert_eq!(state.output(&["costume"]).unwrap(), output);
         assert!(state.output(&["episode"]).is_err());
     }

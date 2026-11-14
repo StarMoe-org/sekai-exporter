@@ -83,11 +83,11 @@ impl TableConverter for FixtureAreas {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if meta_assets(cx).next().is_none() {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 
@@ -186,7 +186,7 @@ mod tests {
         let plan = FixtureAreas.plan(&version).unwrap();
         assert_eq!(plan.names(), [NAME]);
         assert_eq!(
-            json_of(&plan.convert(0).unwrap().asset),
+            json_of(&plan.convert(0, &version).unwrap().asset),
             json!({"packages": {"a": {"motionArea": []}, "b": {"motionArea": [[true]]}}})
         );
     }

@@ -54,6 +54,7 @@ fn evaluate(
     let manifest = ["fixture_data", "fixture_scene"].map(|name| Entry {
         name: name.to_owned(),
         size: 1,
+        content: String::new(),
         dependencies: vec![
             if name == "fixture_data" {
                 "fixture_scene"

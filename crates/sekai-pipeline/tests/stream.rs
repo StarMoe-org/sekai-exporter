@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::LocalStore;
+use sekai_catalog::{LocalStore, MemoryUnitRecords, UnitRecords};
 use sekai_convert::image::Texture;
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex,
@@ -17,6 +17,7 @@ use sekai_convert::{
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
+use sekai_pipeline::reuse::{self, Reuse, UnitResult};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
 use sekai_unity::{NoBlockCache, NoClasses};
@@ -52,6 +53,7 @@ fn entry(name: &str, dependencies: &[&str]) -> Entry {
     Entry {
         name: name.to_owned(),
         size: 1,
+        content: String::new(),
         dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
     }
 }
@@ -101,6 +103,48 @@ impl Converter for Data {
 
 fn converters() -> Vec<Box<dyn Converter>> {
     vec![Box::new(Texture), Box::new(Data)]
+}
+
+/// The converter of the same form at its next version, giving the same assets.
+struct Next(Box<dyn Converter>);
+
+impl Converter for Next {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn version(&self) -> u32 {
+        self.0.version() + 1
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        self.0.is_root(object, script, paths)
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        self.0.convert(root, cx)
+    }
+}
+
+/// The converter of the same form and version in a build that cannot read its roots yet.
+struct Unready(Box<dyn Converter>);
+
+impl Converter for Unready {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn version(&self) -> u32 {
+        self.0.version()
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        self.0.is_root(object, script, paths)
+    }
+
+    fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        Err(ConvertError::new("unsupported", "not readable yet"))
+    }
 }
 
 fn scratch(name: &str) -> PathBuf {
@@ -165,11 +209,23 @@ fn streamed_in_segments(
 ) -> Streamed {
     let store = LocalStore::open(root).unwrap();
     let converters = converters();
-    let stream = Stream {
-        converters: &converters,
+    let derivations = MemoryDerivations::default();
+    let stream = stream_of(run, &store, &converters, &derivations);
+    stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, segment_done).unwrap()
+}
+
+/// The stream of `run`, which writes to `store` and records derivations in `derivations`.
+fn stream_of<'a>(
+    run: &Run<'a>,
+    store: &'a LocalStore,
+    converters: &'a [Box<dyn Converter>],
+    derivations: &'a MemoryDerivations,
+) -> Stream<'a> {
+    Stream {
+        converters,
         naming: run.naming,
-        store: &store,
-        derivations: &MemoryDerivations::default(),
+        store,
+        derivations,
         indexes: &NoBundleIndexes,
         cache: &NoBlockCache,
         classes: &NoClasses,
@@ -179,8 +235,215 @@ fn streamed_in_segments(
         segment: run.segment,
         ledger: None,
         limit: run.limit,
+    }
+}
+
+/// What an evaluation of `run` that takes the results `records` hold gives: the names of the
+/// entries it evaluated, how many units took a recorded result, and the result. The results a
+/// later run may take are recorded in `records`.
+fn streamed_reusing(
+    root: &Path,
+    run: &Run<'_>,
+    records: &MemoryUnitRecords,
+) -> (Vec<String>, usize, Streamed) {
+    streamed_reusing_with(root, run, records, &converters())
+}
+
+/// What [`streamed_reusing`] gives with `converters`.
+fn streamed_reusing_with(
+    root: &Path,
+    run: &Run<'_>,
+    records: &MemoryUnitRecords,
+    converters: &[Box<dyn Converter>],
+) -> (Vec<String>, usize, Streamed) {
+    let store = LocalStore::open(root).unwrap();
+    let derivations = MemoryDerivations::default();
+    let stream = stream_of(run, &store, converters, &derivations);
+    let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
+    let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
+    let reused = reuse.reused();
+    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
+    records.put(&reusable(&results)).unwrap();
+    (evaluated, reused, streamed)
+}
+
+/// The records of the `results` that a later run may take, by key.
+fn reusable(results: &[UnitResult]) -> Vec<([u8; 32], Vec<u8>)> {
+    let reusable = results.iter().filter_map(|result| {
+        let key = result.reusable_key()?;
+        Some((key.0, result.record.bytes().unwrap()))
+    });
+    reusable.collect()
+}
+
+/// `streamed` without the counts of derivations, which follow from what earlier runs recorded.
+fn content(streamed: &Streamed) -> Streamed {
+    let mut content = streamed.clone();
+    content.evaluation.converted = 0;
+    content.evaluation.reused = 0;
+    content
+}
+
+/// Two independent units: the data object refers to a material of `fixture_scene`, which its
+/// unit does not depend on, so that asset fails.
+fn identified_manifest(data: &str, scene: &str) -> Vec<Entry> {
+    let mut manifest = vec![entry("fixture_data", &[]), entry("fixture_scene", &[])];
+    manifest[0].content = data.to_owned();
+    manifest[1].content = scene.to_owned();
+    manifest
+}
+
+#[test]
+fn recorded_units_give_the_result_of_evaluating_them() {
+    let root = scratch("reuse");
+    let records = MemoryUnitRecords::default();
+    let run = |manifest| Run {
+        manifest,
+        ..Run::default()
     };
-    stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, segment_done).unwrap()
+    let whole = streamed(&root, &run(identified_manifest("d1", "s1")));
+
+    let (evaluated, reused, first) =
+        streamed_reusing(&root, &run(identified_manifest("d1", "s1")), &records);
+    assert_eq!(evaluated, ["fixture_data", "fixture_scene"]);
+    assert_eq!(reused, 0);
+    assert_eq!(content(&first), content(&whole));
+    assert_eq!(records.len(), 2);
+
+    let inputs = Fixtures::default();
+    let again = Run {
+        inputs: &inputs,
+        ..run(identified_manifest("d1", "s1"))
+    };
+    let (evaluated, reused, second) = streamed_reusing(&root, &again, &records);
+    assert!(evaluated.is_empty());
+    assert_eq!(reused, 2);
+    assert!(inputs.0.lock().unwrap().is_empty());
+    assert_eq!(content(&second), content(&whole));
+    assert_eq!(second.evaluation.converted, 0);
+
+    // A new hash of one bundle evaluates its unit alone.
+    let (evaluated, reused, third) =
+        streamed_reusing(&root, &run(identified_manifest("d2", "s1")), &records);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+    assert_eq!(content(&third), content(&whole));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_new_version_evaluates_again_only_the_units_with_roots_of_its_form() {
+    let root = scratch("versions");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    streamed_reusing(&root, &run, &records);
+    assert_eq!(records.len(), 2);
+
+    // Only fixture_data has roots of the data form.
+    let renewed: Vec<Box<dyn Converter>> = vec![Box::new(Texture), Box::new(Next(Box::new(Data)))];
+    let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+
+    let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
+    assert!(evaluated.is_empty());
+    assert_eq!(reused, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_asset_that_failed_to_convert_is_converted_again_by_the_next_run() {
+    let root = scratch("retried");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    let whole = streamed(&root, &run);
+
+    let unready: Vec<Box<dyn Converter>> =
+        vec![Box::new(Unready(Box::new(Texture))), Box::new(Data)];
+    let (_, _, first) = streamed_reusing_with(&root, &run, &records, &unready);
+    let failed = |streamed: &Streamed| {
+        let outputs = &streamed.evaluation.outputs;
+        outputs
+            .iter()
+            .any(|o| o.error.as_deref() == Some("unsupported"))
+    };
+    assert!(failed(&first));
+    // The textures are in fixture_data, which is not recorded.
+    assert_eq!(records.len(), 1);
+
+    // The same version, now able to read them, converts them.
+    let (evaluated, reused, second) = streamed_reusing(&root, &run, &records);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+    assert!(!failed(&second));
+    assert_eq!(content(&second), content(&whole));
+    assert_eq!(records.len(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_unit_without_identified_contents_or_with_errors_is_not_recorded() {
+    let root = scratch("unrecorded");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("", "s1"),
+        ..Run::default()
+    };
+    streamed_reusing(&root, &run, &records);
+    assert_eq!(records.len(), 1);
+
+    let mut manifest = identified_manifest("d1", "s1");
+    manifest[0].dependencies = vec!["absent".to_owned()];
+    manifest.push(entry("absent", &[]));
+    manifest[2].content = "a1".to_owned();
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest,
+        ..Run::default()
+    };
+    let (_, _, streamed) = streamed_reusing(&root, &run, &records);
+    assert!(streamed.errors.iter().any(|e| e.name == "absent"));
+    // fixture_data and absent read the missing bundle; fixture_scene alone is recorded.
+    assert_eq!(records.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_unit_has_a_result_and_only_recordable_ones_are_reusable() {
+    let root = scratch("results");
+    let store = LocalStore::open(&root).unwrap();
+    let derivations = MemoryDerivations::default();
+    let converters = converters();
+    let run = Run {
+        manifest: identified_manifest("", "s1"),
+        ..Run::default()
+    };
+    let stream = stream_of(&run, &store, &converters, &derivations);
+    let reuse = Reuse::new(&run.manifest, &stream, &MemoryUnitRecords::default()).unwrap();
+    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
+
+    let units: Vec<(&str, bool, bool)> = results
+        .iter()
+        .map(|r| (r.unit.as_str(), r.key.is_some(), r.reusable))
+        .collect();
+    assert_eq!(
+        units,
+        [
+            ("fixture_data", false, false),
+            ("fixture_scene", true, true)
+        ]
+    );
+    // The results give back the assets of the evaluation.
+    let given = reuse::evaluation(&results, &stream).unwrap();
+    assert_eq!(given.outputs, streamed.evaluation.outputs);
+    assert_eq!(given.unnamed, streamed.evaluation.unnamed);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

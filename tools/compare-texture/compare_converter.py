@@ -1,7 +1,7 @@
 """Compare the texture converter with reference decoders, texture by texture.
 
 Usage:
-    python compare_converter.py <texture_hashes executable> <bundle directory>...
+    python compare_converter.py <texture_hashes executable> <block_decode executable> <bundle directory>...
 
 The executable is the `texture_hashes` example of `sekai-pipeline`. It opens the directories as
 one version, runs the texture converter on every `Texture2D` and `Cubemap`, and prints the
@@ -10,7 +10,7 @@ reference decoders of `compare.py`, and compares the two lists by bundle and pat
 covers what the converter adds to the decoder: reading the fields, following `m_StreamData` into
 the resource files of the bundle, and the row order of the result.
 
-Requires UnityPy (MIT), astc-encoder-py (MIT) and texture2ddecoder (MIT).
+Requires UnityPy (MIT) and astc-encoder-py (MIT).
 """
 
 import hashlib
@@ -22,7 +22,7 @@ from collections import Counter
 
 import UnityPy
 
-from compare import deobfuscate, reference
+from compare import References, deobfuscate
 
 CLASSES = {"Texture2D", "Cubemap"}
 
@@ -32,8 +32,7 @@ def top_down(pixels, width, height):
     return b"".join(pixels[(height - 1 - y) * stride : (height - y) * stride] for y in range(height))
 
 
-def references(roots):
-    contexts = {}
+def reference_hashes(references, roots):
     known = {}
     out = {}
     for root in roots:
@@ -54,7 +53,7 @@ def references(roots):
                 data = bytes(tex.get_image_data())
                 digest = hashlib.sha256(struct.pack("<iII", fmt, width, height) + data).digest()
                 if digest not in known:
-                    pixels = reference(contexts, fmt, width, height, data)
+                    pixels = references.decode(fmt, width, height, data)
                     if pixels is None:
                         known[digest] = f"no reference for format {fmt}"
                     else:
@@ -65,16 +64,19 @@ def references(roots):
 
 def main():
     UnityPy.config.FALLBACK_UNITY_VERSION = "2022.3.62f2"
-    names = Counter(p.name for root in sys.argv[2:] for p in pathlib.Path(root).iterdir() if p.is_file())
+    roots = sys.argv[3:]
+    names = Counter(p.name for root in roots for p in pathlib.Path(root).iterdir() if p.is_file())
     shared = sorted(name for name, count in names.items() if count > 1)
     if shared:
         sys.exit(f"bundle names must be unique across the directories: {', '.join(shared)}")
-    listing = subprocess.run([sys.argv[1], *sys.argv[2:]], check=True, capture_output=True).stdout
+    listing = subprocess.run([sys.argv[1], *roots], check=True, capture_output=True).stdout
     ours = {}
     for line in listing.decode().splitlines():
         bundle, path_id, result = line.split("\t", 2)
         ours[(bundle, path_id)] = result
-    theirs = references(sys.argv[2:])
+    references = References(sys.argv[2])
+    theirs = reference_hashes(references, roots)
+    references.close()
     results = Counter()
     samples = []
     for key in sorted(set(ours) | set(theirs)):

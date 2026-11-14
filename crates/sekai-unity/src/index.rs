@@ -386,15 +386,24 @@ impl IndexVisitor {
     }
 
     fn script_name(&self) -> Option<String> {
-        let class = self.strings.get("m_ClassName")?;
-        let namespace = self.strings.get("m_Namespace")?;
-        let assembly = self.strings.get("m_AssemblyName")?;
-        let assembly = assembly.strip_suffix(".dll").unwrap_or(assembly);
-        Some(if namespace.is_empty() {
-            format!("{assembly}/{class}")
-        } else {
-            format!("{assembly}/{namespace}.{class}")
-        })
+        let text = |name| self.strings.get(name).map(String::as_str);
+        Some(script_name(
+            text("m_AssemblyName")?,
+            text("m_Namespace")?,
+            text("m_ClassName")?,
+        ))
+    }
+}
+
+/// The full name of a `MonoScript` from its `m_AssemblyName`, `m_Namespace` and `m_ClassName`:
+/// `"<assembly>/<namespace>.<class>"`, the assembly without `.dll`, and `"<assembly>/<class>"`
+/// in the global namespace.
+pub fn script_name(assembly: &str, namespace: &str, class: &str) -> String {
+    let assembly = assembly.strip_suffix(".dll").unwrap_or(assembly);
+    if namespace.is_empty() {
+        format!("{assembly}/{class}")
+    } else {
+        format!("{assembly}/{namespace}.{class}")
     }
 }
 

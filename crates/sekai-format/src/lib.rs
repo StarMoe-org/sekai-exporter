@@ -1,10 +1,12 @@
-//! Types of the published documents: object documents, asset documents, index shards, listings,
-//! path indexes and the documents asset forms carry as members.
+//! Types of the published documents: object documents, asset documents, index roots with their
+//! table chunks and shards, path indexes, the chunking they share, and the documents asset forms
+//! carry as members.
 //!
 //! Consumers depend on this crate to read the published output.
 
 pub mod asset;
 pub mod audio;
+pub mod chunks;
 pub mod clip;
 pub mod components;
 pub mod costume;

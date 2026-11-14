@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::paths::{Chunk, PathIndex};
 use sekai_format::publication::Pointer;
 use sekai_publish::{File, Layout, Plan, publish};
@@ -56,7 +56,6 @@ fn view(store: &LocalStore, version: &str, paths: &[String]) -> Plan {
         assets: Vec::new(),
         listings: BTreeMap::new(),
         failures: Vec::new(),
-        revision: format!("revision of {version}"),
     }
 }
 
@@ -88,7 +87,7 @@ fn every_path_resolves_to_its_file_and_no_other_path_does() {
     let store = s.store();
     let plan = view(&store, "v1", &paths(9000));
     let pointer = publish(
-        &store,
+        &Objects::local(&store),
         &s.published(),
         "jp/storage",
         &plan,
@@ -137,7 +136,7 @@ fn a_change_to_one_path_keeps_the_other_chunks() {
     let store = s.store();
     let mut names = paths(20000);
     let first = publish(
-        &store,
+        &Objects::local(&store),
         &s.published(),
         "jp/storage",
         &view(&store, "v1", &names),
@@ -147,7 +146,7 @@ fn a_change_to_one_path_keeps_the_other_chunks() {
     .unwrap();
     names.push("group_03/item_10000a.txt".to_owned());
     let second = publish(
-        &store,
+        &Objects::local(&store),
         &s.published(),
         "jp/storage",
         &view(&store, "v2", &names),
@@ -179,7 +178,7 @@ fn every_version_keeps_its_pointer() {
     let store = s.store();
     let root = s.published();
     let one = publish(
-        &store,
+        &Objects::local(&store),
         &root,
         "jp/canonical",
         &view(&store, "1.0.0", &paths(10)),
@@ -188,7 +187,7 @@ fn every_version_keeps_its_pointer() {
     )
     .unwrap();
     let two = publish(
-        &store,
+        &Objects::local(&store),
         &root,
         "jp/canonical",
         &view(&store, "1.1.0", &paths(20)),
@@ -211,7 +210,7 @@ fn a_version_that_cannot_name_a_file_is_refused() {
     let store = s.store();
     for version in ["", "..", "a/b", "v 1"] {
         let error = publish(
-            &store,
+            &Objects::local(&store),
             &s.published(),
             "jp/canonical",
             &view(&store, version, &paths(3)),

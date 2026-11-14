@@ -28,13 +28,14 @@ use sekai_convert::{Converter, ObjectId};
 use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
 use sekai_unity::{BlockCache, ByteSource, ClassLayouts};
+use serde::{Deserialize, Serialize};
 
 use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned, Produced, Runner};
 use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
 use crate::sched::Scheduler;
-use crate::version::{BundleError, BundleInput, Parsed, Version, bundle_files};
+use crate::version::{BundleError, BundleFiles, BundleInput, Parsed, Version, bundle_files};
 
 /// The estimated memory of the bundles that stay parsed while a version streams, in bytes.
 pub(crate) const PARSED_BYTES: u64 = 512 << 20;
@@ -46,6 +47,10 @@ pub struct Entry {
     pub name: String,
     /// The size of the bundle in bytes, as the manifest declares it.
     pub size: u64,
+    /// What identifies the bytes of the bundle, such as a hash the manifest declares for them or
+    /// their SHA-256, or empty when nothing does. Entries with the same name and content hold the
+    /// same bytes.
+    pub content: String,
     /// The names of the bundles this one depends on.
     pub dependencies: Vec<String>,
 }
@@ -126,7 +131,7 @@ pub struct Stream<'a> {
 }
 
 /// A reference that leaves the window of its unit for a file of another bundle.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Outside {
     /// The bundle of the unit.
     pub unit: String,
@@ -177,32 +182,42 @@ pub fn with_dependencies(
         Ok(bundle_files(&input, cache, indexes)?.unwrap_or_default())
     });
     let files = files.into_iter().collect::<io::Result<Vec<_>>>()?;
-    let mut order: Vec<usize> = (0..manifest.len()).collect();
-    order.sort_by(|&a, &b| manifest[a].name.cmp(&manifest[b].name));
-    let mut holders: HashMap<&str, usize> = HashMap::new();
-    for &entry in &order {
-        for (path, _) in &files[entry] {
-            holders.entry(path.as_str()).or_insert(entry);
-        }
-    }
-    let dependencies: Vec<Vec<String>> = files
+    let bundles: Vec<(&str, &BundleFiles)> = manifest
         .iter()
-        .enumerate()
-        .map(|(entry, files)| {
-            let names: BTreeSet<&str> = files
-                .iter()
-                .flat_map(|(_, externals)| externals)
-                .filter_map(|external| holders.get(external.rsplit('/').next()?))
-                .filter(|&&holder| holder != entry)
-                .map(|&holder| manifest[holder].name.as_str())
-                .collect();
-            names.into_iter().map(str::to_owned).collect()
-        })
+        .map(|entry| entry.name.as_str())
+        .zip(&files)
         .collect();
+    let dependencies = referred_bundles(&bundles);
     for (entry, dependencies) in manifest.iter_mut().zip(dependencies) {
         entry.dependencies = dependencies;
     }
     Ok(())
+}
+
+/// The bundles each of `bundles`, given by name with its serialized files, refers to: the other
+/// bundles that hold a file its files name as an external file, in name order. When more than one
+/// bundle holds a file of the same name, the first in name order holds it, as in a version.
+pub fn referred_bundles(bundles: &[(&str, &BundleFiles)]) -> Vec<Vec<String>> {
+    let mut order: Vec<usize> = (0..bundles.len()).collect();
+    order.sort_by_key(|&bundle| bundles[bundle].0);
+    let mut holders: HashMap<&str, usize> = HashMap::new();
+    for &bundle in &order {
+        for (path, _) in bundles[bundle].1 {
+            holders.entry(path.as_str()).or_insert(bundle);
+        }
+    }
+    let referred = |bundle: usize| -> Vec<String> {
+        let names: BTreeSet<&str> = bundles[bundle]
+            .1
+            .iter()
+            .flat_map(|(_, externals)| externals)
+            .filter_map(|external| holders.get(external.rsplit('/').next()?))
+            .filter(|&&holder| holder != bundle)
+            .map(|&holder| bundles[holder].0)
+            .collect();
+        names.into_iter().map(str::to_owned).collect()
+    };
+    (0..bundles.len()).map(referred).collect()
 }
 
 /// The names of the bundles of `manifest` in the order an evaluation first opens them: the window
@@ -408,14 +423,19 @@ impl Root<'_> {
 
 /// Everything gathered over the segments.
 #[derive(Default)]
-struct Gathered {
+pub(crate) struct Gathered {
     /// Each asset with the logical path and path ID of its root.
-    outputs: Vec<(Output, String, i64)>,
-    unnamed: Vec<(String, i64)>,
+    pub(crate) outputs: Vec<(Output, String, i64)>,
+    /// Each root left unnamed, as its unit, logical path and path ID.
+    pub(crate) unnamed: Vec<(String, String, i64)>,
+    /// The forms of the named roots of each unit that has any, by unit name.
+    pub(crate) forms: BTreeMap<String, BTreeSet<&'static str>>,
+    /// The units with an asset whose conversion failed.
+    pub(crate) failed: BTreeSet<String>,
     converted: usize,
     reused: usize,
-    errors: BTreeMap<(String, &'static str), BundleError>,
-    outside: BTreeSet<Outside>,
+    pub(crate) errors: BTreeMap<(String, &'static str), BundleError>,
+    pub(crate) outside: BTreeSet<Outside>,
     /// The account of each entry that units can still read from.
     tallies: BTreeMap<usize, Tally>,
     ledgers: Vec<BundleLedger>,
@@ -449,6 +469,17 @@ pub fn evaluate_in_segments(
     stream: &Stream<'_>,
     segment_done: &mut dyn FnMut() -> io::Result<()>,
 ) -> io::Result<Streamed> {
+    gather(manifest, inputs, stream, segment_done).map(finish)
+}
+
+/// Evaluates as [`evaluate_in_segments`] does, up to telling apart the assets of different
+/// bundles that are given the same name.
+pub(crate) fn gather(
+    manifest: &[Entry],
+    inputs: &dyn Inputs,
+    stream: &Stream<'_>,
+    segment_done: &mut dyn FnMut() -> io::Result<()>,
+) -> io::Result<Gathered> {
     let units = Units::new(manifest);
     let runner = Runner::new(
         stream.store,
@@ -501,7 +532,7 @@ pub fn evaluate_in_segments(
                 segment_done()?;
             }
         }
-        Ok(finish(gathered))
+        Ok(gathered)
     })
 }
 
@@ -635,6 +666,8 @@ impl Gathered {
         let Gathered {
             outputs,
             unnamed,
+            forms,
+            failed,
             converted,
             reused,
             errors,
@@ -644,6 +677,8 @@ impl Gathered {
         } = segment;
         self.outputs.extend(outputs);
         self.unnamed.extend(unnamed);
+        self.forms.extend(forms);
+        self.failed.extend(failed);
         self.converted += converted;
         self.reused += reused;
         for error in errors.into_values() {
@@ -708,6 +743,8 @@ fn run_segment(
             let tally = stream
                 .ledger
                 .map(|ignored| (gathered.tallies.entry(unit).or_default(), ignored));
+            let mut unnamed = Vec::new();
+            let planned = roots.len();
             plan_unit(
                 &version,
                 bundle,
@@ -716,8 +753,21 @@ fn run_segment(
                 tally,
                 &mut roots,
                 &mut gathered.outside,
-                &mut gathered.unnamed,
+                &mut unnamed,
             );
+            let name = &units.entries[unit].name;
+            gathered.unnamed.extend(
+                unnamed
+                    .into_iter()
+                    .map(|(logical, path_id)| (name.clone(), logical, path_id)),
+            );
+            let forms: BTreeSet<&'static str> = roots[planned..]
+                .iter()
+                .map(|root| root.planned.converter.name())
+                .collect();
+            if !forms.is_empty() {
+                gathered.forms.insert(name.clone(), forms);
+            }
         }
     }
 
@@ -754,22 +804,53 @@ fn run_segment(
     let ran = runner.run(&runnable, &version)?;
     gathered.converted += ran.converted;
     gathered.reused += ran.reused;
+    if stream.ledger.is_some() {
+        let stored = stored_documents(&ran.outputs, stream.store)?;
+        for (produced, stored) in ran.outputs.iter().zip(&stored) {
+            let fresh = produced.as_ref().and_then(|p| p.document.as_ref());
+            if let Some(document) = fresh.or(stored.as_ref()) {
+                count_reads(&mut gathered.tallies, units, document);
+            }
+        }
+    }
     for (produced, (logical, path_id)) in ran.outputs.into_iter().zip(kept_roots) {
-        let Some(Produced { output, document }) = produced else {
+        let Some(Produced { output, .. }) = produced else {
             continue;
         };
-        if stream.ledger.is_some() {
-            // The document of an asset that an earlier run produced is in the store.
-            let document = match document {
-                Some(document) => document,
-                None => AssetDocument::from_bytes(&stream.store.read(&output.document)?)
-                    .map_err(io::Error::other)?,
-            };
-            count_reads(&mut gathered.tallies, units, &document);
+        if output.error.is_some() {
+            gathered.failed.insert(output.bundle.clone());
         }
         gathered.outputs.push((output, logical, path_id));
     }
     Ok(gathered)
+}
+
+/// How many stored documents are read at once. A document that is not in the local store comes
+/// from the destination, one round trip each.
+const DOCUMENT_READS: usize = 32;
+
+/// The document of each asset of `produced` that an earlier run produced, read from `store`
+/// [`DOCUMENT_READS`] at a time, and `None` for the others.
+fn stored_documents(
+    produced: &[Option<Produced>],
+    store: &dyn Store,
+) -> io::Result<Vec<Option<AssetDocument>>> {
+    let read = |i: usize| -> io::Result<Option<AssetDocument>> {
+        let Some(Produced {
+            output,
+            document: None,
+        }) = &produced[i]
+        else {
+            return Ok(None);
+        };
+        let bytes = store.read(&output.document)?;
+        AssetDocument::from_bytes(&bytes)
+            .map(Some)
+            .map_err(io::Error::other)
+    };
+    eval::parallel(produced.len(), DOCUMENT_READS, read)
+        .into_iter()
+        .collect()
 }
 
 /// Counts what the asset of `document` read for the ledgers of the bundles it read.
@@ -1002,10 +1083,12 @@ fn closure(
 }
 
 /// Orders the gathered assets by name and leaves out names that more than one asset received.
-fn finish(gathered: Gathered) -> Streamed {
+pub(crate) fn finish(gathered: Gathered) -> Streamed {
     let Gathered {
         mut outputs,
-        mut unnamed,
+        unnamed: roots,
+        forms: _,
+        failed: _,
         converted,
         reused,
         errors,
@@ -1013,6 +1096,10 @@ fn finish(gathered: Gathered) -> Streamed {
         tallies: _,
         mut ledgers,
     } = gathered;
+    let mut unnamed: Vec<(String, i64)> = roots
+        .into_iter()
+        .map(|(_, logical, path_id)| (logical, path_id))
+        .collect();
     outputs.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     let mut kept = Vec::with_capacity(outputs.len());
     for group in outputs.chunk_by(|a, b| a.0.name == b.0.name) {
@@ -1049,6 +1136,7 @@ mod tests {
         Entry {
             name: name.to_owned(),
             size,
+            content: String::new(),
             dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
         }
     }
@@ -1113,6 +1201,43 @@ mod tests {
         );
         assert_eq!(names(&units, &units.windows[0]), ["a"]);
         assert_eq!(names(&units, &units.windows[1]), ["c"]);
+    }
+
+    #[test]
+    fn a_bundle_refers_to_the_first_holder_of_each_external_file() {
+        let files = |files: &[(&str, &[&str])]| -> BundleFiles {
+            let owned = |paths: &[&str]| paths.iter().map(|p| (*p).to_owned()).collect();
+            files
+                .iter()
+                .map(|(path, externals)| ((*path).to_owned(), owned(externals)))
+                .collect()
+        };
+        let model = files(&[(
+            "CAB-model",
+            &[
+                "archive:/CAB-shader/CAB-shader",
+                "archive:/CAB-model/CAB-model",
+            ],
+        )]);
+        let shader = files(&[(
+            "CAB-shader",
+            &[
+                "archive:/CAB-global/CAB-global",
+                "Resources/unity_builtin_extra",
+            ],
+        )]);
+        let global = files(&[("CAB-global", &[])]);
+        let copy = files(&[("CAB-global", &[])]);
+        let bundles = [
+            ("model", &model),
+            ("shader", &shader),
+            ("z/global", &copy),
+            ("global", &global),
+        ];
+        assert_eq!(
+            referred_bundles(&bundles),
+            [vec!["shader"], vec!["global"], vec![], vec![]]
+        );
     }
 
     #[test]

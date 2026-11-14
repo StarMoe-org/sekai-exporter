@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use cpu_time::ThreadTime;
@@ -66,6 +66,17 @@ pub(crate) fn costs(monitor: &Monitor) -> BTreeMap<String, Cost> {
     monitor.costs.lock().unwrap().clone()
 }
 
+/// Stops the sampler of a monitor when dropped, also when the body of a watch panics, so that the
+/// panic is not left waiting for the sampler.
+struct StopSampling<'m>(&'m Monitor);
+
+impl Drop for StopSampling<'_> {
+    fn drop(&mut self) {
+        *self.0.done.lock().unwrap_or_else(PoisonError::into_inner) = true;
+        self.0.wake.notify_all();
+    }
+}
+
 impl Monitor {
     /// Runs `body` while samples are taken, then writes the summary.
     pub(crate) fn watch<T>(path: &Path, body: impl FnOnce(&Monitor) -> T) -> io::Result<T> {
@@ -79,9 +90,10 @@ impl Monitor {
         };
         let (result, peak) = std::thread::scope(|s| {
             let sampler = s.spawn(|| monitor.sample());
-            let result = body(&monitor);
-            *monitor.done.lock().unwrap() = true;
-            monitor.wake.notify_all();
+            let result = {
+                let _stop = StopSampling(&monitor);
+                body(&monitor)
+            };
             (result, sampler.join().expect("the sampler does not panic"))
         });
         monitor.finish(&peak)?;

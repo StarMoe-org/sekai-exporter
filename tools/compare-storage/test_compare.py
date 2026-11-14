@@ -388,7 +388,7 @@ class DeterminismTests(TreeTestCase):
     def test_skip_publication_leaves_out_publication_documents(self):
         documents = {
             f"{n}.json": b'{"format": "%s"}' % name.encode()
-            for n, name in enumerate(["index-root", "index-shard", "listing", "path-index"])
+            for n, name in enumerate(["index-root", "index-chunk", "index-shard", "path-index"])
         }
         documents["aa/idx.sqlite"] = b"SQLite format 3\x00"
         documents["bb/chunk.paths"] = b"SKPI"

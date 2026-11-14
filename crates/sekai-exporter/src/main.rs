@@ -5,6 +5,8 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(feature = "cdn")]
+mod bucket;
 mod budget;
 #[cfg(feature = "client")]
 mod client;
@@ -34,7 +36,7 @@ mod stats;
 mod storage;
 #[cfg(all(feature = "cdn", not(feature = "storage-view")))]
 mod storage {
-    use sekai_catalog::{Derivations, LocalStore};
+    use sekai_catalog::{Derivations, LocalStore, Objects};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
     use sekai_publish::Plan;
@@ -66,7 +68,7 @@ mod storage {
         _index: &Plan,
         _target: &str,
         destination: &Destination<'_>,
-        _store: &LocalStore,
+        _objects: &Objects<'_>,
         _derivations: &dyn Derivations,
         _threads: usize,
         _monitor: &Monitor,
@@ -106,17 +108,36 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
-         [--plain] [--force] [--verify]
+         [--plain] [--force] [--verify] [--check]
       Bring <output> up to the current version of a region of the configuration.
-      Bundles go to <output>/inputs, which holds game data and must stay private.
-      The canonical and the storage view are published under <output>/published
-      with their path indexes; --tree and --storage also write them as path
-      trees. A version that matches the last complete run is left alone unless
-      --force or --verify is given. --verify checks the bucket against a listing
-      of its store and uploads what it lacks, whatever its pointer says. --only
-      selects bundles by name prefix, with their dependencies. A selection is
-      neither recorded as a version nor sent to a bucket; it needs an <output>
-      without a complete run and empty --tree and --storage folders.
+      Bundles go to <output>/inputs, which holds game data and must stay
+      private. The canonical and the storage view are published under
+      <output>/published with their path indexes; --tree and --storage also
+      write them as path trees. A version that matches the last complete run is
+      left alone unless --force or --verify is given. Each bundle is evaluated
+      with the bundles it depends on: those the manifest lists and those that
+      hold the external files it names. When all of them hold the same content
+      as in an earlier run, the result that run recorded is taken instead, so
+      only the bundles of changed units are fetched. Content is the hash the
+      manifest declares, or else the bytes, which are fetched to compare;
+      --force evaluates every bundle again and records the results anew. With a
+      bucket, the run starts from the catalog the bucket keeps under state/ and
+      writes it back when it is done, so <output> needs nothing from earlier
+      runs; one run per bucket goes at a time. The catalog records what the
+      bucket holds as each upload is accepted, and a run uploads only what it
+      does not record; --verify first replaces that record with a listing of the
+      bucket's store, so the bucket gets back what it lost. The bucket also
+      keeps the asset documents of the last publication of each region under
+      state/, in one file that a run reads at its start; any other object
+      missing from <output>/store is read back from the bucket. --only selects
+      bundles by name prefix, with their dependencies. A selection is neither
+      recorded as a version nor sent to a bucket; it needs an <output> without a
+      complete run and empty --tree and --storage folders. --check only looks up
+      the current version and prints whether it differs from the last one
+      recorded: in the bucket, which keeps it under state/ beside the catalog,
+      or else in <output>. It exits with 0 when the version is unchanged and 1
+      when it changed, downloads and writes nothing, and cannot be combined
+      with --force, --verify, --only, --tree or --storage.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

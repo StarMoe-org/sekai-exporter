@@ -5,7 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use sekai_catalog::{Derivations, LocalStore};
+use sekai_catalog::{Derivations, LocalStore, Objects};
 use sekai_convert::Converter;
 use sekai_format::publication::Pointer;
 use sekai_game::obfuscation::deobfuscate;
@@ -150,17 +150,23 @@ fn virtual_live() -> Vec<Box<dyn Converter>> {
 
 #[cfg(feature = "episode")]
 fn story_data() -> Vec<Box<dyn Converter>> {
+    use sekai_moesekai::scenario_prefab::ScenarioPrefab;
     use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
-    vec![Box::new(ActionSetForm), Box::new(ScenarioBackgroundForm)]
+    vec![
+        Box::new(ActionSetForm),
+        Box::new(ScenarioBackgroundForm),
+        Box::new(ScenarioPrefab),
+    ]
 }
 
 #[cfg(not(feature = "episode"))]
 fn story_data() -> Vec<Box<dyn Converter>> {
     use sekai_convert::roots::Absent;
-    use sekai_moesekai::roots::{action_set, scenario_background};
+    use sekai_moesekai::roots::{action_set, scenario_background, scenario_prefab};
     vec![
         Absent::boxed("action-set", action_set),
         Absent::boxed("scenario-background", scenario_background),
+        Absent::boxed("scenario-prefab", scenario_prefab),
     ]
 }
 
@@ -331,6 +337,7 @@ fn walk(directory: &Path, prefix: &str, out: &mut Vec<Entry>) -> io::Result<()> 
             out.push(Entry {
                 name,
                 size: metadata.len(),
+                content: String::new(),
                 dependencies: Vec::new(),
             });
         }
@@ -402,8 +409,9 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
+            layout: Layout::Sqlite,
         },
-        &store,
+        &Objects::local(&store),
         options.threads,
         monitor,
     )?;
@@ -488,22 +496,23 @@ pub(crate) fn write_ledger(
     Ok(())
 }
 
-/// Where a publication goes: the output folder of the run, and the root of a path tree if one is
-/// wanted.
+/// Where a publication goes: the output folder of the run, the root of a path tree if one is
+/// wanted, and the layout of the documents published there.
 pub(crate) struct Destination<'a> {
     pub(crate) output: &'a Path,
     pub(crate) tree: Option<&'a Path>,
+    pub(crate) layout: Layout,
 }
 
-/// Lists `evaluation` in `<output>/assets.tsv`, publishes the index under `<output>/published` and,
-/// with a tree root, a path tree, working on up to `threads` threads. Returns the pointer and the
-/// plan of the publication.
+/// Lists `evaluation` in `<output>/assets.tsv`, publishes the index of `objects` under
+/// `<output>/published` and, with a tree root, a path tree, working on up to `threads` threads.
+/// Returns the pointer and the plan of the publication.
 pub(crate) fn publish(
     evaluation: &Evaluation,
     version: &str,
     target: &str,
     destination: &Destination<'_>,
-    store: &LocalStore,
+    objects: &Objects<'_>,
     threads: usize,
     monitor: &Monitor,
 ) -> Result<(Pointer, Plan), lexopt::Error> {
@@ -528,13 +537,13 @@ pub(crate) fn publish(
         })
         .collect();
     let publishing = monitor.span("publish", "index", "");
-    let plan = plan(version, &bindings, store, threads).map_err(|e| e.to_string())?;
+    let plan = plan(version, &bindings, objects, threads).map_err(|e| e.to_string())?;
     let pointer = sekai_publish::publish(
-        store,
+        objects,
         &output.join("published"),
         target,
         &plan,
-        Layout::Sqlite,
+        destination.layout,
         threads,
     )
     .map_err(|e| e.to_string())?;
@@ -542,7 +551,8 @@ pub(crate) fn publish(
     println!("published revision {}", pointer.revision);
     if let Some(root) = destination.tree {
         let _span = monitor.span("publish", "tree", "");
-        let report = tree::publish(store, root, &plan, threads).map_err(|e| e.to_string())?;
+        let report =
+            tree::publish(objects.local, root, &plan, threads).map_err(|e| e.to_string())?;
         println!(
             "tree written {} unchanged {} deleted {}",
             report.written, report.unchanged, report.deleted

@@ -11,7 +11,7 @@
 use std::fmt;
 
 pub use sekai_codec::{DecodeError, HdrSurface, Movie, Pcm, Sound, Surface};
-pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
+pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr, script_name};
 pub use sekai_unity::{Chunk, Value};
 
 #[cfg(feature = "animation")]
@@ -43,7 +43,9 @@ pub trait Converter: Send + Sync {
     /// The converter name. It is part of every fingerprint the converter produces.
     fn name(&self) -> &'static str;
 
-    /// The converter version. It changes only when the converter's output changes.
+    /// The converter version. It changes only when the output of an asset the converter produces
+    /// changes. An asset that fails is converted again by every run, so reading inputs it used to
+    /// refuse needs no new version.
     fn version(&self) -> u32;
 
     /// Which canonical media encoders this converter's members may use.
@@ -59,6 +61,9 @@ pub trait Converter: Send + Sync {
     /// refers to, as in [`Object::script`]: `"<assembly>/<namespace>.<class>"`, or `None` when
     /// the object refers to no script or the script does not resolve. `container_paths` are the
     /// paths under which bundles list the object.
+    ///
+    /// The rule belongs to the form, not to the version: every build picks the same roots for a
+    /// form name, with the converter or without it (see [`roots`]).
     fn is_root(
         &self,
         object: &ObjectIndex,

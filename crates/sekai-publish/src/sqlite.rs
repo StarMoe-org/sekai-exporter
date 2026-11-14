@@ -6,8 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use sekai_catalog::LocalStore;
 use sekai_catalog::store::parse_hex;
+use sekai_catalog::{LocalStore, Store};
+use sekai_format::AssetDocument;
 
 use crate::layout::Object;
 use crate::plan::{File, Plan, PublishError, PublishedAsset};
@@ -28,13 +29,17 @@ enum SqlValue {
 }
 
 /// Builds the `index.sqlite` database of `plan` and writes it to `store`.
-pub(crate) fn build(store: &LocalStore, plan: &Plan) -> Result<Object, PublishError> {
+pub(crate) fn build(
+    store: &LocalStore,
+    plan: &Plan,
+    revision: &str,
+) -> Result<Object, PublishError> {
     let wrap_doc = PublishError::wrap("documents");
-    let rows = prepare_rows(plan);
+    let rows = prepare_rows(store, plan)?;
 
     let mut db = DbWriter::new();
     let roots = Roots {
-        meta: write_meta(&mut db, plan),
+        meta: write_meta(&mut db, plan, revision),
         bundles: write_bundles(&mut db, &rows.bundles),
         forms: write_forms(&mut db, &rows.forms),
         directories: write_directories(&mut db, &rows.directories),
@@ -168,8 +173,9 @@ impl Tally {
     }
 }
 
-/// Derives the rows of every table from the plan's member files and assets.
-fn prepare_rows(plan: &Plan) -> Rows {
+/// Derives the rows of every table from the plan's member files and assets, whose asset
+/// documents are read from `store`.
+fn prepare_rows(store: &dyn Store, plan: &Plan) -> Result<Rows, PublishError> {
     let member_files: Vec<&File> = plan
         .files
         .iter()
@@ -179,7 +185,7 @@ fn prepare_rows(plan: &Plan) -> Rows {
     let catalog = if plan.assets.is_empty() {
         fallback_catalog(plan, &member_files, &files_by_asset)
     } else {
-        asset_catalog(plan, &files_by_asset)
+        asset_catalog(store, plan, &files_by_asset)?
     };
 
     let directories = directory_rows(&catalog.files);
@@ -189,13 +195,13 @@ fn prepare_rows(plan: &Plan) -> Rows {
             .cmp(&b.dir)
             .then_with(|| a.file_name.cmp(&b.file_name))
     });
-    Rows {
+    Ok(Rows {
         bundles: catalog.bundles,
         forms: catalog.forms,
         directories,
         assets: catalog.assets,
         files,
-    }
+    })
 }
 
 /// Groups the member files by the name of their asset, keeping their path order.
@@ -207,8 +213,13 @@ fn group_by_asset<'a>(member_files: &[&'a File]) -> BTreeMap<&'a str, Vec<&'a Fi
     grouped
 }
 
-/// Rows for a plan that lists asset documents, with bundles and forms numbered by name.
-fn asset_catalog(plan: &Plan, files_by_asset: &BTreeMap<&str, Vec<&File>>) -> Catalog {
+/// Rows for a plan that lists asset documents, read from `store`, with bundles and forms numbered
+/// by name.
+fn asset_catalog(
+    store: &dyn Store,
+    plan: &Plan,
+    files_by_asset: &BTreeMap<&str, Vec<&File>>,
+) -> Result<Catalog, PublishError> {
     let mut bundle_tallies: BTreeMap<&str, Tally> = BTreeMap::new();
     let mut form_tallies: BTreeMap<&str, (i64, Tally)> = BTreeMap::new();
     for asset in &plan.assets {
@@ -218,9 +229,9 @@ fn asset_catalog(plan: &Plan, files_by_asset: &BTreeMap<&str, Vec<&File>>) -> Ca
             .or_default()
             .add_asset(owned);
         let (_, form) = form_tallies
-            .entry(asset.metadata.form.as_str())
-            .or_insert((i64::from(asset.metadata.form_version), Tally::default()));
-        if asset.metadata.error.is_none() {
+            .entry(asset.form.as_str())
+            .or_insert((i64::from(asset.form_version), Tally::default()));
+        if asset.produced {
             form.add_asset(owned);
         }
     }
@@ -256,7 +267,7 @@ fn asset_catalog(plan: &Plan, files_by_asset: &BTreeMap<&str, Vec<&File>>) -> Ca
         let asset_id = row_id(position);
         let owned = owned_files(files_by_asset, &asset.name);
         let bundle_id = bundle_ids[asset.bundle.as_str()];
-        let form_id = form_ids[asset.metadata.form.as_str()];
+        let form_id = form_ids[asset.form.as_str()];
         files.extend(
             owned
                 .iter()
@@ -264,18 +275,19 @@ fn asset_catalog(plan: &Plan, files_by_asset: &BTreeMap<&str, Vec<&File>>) -> Ca
         );
         assets.push(asset_row(
             asset,
+            &asset.read(store)?,
             asset_id,
             bundle_id,
             form_id,
             files_size(owned),
         ));
     }
-    Catalog {
+    Ok(Catalog {
         bundles,
         forms,
         assets,
         files,
-    }
+    })
 }
 
 /// Rows for a plan without asset documents, such as a materialized view. Every asset sits in
@@ -338,9 +350,16 @@ fn fallback_catalog(
     }
 }
 
-/// The `assets` row of an asset document, with the ids of its bundle and form.
-fn asset_row(asset: &PublishedAsset, id: i64, bundle_id: i64, form_id: i64, size: i64) -> AssetRow {
-    let metadata = &asset.metadata;
+/// The `assets` row of `asset`, whose asset document is `metadata`, with the ids of its bundle
+/// and form.
+fn asset_row(
+    asset: &PublishedAsset,
+    metadata: &AssetDocument,
+    id: i64,
+    bundle_id: i64,
+    form_id: i64,
+    size: i64,
+) -> AssetRow {
     let (error_code, error_message) = match &metadata.error {
         Some(error) => (Some(error.code.clone()), Some(error.message.clone())),
         None => (None, None),
@@ -473,11 +492,11 @@ fn write_index<T>(db: &mut DbWriter, rows: &[T], encode: impl Fn(&T) -> Vec<u8>)
 }
 
 /// Writes the `meta` table, whose rows are in key order.
-fn write_meta(db: &mut DbWriter, plan: &Plan) -> u32 {
+fn write_meta(db: &mut DbWriter, plan: &Plan, revision: &str) -> u32 {
     let mut entries = vec![
         ("format", "sqlite-index".to_owned()),
         ("published_version", plan.version.clone()),
-        ("revision", plan.revision.clone()),
+        ("revision", revision.to_owned()),
         ("schema_version", SCHEMA_VERSION.to_string()),
     ];
     entries.sort_by(|a, b| a.0.cmp(b.0));

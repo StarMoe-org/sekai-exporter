@@ -67,3 +67,38 @@ impl Derivations for MemoryDerivations {
         Ok(())
     }
 }
+
+/// The recorded results of units of an evaluation, by unit key.
+pub trait UnitRecords: Sync {
+    /// The result recorded under `key`, if there is one.
+    fn get(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>>;
+    /// Records each of `results` under its key.
+    fn put(&self, results: &[([u8; 32], Vec<u8>)]) -> io::Result<()>;
+}
+
+/// [`UnitRecords`] held in memory.
+#[derive(Debug, Default)]
+pub struct MemoryUnitRecords(Mutex<BTreeMap<[u8; 32], Vec<u8>>>);
+
+impl MemoryUnitRecords {
+    /// How many results are recorded.
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    /// Whether no result is recorded.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl UnitRecords for MemoryUnitRecords {
+    fn get(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().unwrap().get(key).cloned())
+    }
+
+    fn put(&self, results: &[([u8; 32], Vec<u8>)]) -> io::Result<()> {
+        self.0.lock().unwrap().extend(results.iter().cloned());
+        Ok(())
+    }
+}

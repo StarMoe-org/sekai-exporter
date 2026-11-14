@@ -15,10 +15,13 @@ fn sha256(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The fixtures: format, width, height, file name and the SHA-256 of the reference pixels.
-fn fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
+/// A fixture: format, width, height, data and the SHA-256 of the reference pixels.
+type Fixture = (i32, u32, u32, Vec<u8>, String);
+
+/// The fixtures of a listing, one per line: format, width, height, file name and the SHA-256.
+fn listed(listing: &str) -> Vec<Fixture> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textures");
-    fs::read_to_string(root.join("expected.txt"))
+    fs::read_to_string(root.join(listing))
         .unwrap()
         .lines()
         .map(|line| {
@@ -32,6 +35,12 @@ fn fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
             )
         })
         .collect()
+}
+
+/// The fixtures with eight bits per channel: the textures built by Unity, and the random ETC,
+/// EAC and PVRTC images.
+fn fixtures() -> Vec<Fixture> {
+    [listed("expected.txt"), listed("blocks.txt")].concat()
 }
 
 #[test]
@@ -44,28 +53,10 @@ fn fixtures_decode_to_the_reference_pixels() {
     }
 }
 
-/// The crunch and ASTC HDR fixtures, in the form of [`fixtures`].
-fn compressed_fixtures() -> Vec<(i32, u32, u32, Vec<u8>, String)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/textures");
-    fs::read_to_string(root.join("compressed.txt"))
-        .unwrap()
-        .lines()
-        .map(|line| {
-            let fields: Vec<_> = line.split(' ').collect();
-            (
-                fields[0].parse().unwrap(),
-                fields[1].parse().unwrap(),
-                fields[2].parse().unwrap(),
-                fs::read(root.join(fields[3])).unwrap(),
-                fields[4].to_owned(),
-            )
-        })
-        .collect()
-}
-
 #[test]
 fn crunch_and_hdr_fixtures_decode_to_the_reference_pixels() {
-    let fixtures = compressed_fixtures();
+    // The crunch and ASTC HDR fixtures.
+    let fixtures = listed("compressed.txt");
     assert_eq!(fixtures.len(), 4);
     for (format, width, height, data, expected) in fixtures {
         let found = if is_hdr(format) {
@@ -85,7 +76,7 @@ fn crunch_and_hdr_fixtures_decode_to_the_reference_pixels() {
 
 #[test]
 fn a_crunch_file_is_checked() {
-    let (format, width, height, data, _) = compressed_fixtures().swap_remove(0);
+    let (format, width, height, data, _) = listed("compressed.txt").swap_remove(0);
     assert_eq!(format, 29);
     assert!(matches!(
         decode(format, width, height, &data[..32]),
@@ -172,6 +163,29 @@ fn an_empty_image_is_malformed() {
 }
 
 #[test]
+fn a_pvrtc_image_has_sides_that_are_powers_of_two() {
+    assert!(matches!(
+        decode(33, 24, 8, &[0; 128]),
+        Err(DecodeError::Malformed { .. })
+    ));
+}
+
+#[test]
+fn the_rgb_pvrtc_formats_are_opaque() {
+    // Words of zeros hold translucent colours with no alpha.
+    let alphas = |format| {
+        let surface = decode(format, 16, 8, &[0; 64]).unwrap();
+        let mut alphas: Vec<u8> = surface.pixels().chunks(4).map(|p| p[3]).collect();
+        alphas.dedup();
+        alphas
+    };
+    assert_eq!(alphas(30), [255]);
+    assert_eq!(alphas(31), [0]);
+    assert_eq!(alphas(32), [255]);
+    assert_eq!(alphas(33), [0]);
+}
+
+#[test]
 fn an_unknown_format_is_unsupported() {
     assert!(matches!(
         decode(-1, 4, 4, &[0; 64]),
@@ -230,11 +244,15 @@ fn r8_keeps_its_value_in_red() {
 }
 
 #[test]
-fn eac_r_narrows_eleven_bits_to_eight() {
-    // Base 100, multiplier 1, table 0, and every texel selects the table value -3.
-    let block = [100, 0x10, 0, 0, 0, 0, 0, 0];
-    let surface = decode(41, 4, 4, &block).unwrap();
-    assert_eq!(surface.pixels()[..4], [97, 0, 0, 255]);
+fn eac_r_narrows_eleven_bits_to_the_nearest_eight_bit_value() {
+    // Table 0, and every texel selects the table value -3. Base 100 with multiplier 1 gives
+    // 780 of 2047, 97.2 of 255; base 255 with multiplier 0 gives 2041 of 2047, 254.3 of 255.
+    let red = |base: u8, multiplier: u8| {
+        let surface = decode(41, 4, 4, &[base, multiplier << 4, 0, 0, 0, 0, 0, 0]).unwrap();
+        surface.pixels()[..4].to_vec()
+    };
+    assert_eq!(red(100, 1), [97, 0, 0, 255]);
+    assert_eq!(red(255, 0), [254, 0, 0, 255]);
 }
 
 #[test]

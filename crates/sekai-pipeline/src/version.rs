@@ -230,30 +230,17 @@ fn record(
 }
 
 /// Each serialized file of a bundle as its path and the paths of its external files.
-pub(crate) type BundleFiles = Vec<(String, Vec<String>)>;
+pub type BundleFiles = Vec<(String, Vec<String>)>;
 
 /// The serialized files of a bundle: from the stored index of the bundle when `indexes` holds it,
 /// and otherwise from the file headers.
-pub(crate) fn bundle_files(
+pub fn bundle_files(
     input: &BundleInput,
     cache: &dyn BlockCache,
     indexes: &dyn BundleIndexes,
 ) -> io::Result<sekai_unity::Result<BundleFiles>> {
-    let paths = |externals: Vec<sekai_unity::serialized::External>| {
-        externals
-            .into_iter()
-            .map(|external| external.path)
-            .collect()
-    };
-    if let Some(record) = indexes
-        .get(&input.sha256)?
-        .as_deref()
-        .and_then(IndexRecord::decode)
-    {
-        let files = record.files.into_iter();
-        return Ok(Ok(files
-            .map(|file| (file.path, paths(file.externals)))
-            .collect()));
+    if let Some(files) = indexed_files(&input.sha256, indexes)? {
+        return Ok(Ok(files));
     }
     let read = || -> sekai_unity::Result<_> {
         let bundle = Bundle::open(input.source.clone(), input.sha256)?;
@@ -261,12 +248,36 @@ pub(crate) fn bundle_files(
         for (i, entry) in bundle.entries().iter().enumerate() {
             if entry.is_serialized() {
                 let file = SerializedFile::parse(&bundle.entry(i, cache))?;
-                files.push((entry.path.clone(), paths(file.externals)));
+                files.push((entry.path.clone(), external_paths(file.externals)));
             }
         }
         Ok(files)
     };
     Ok(read())
+}
+
+/// The serialized files of the bundle whose bytes have the SHA-256 `bundle`, from its stored
+/// index, when `indexes` holds one.
+pub fn indexed_files(
+    bundle: &[u8; 32],
+    indexes: &dyn BundleIndexes,
+) -> io::Result<Option<BundleFiles>> {
+    let record = indexes.get(bundle)?;
+    let record = record.as_deref().and_then(IndexRecord::decode);
+    Ok(record.map(|record| {
+        record
+            .files
+            .into_iter()
+            .map(|file| (file.path, external_paths(file.externals)))
+            .collect()
+    }))
+}
+
+fn external_paths(externals: Vec<sekai_unity::serialized::External>) -> Vec<String> {
+    externals
+        .into_iter()
+        .map(|external| external.path)
+        .collect()
 }
 
 /// The most recently used parsed bundles, by content hash, within an estimate of their memory.

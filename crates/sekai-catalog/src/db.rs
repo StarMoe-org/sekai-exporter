@@ -3,7 +3,7 @@
 //! The catalog is an index. Derivations can be rebuilt from the asset documents in the store, so
 //! a damaged file is set aside and rebuilt instead of stopping a run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::Path;
 use std::sync::Mutex;
@@ -13,10 +13,12 @@ use redb::{
 };
 use sekai_format::AssetDocument;
 
-use crate::derivation::{BundleIndexes, Derivations, Derived};
+use crate::derivation::{BundleIndexes, Derivations, Derived, UnitRecords};
+use crate::holdings::Holdings;
 use crate::store::{Key, LocalStore, parse_hex};
 
 const DERIVATIONS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("derivations");
+/// The table of an [`IndexCache`].
 const BUNDLE_INDEXES: TableDefinition<'_, &[u8; 32], &[u8]> =
     TableDefinition::new("bundle_indexes");
 /// Form, fingerprint, document and error code.
@@ -30,12 +32,31 @@ const VERSIONS: TableDefinition<'_, (&str, &str), &str> = TableDefinition::new("
 const POINTERS: TableDefinition<'_, &str, &str> = TableDefinition::new("pointers");
 const PUBLICATIONS: TableDefinition<'_, (&str, &str), (&str, &str)> =
     TableDefinition::new("publications");
+/// The recorded result of each unit of an evaluation, by unit key.
+const UNITS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("units");
+/// The size of each object the bucket of the catalog holds, by object name.
+const OBJECTS: TableDefinition<'_, &str, u64> = TableDefinition::new("objects");
+/// What the serialized files of each bundle are and which external files they name, by the
+/// SHA-256 of the bundle's bytes.
+const BUNDLE_FILES: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("bundle_files");
 
 /// How many outputs [`CatalogDerivations`] holds before it writes them.
 const BATCH: usize = 1024;
 
 fn other(e: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::other(e)
+}
+
+/// The memory each database may use to cache its pages. The files grow to gigabytes, and a cache
+/// as large as one would keep most of it in the process; the pages read recently stay in the file
+/// cache of the system either way.
+const CACHE_BYTES: usize = 64 << 20;
+
+/// Opens the database at `path`, creating it when there is none, with a cache of [`CACHE_BYTES`].
+fn create(path: &Path) -> Result<Database, DatabaseError> {
+    redb::Builder::new()
+        .set_cache_size(CACHE_BYTES)
+        .create(path)
 }
 
 fn is_damaged(error: &DatabaseError) -> bool {
@@ -131,30 +152,38 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    fn init(db: Database) -> io::Result<Self> {
+    /// Bundle indexes are kept in an [`IndexCache`], so a file that holds a table of them has it
+    /// removed and is compacted, which keeps the catalog small.
+    fn init(mut db: Database) -> io::Result<Self> {
         let tx = db.begin_write().map_err(other)?;
+        let held_indexes = tx.delete_table(BUNDLE_INDEXES).map_err(other)?;
         tx.open_table(DERIVATIONS).map_err(other)?;
-        tx.open_table(BUNDLE_INDEXES).map_err(other)?;
         tx.open_table(ASSETS).map_err(other)?;
         tx.open_table(COSTS).map_err(other)?;
         tx.open_table(BUNDLES).map_err(other)?;
         tx.open_table(VERSIONS).map_err(other)?;
         tx.open_table(POINTERS).map_err(other)?;
         tx.open_table(PUBLICATIONS).map_err(other)?;
+        tx.open_table(OBJECTS).map_err(other)?;
+        tx.open_table(UNITS).map_err(other)?;
+        tx.open_table(BUNDLE_FILES).map_err(other)?;
         tx.commit().map_err(other)?;
+        if held_indexes {
+            db.compact().map_err(other)?;
+        }
         Ok(Self { db })
     }
 
     /// Opens the catalog at `path`, creating it if it does not exist. A damaged file is renamed
     /// to `<path>.corrupt` and its derivations are rebuilt from `store`.
     pub fn open_or_rebuild(path: &Path, store: &LocalStore) -> io::Result<Self> {
-        match Database::create(path) {
+        match create(path) {
             Ok(db) => Self::init(db),
             Err(e) if is_damaged(&e) => {
                 let mut aside = path.as_os_str().to_owned();
                 aside.push(".corrupt");
                 std::fs::rename(path, aside)?;
-                let catalog = Self::init(Database::create(path).map_err(other)?)?;
+                let catalog = Self::init(create(path).map_err(other)?)?;
                 catalog.rebuild(store)?;
                 Ok(catalog)
             }
@@ -252,6 +281,15 @@ impl Catalog {
         }))
     }
 
+    /// The serialized files of the bundle with SHA-256 `bundle`, as recorded with
+    /// [`Batch::put_bundle_files`].
+    pub fn bundle_files(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(BUNDLE_FILES).map_err(other)?;
+        let value = table.get(bundle).map_err(other)?;
+        Ok(value.map(|v| v.value().to_vec()))
+    }
+
     /// The identity document of a version.
     pub fn version(&self, region: &str, version: &str) -> io::Result<Option<String>> {
         let tx = self.db.begin_read().map_err(other)?;
@@ -286,12 +324,9 @@ impl Catalog {
         }))
     }
 
-    /// The catalog as the [`BundleIndexes`] of opening a version.
-    pub fn bundle_indexes(&self) -> CatalogBundleIndexes<'_> {
-        CatalogBundleIndexes {
-            catalog: self,
-            pending: Mutex::new(BTreeMap::new()),
-        }
+    /// What the bucket of the catalog holds, as recorded.
+    pub fn holdings(&self) -> CatalogHoldings<'_> {
+        CatalogHoldings { catalog: self }
     }
 
     /// The catalog as the [`Derivations`] of an evaluation.
@@ -316,10 +351,10 @@ impl Batch {
         Ok(())
     }
 
-    /// Stores the index of a bundle.
-    pub fn put_bundle_index(&mut self, bundle: &[u8; 32], index: &[u8]) -> io::Result<()> {
-        let mut table = self.0.open_table(BUNDLE_INDEXES).map_err(other)?;
-        table.insert(bundle, index).map_err(other)?;
+    /// Records the result of the unit `key`.
+    pub fn put_unit(&mut self, key: &[u8; 32], result: &[u8]) -> io::Result<()> {
+        let mut table = self.0.open_table(UNITS).map_err(other)?;
+        table.insert(key, result).map_err(other)?;
         Ok(())
     }
 
@@ -369,6 +404,13 @@ impl Batch {
         Ok(())
     }
 
+    /// Records the serialized files of the bundle with SHA-256 `bundle`.
+    pub fn put_bundle_files(&mut self, bundle: &[u8; 32], files: &[u8]) -> io::Result<()> {
+        let mut table = self.0.open_table(BUNDLE_FILES).map_err(other)?;
+        table.insert(bundle, files).map_err(other)?;
+        Ok(())
+    }
+
     /// Records the identity document of a version.
     pub fn put_version(&mut self, region: &str, version: &str, identity: &str) -> io::Result<()> {
         let mut table = self.0.open_table(VERSIONS).map_err(other)?;
@@ -400,36 +442,92 @@ impl Batch {
         Ok(())
     }
 
+    /// Records that the bucket holds `key` with `size` bytes.
+    pub fn hold(&mut self, key: &Key, size: u64) -> io::Result<()> {
+        let mut table = self.0.open_table(OBJECTS).map_err(other)?;
+        table
+            .insert(key.to_string().as_str(), size)
+            .map_err(other)?;
+        Ok(())
+    }
+
+    /// Forgets every object recorded as held.
+    pub fn release_all(&mut self) -> io::Result<()> {
+        let mut table = self.0.open_table(OBJECTS).map_err(other)?;
+        table.retain(|_, _| false).map_err(other)
+    }
+
     /// Makes the batch visible and durable.
     pub fn commit(self) -> io::Result<()> {
         self.0.commit().map_err(other)
     }
 }
 
-/// [`BundleIndexes`] kept in the catalog and written in batches, in key order.
-pub struct CatalogBundleIndexes<'c> {
-    catalog: &'c Catalog,
+/// [`BundleIndexes`] kept in a database of their own and written in batches, in key order. An
+/// index follows from the bytes of its bundle, so the file is a cache: a damaged one is replaced by
+/// an empty one, and removing it costs only indexing the bundles again.
+pub struct IndexCache {
+    db: Database,
     pending: Mutex<BTreeMap<[u8; 32], Vec<u8>>>,
 }
 
-impl CatalogBundleIndexes<'_> {
+impl IndexCache {
+    /// The cache in the file at `path`, created when there is none.
+    pub fn open(path: &Path) -> io::Result<Self> {
+        let db = match create(path) {
+            Ok(db) => db,
+            Err(e) if is_damaged(&e) => {
+                std::fs::remove_file(path)?;
+                create(path).map_err(other)?
+            }
+            Err(e) => return Err(other(e)),
+        };
+        let tx = db.begin_write().map_err(other)?;
+        tx.open_table(BUNDLE_INDEXES).map_err(other)?;
+        tx.commit().map_err(other)?;
+        Ok(Self {
+            db,
+            pending: Mutex::default(),
+        })
+    }
+
     fn write(&self, pending: &mut BTreeMap<[u8; 32], Vec<u8>>) -> io::Result<()> {
-        let mut batch = self.catalog.write()?;
-        for (bundle, index) in pending.iter() {
-            batch.put_bundle_index(bundle, index)?;
+        let tx = self.db.begin_write().map_err(other)?;
+        {
+            let mut table = tx.open_table(BUNDLE_INDEXES).map_err(other)?;
+            for (bundle, index) in pending.iter() {
+                table.insert(bundle, index.as_slice()).map_err(other)?;
+            }
         }
-        batch.commit()?;
+        tx.commit().map_err(other)?;
         pending.clear();
         Ok(())
     }
 }
 
-impl BundleIndexes for CatalogBundleIndexes<'_> {
+impl UnitRecords for Catalog {
+    fn get(&self, key: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(UNITS).map_err(other)?;
+        let value = table.get(key).map_err(other)?;
+        Ok(value.map(|v| v.value().to_vec()))
+    }
+
+    fn put(&self, results: &[([u8; 32], Vec<u8>)]) -> io::Result<()> {
+        let mut batch = self.write()?;
+        for (key, result) in results {
+            batch.put_unit(key, result)?;
+        }
+        batch.commit()
+    }
+}
+
+impl BundleIndexes for IndexCache {
     fn get(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
         if let Some(index) = self.pending.lock().unwrap().get(bundle) {
             return Ok(Some(index.clone()));
         }
-        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let tx = self.db.begin_read().map_err(other)?;
         let table = tx.open_table(BUNDLE_INDEXES).map_err(other)?;
         let value = table.get(bundle).map_err(other)?;
         Ok(value.map(|v| v.value().to_vec()))
@@ -491,5 +589,56 @@ impl Derivations for CatalogDerivations {
 
     fn flush(&self) -> io::Result<()> {
         self.write(&mut self.pending.lock().unwrap())
+    }
+}
+
+/// What the bucket of the catalog holds, kept in the catalog.
+pub struct CatalogHoldings<'c> {
+    catalog: &'c Catalog,
+}
+
+impl CatalogHoldings<'_> {
+    /// Records that the bucket holds exactly `objects`, such as a listing of it, in place of what
+    /// was recorded.
+    pub fn replace(&self, objects: &BTreeMap<Key, u64>) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        batch.release_all()?;
+        for (key, &size) in objects {
+            batch.hold(key, size)?;
+        }
+        batch.commit()
+    }
+}
+
+impl Holdings for CatalogHoldings<'_> {
+    fn size(&self, key: &Key) -> io::Result<Option<u64>> {
+        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let table = tx.open_table(OBJECTS).map_err(other)?;
+        let value = table.get(key.to_string().as_str()).map_err(other)?;
+        Ok(value.map(|v| v.value()))
+    }
+
+    fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>> {
+        let tx = self.catalog.db.begin_read().map_err(other)?;
+        let table = tx.open_table(OBJECTS).map_err(other)?;
+        let start = format!("{prefix:02x}");
+        let mut sizes = HashMap::new();
+        for entry in table.range(start.as_str()..).map_err(other)? {
+            let (name, size) = entry.map_err(other)?;
+            let name = name.value();
+            if !name.starts_with(&start) {
+                break;
+            }
+            sizes.insert(name.parse().map_err(other)?, size.value());
+        }
+        Ok(sizes)
+    }
+
+    fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        for (key, size) in objects {
+            batch.hold(key, *size)?;
+        }
+        batch.commit()
     }
 }

@@ -1,31 +1,35 @@
 //! `sekai-exporter update`: the current version of a region, from its source to a publication.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 
-use sekai_catalog::db::{BundleRow, Catalog, CostRow, PublicationRow};
+use sekai_catalog::db::{BundleRow, Catalog, CostRow, IndexCache, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, LocalStore, Objects, UnitRecords};
 use sekai_convert::tables::TableConverter;
 use sekai_format::identity::VersionIdentity;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
-use sekai_pipeline::metrics::Recorder;
+use sekai_pipeline::metrics::{NoRecorder, Recorder};
+use sekai_pipeline::reuse::{Reuse, UnitResult};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
-use sekai_publish::Plan;
+use sekai_publish::Layout;
 use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
 
+use crate::bucket::Bucket;
 use crate::budget;
 use crate::export::{
     BLOCK_CACHE_BYTES, Destination, IGNORED, converters, publish, report, write_ledger,
 };
 use crate::monitor::{self, Monitor};
+
+mod files;
 
 const INPUT_EXTENSION: &str = "bundle";
 /// How many fetched bundles are recorded together.
@@ -45,6 +49,8 @@ struct Options {
     force: bool,
     /// Whether the bucket is checked against a listing of its store, trusting nothing else.
     verify: bool,
+    /// Whether the version of the source is only compared with the last one recorded.
+    check: bool,
 }
 
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error> {
@@ -61,6 +67,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut plain = false;
     let mut force = false;
     let mut verify = false;
+    let mut check = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -73,6 +80,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("plain") => plain = true,
             Long("force") => force = true,
             Long("verify") => verify = true,
+            Long("check") => check = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
         }
@@ -82,6 +90,16 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         .map_err(|_| lexopt::Error::from("expected <region> and <output>"))?;
     if verify && !only.is_empty() {
         return Err("--verify checks a bucket, and a selection is not sent to one".into());
+    }
+    let acts = [
+        ("--force", force),
+        ("--verify", verify),
+        ("--only", !only.is_empty()),
+        ("--tree", tree.is_some()),
+        ("--storage", storage.is_some()),
+    ];
+    if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
+        return Err(format!("--check only compares the version, and {flag} acts on it").into());
     }
     Ok(Options {
         region: region.string()?,
@@ -96,11 +114,15 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         plain,
         force,
         verify,
+        check,
     })
 }
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
     let options = parse(args)?;
+    if options.check {
+        return check(&options);
+    }
     std::fs::create_dir_all(&options.output)
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
     Monitor::watch(&options.output.join("metrics.jsonl"), |monitor| {
@@ -142,9 +164,18 @@ fn previous_identity(catalog: &Catalog, region: &str) -> io::Result<Option<Versi
 
 /// The entries whose names start with one of `only`, with everything they depend on. Without
 /// prefixes, every entry.
-fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
+fn select(mut entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
+    if let Some(selected) = selected(&entries, only) {
+        entries.retain(|entry| selected.contains(&entry.name));
+    }
+    entries
+}
+
+/// The names of the entries whose names start with one of `only`, with everything they depend
+/// on, or `None` without prefixes, which select every entry.
+fn selected(entries: &[Entry], only: &[String]) -> Option<BTreeSet<String>> {
     if only.is_empty() {
-        return entries;
+        return None;
     }
     let by_name: BTreeMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
     let mut pending: Vec<&str> = by_name
@@ -160,9 +191,7 @@ fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
             pending.extend(entry.dependencies.iter().map(String::as_str));
         }
     }
-    let mut entries = entries;
-    entries.retain(|entry| selected.contains(&entry.name));
-    entries
+    Some(selected)
 }
 
 /// The bundles of a run in the input store, as they arrive. Opening one waits until it has been
@@ -234,13 +263,18 @@ impl Inputs for Arriving<'_> {
             }
         };
         drop(arrivals);
-        let source = FileSource::open(self.inputs.path(&key)).map_err(io::Error::other)?;
-        Ok(BundleInput {
-            name: name.to_owned(),
-            source: Arc::new(source),
-            sha256: key.sha256,
-        })
+        open_input(self.inputs, name, &key)
     }
+}
+
+/// The bundle `name` that `inputs` hold under `key`.
+fn open_input(inputs: &LocalStore, name: &str, key: &Key) -> io::Result<BundleInput> {
+    let source = FileSource::open(inputs.path(key)).map_err(io::Error::other)?;
+    Ok(BundleInput {
+        name: name.to_owned(),
+        source: Arc::new(source),
+        sha256: key.sha256,
+    })
 }
 
 /// Why a selection of bundles cannot run here. A selection is not a version, so it must not
@@ -323,6 +357,8 @@ struct Fetcher<'r> {
     earlier: &'r [EarlierRun],
     region: &'r str,
     monitor: &'r Monitor,
+    /// The key of each bundle this run has fetched, by name, so that none is fetched twice.
+    fetched: Mutex<HashMap<String, Key>>,
 }
 
 impl Fetcher<'_> {
@@ -367,9 +403,54 @@ impl Fetcher<'_> {
         Ok(failed)
     }
 
-    /// The key of `entry` in the input store, and whether this run placed it there: found in the
-    /// catalog, linked from an earlier run, or downloaded.
+    /// Fetches `entries` into the input store, `concurrency` at a time, and returns the key of
+    /// each bundle that could be fetched, by name. A bundle that cannot be fetched is left out;
+    /// fetching it again reports why.
+    fn fetch_keys(
+        &self,
+        entries: &[BundleEntry],
+        concurrency: usize,
+    ) -> Result<HashMap<String, Key>, String> {
+        let rows = Mutex::new(Vec::new());
+        let keys = parallel(
+            entries.len(),
+            concurrency,
+            |i| -> Result<Option<Key>, String> {
+                let entry = &entries[i];
+                let Ok((key, placed)) = self.fetch(entry) else {
+                    return Ok(None);
+                };
+                if placed {
+                    self.place(&rows, entry, &key)?;
+                }
+                Ok(Some(key))
+            },
+        );
+        self.record(&rows.into_inner().unwrap_or_else(PoisonError::into_inner))?;
+        let mut fetched = HashMap::new();
+        for (entry, key) in entries.iter().zip(keys) {
+            if let Some(key) = key? {
+                fetched.insert(entry.name.clone(), key);
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// The key of `entry` in the input store, and whether this call placed it there: fetched
+    /// earlier in this run, found in the catalog, linked from an earlier run, or downloaded.
     fn fetch(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
+        let fetched = || self.fetched.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(key) = fetched().get(&entry.name) {
+            return Ok((key.clone(), false));
+        }
+        let (key, placed) = self.locate(entry)?;
+        fetched().insert(entry.name.clone(), key.clone());
+        Ok((key, placed))
+    }
+
+    /// The key of `entry` in the input store, and whether this call placed it there: found in the
+    /// catalog, linked from an earlier run, or downloaded.
+    fn locate(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
         let error = |e: io::Error| e.to_string();
         if let Some(key) =
             already_stored(self.catalog, self.region, entry, self.inputs).map_err(error)?
@@ -451,34 +532,102 @@ fn in_opening_order(all: &[BundleEntry], manifest: &[Entry]) -> Vec<BundleEntry>
     entries
 }
 
-/// Where the dependencies of the bundles of a manifest come from.
-enum Dependencies<'a> {
-    /// The source lists them.
-    Listed,
-    /// They are read from the bundles themselves, and then the entries whose names start with one
-    /// of `only` are selected, with what they depend on.
-    Read { only: &'a [String] },
+/// What identifies the content of a bundle whose manifest entry declares the hash `declared`:
+/// that hash, or nothing when it is empty.
+fn declared_content(declared: &str) -> String {
+    if declared.is_empty() {
+        String::new()
+    } else {
+        format!("declared {declared}")
+    }
 }
 
-/// Fetches `entries` while `manifest` is evaluated, so the first segments convert while later
-/// bundles are still on their way. Returns the evaluation and how many bundles could not be
-/// fetched. Fails if the store, the records or the catalog do.
+/// Identifies the content of each entry of `manifest` that declares no hash by the bytes of its
+/// bundle, which are fetched for that from the entries of `all`. An entry whose bundle cannot be
+/// fetched stays unidentified.
+fn identify(
+    fetcher: &Fetcher<'_>,
+    all: &[BundleEntry],
+    manifest: &mut [Entry],
+    concurrency: usize,
+) -> Result<(), String> {
+    let undeclared: HashSet<&str> = manifest
+        .iter()
+        .filter(|entry| entry.content.is_empty())
+        .map(|entry| entry.name.as_str())
+        .collect();
+    if undeclared.is_empty() {
+        return Ok(());
+    }
+    let entries: Vec<BundleEntry> = all
+        .iter()
+        .filter(|entry| undeclared.contains(entry.name.as_str()))
+        .cloned()
+        .collect();
+    let keys = fetcher.fetch_keys(&entries, concurrency)?;
+    println!(
+        "bundles without a declared hash {} identified {}",
+        entries.len(),
+        keys.len()
+    );
+    for entry in manifest {
+        if let Some(key) = keys.get(&entry.name) {
+            entry.content = format!("bytes {key}");
+        }
+    }
+    Ok(())
+}
+
+/// What a run evaluates.
+enum Evaluating<'m> {
+    /// The units of a manifest that lists the dependencies of its bundles, taking the results
+    /// that earlier runs recorded.
+    Listed(Reuse<'m>),
+    /// A manifest without dependencies. They are read from the bundles themselves, and then the
+    /// entries whose names start with one of `only` are selected, with what they depend on.
+    Read {
+        manifest: Vec<Entry>,
+        only: &'m [String],
+    },
+}
+
+impl Evaluating<'_> {
+    /// The entries whose bundles the evaluation needs.
+    fn entries(&self) -> &[Entry] {
+        match self {
+            Evaluating::Listed(reuse) => reuse.rest(),
+            Evaluating::Read { manifest, .. } => manifest,
+        }
+    }
+}
+
+/// What a run evaluated.
+struct Evaluated {
+    streamed: Streamed,
+    /// The result of each unit of a listed manifest, in name order.
+    units: Vec<UnitResult>,
+    /// How many bundles could not be fetched.
+    failed: usize,
+}
+
+/// Fetches `entries` while `evaluating` runs, so the first segments convert while later bundles
+/// are still on their way. Fails if the store, the records or the catalog do.
 fn fetch_and_evaluate(
     fetcher: &Fetcher<'_>,
     entries: &[BundleEntry],
     concurrency: usize,
-    mut manifest: Vec<Entry>,
-    dependencies: Dependencies<'_>,
+    evaluating: Evaluating<'_>,
     stream: &Stream<'_>,
-) -> Result<(Streamed, usize), String> {
+) -> Result<Evaluated, String> {
     let arriving = Arriving::new(fetcher.inputs);
     thread::scope(|scope| {
         let fetching = scope.spawn(|| {
             let _ending = arriving.ending();
             fetcher.fetch_all(entries, concurrency, &arriving)
         });
-        let evaluate = || {
-            if let Dependencies::Read { only } = dependencies {
+        let evaluate = || match evaluating {
+            Evaluating::Listed(reuse) => reuse.evaluate(&arriving, stream),
+            Evaluating::Read { mut manifest, only } => {
                 let _span = stream.recorder.span("manifest", "dependencies", "");
                 let threads = stream.options.threads;
                 stream::with_dependencies(
@@ -488,23 +637,174 @@ fn fetch_and_evaluate(
                     stream.indexes,
                     threads,
                 )?;
-                manifest = select(manifest, only);
+                let streamed = stream::evaluate(&select(manifest, only), &arriving, stream)?;
+                Ok((streamed, Vec::new()))
             }
-            stream::evaluate(&manifest, &arriving, stream)
         };
-        let streamed = evaluate().map_err(|e| e.to_string());
+        let evaluated = evaluate().map_err(|e| e.to_string());
         let failed = fetching
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-        Ok((streamed?, failed))
+        let (streamed, units) = evaluated?;
+        Ok(Evaluated {
+            streamed,
+            units,
+            failed,
+        })
     })
 }
 
-fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let region_name = options.region.as_str();
+/// The text of the configuration, and the region `options.region` it describes.
+fn configuration(options: &Options) -> Result<(String, Region), String> {
     let config = std::fs::read_to_string(&options.config)
         .map_err(|e| format!("{}: {e}", options.config.display()))?;
-    let region = Region::load(region_name, &config).map_err(|e| e.to_string())?;
+    let region = Region::load(&options.region, &config).map_err(|e| e.to_string())?;
+    Ok((config, region))
+}
+
+/// The tables of `region`, when its configuration names a source for them.
+fn open_tables(region: &Region) -> Result<Option<Tables>, String> {
+    region
+        .tables
+        .as_ref()
+        .map(|source| Tables::open(source, &region.network))
+        .transpose()
+        .map_err(|e| e.to_string())
+}
+
+/// The current version of the region `name`, with the revision of its tables. What `source`
+/// looks up may depend on the `previous` version.
+fn current_identity(
+    name: &str,
+    source: &dyn Source,
+    tables: Option<&Tables>,
+    previous: Option<&VersionIdentity>,
+    recorder: &dyn Recorder,
+) -> Result<VersionIdentity, String> {
+    let mut identity = {
+        let _span = recorder.span("plan", "identity", name);
+        source.identity(previous).map_err(|e| e.to_string())?
+    };
+    identity.tables = tables.map(|tables| tables.revision().to_owned());
+    Ok(identity)
+}
+
+/// The last version of `region` that `output` recorded, when it holds a catalog.
+fn recorded_identity(output: &Path, region: &str) -> io::Result<Option<VersionIdentity>> {
+    let database = output.join("catalog.redb");
+    if !database.is_file() {
+        return Ok(None);
+    }
+    let store = LocalStore::open(output.join("store"))?;
+    previous_identity(&Catalog::open_or_rebuild(&database, &store)?, region)
+}
+
+/// Prints whether the content of the current version differs from the last one recorded: in the
+/// bucket of the configuration when it names one, and otherwise in `options.output`. Returns
+/// whether it is unchanged. Nothing is downloaded or written.
+fn check(options: &Options) -> Result<bool, lexopt::Error> {
+    let name = options.region.as_str();
+    let (config, region) = configuration(options)?;
+    let previous = match Bucket::open(&config, options.secrets.as_deref())? {
+        Some(bucket) => bucket.last_version(name)?,
+        None => recorded_identity(&options.output, name).map_err(|e| e.to_string())?,
+    };
+    let tables = open_tables(&region)?;
+    let secrets = Secrets::new(options.secrets.clone());
+    let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
+    let identity = current_identity(
+        name,
+        source.as_ref(),
+        tables.as_ref(),
+        previous.as_ref(),
+        &NoRecorder,
+    )?;
+    let change = match previous {
+        Some(previous) if previous.same_content(&identity) => None,
+        Some(previous) => Some(format!("changed from {}", previous.name())),
+        None => Some("changed".to_owned()),
+    };
+    let described = change.as_deref().unwrap_or("unchanged");
+    println!("{name} {} {described}", identity.name());
+    Ok(change.is_none())
+}
+
+/// What a run made of the current version.
+#[derive(Debug)]
+enum Outcome {
+    /// Its content is that of the last version recorded, so nothing was done.
+    Unchanged(VersionIdentity),
+    /// Some bundles could not be read, so it was neither published nor recorded as a version.
+    Incomplete,
+    /// It was exported, published and recorded.
+    Updated(VersionIdentity),
+}
+
+impl Outcome {
+    /// Whether the run did all it set out to do.
+    fn succeeded(&self) -> bool {
+        self.version().is_some()
+    }
+
+    /// The version now recorded as the last one, unless the run is incomplete.
+    fn version(&self) -> Option<&VersionIdentity> {
+        match self {
+            Self::Unchanged(identity) | Self::Updated(identity) => Some(identity),
+            Self::Incomplete => None,
+        }
+    }
+}
+
+/// Updates `options.region`. With a bucket, a version whose content is the last one the bucket
+/// recorded ends the run before anything else is read, unless the run is forced or verifies.
+/// Otherwise the run starts from the catalog the bucket keeps and writes it back once the run has
+/// changed it, also when the run fails, since what it recorded stays true. Then the last version
+/// of the region is written beside it. One run per bucket goes at a time. A selection runs on the
+/// local output alone.
+fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
+    let (config, region) = configuration(options)?;
+    let bucket = if options.only.is_empty() {
+        Bucket::open(&config, options.secrets.as_deref())?
+    } else {
+        None
+    };
+    let Some(bucket) = bucket else {
+        return export_version(options, region, None, monitor).map(|run| run.succeeded());
+    };
+    if !(options.force || options.verify) && check(options)? {
+        return Ok(true);
+    }
+    let catalog = options.output.join("catalog.redb");
+    bucket.pull_catalog(&catalog, monitor)?;
+    let run = export_version(options, region, Some(&bucket), monitor);
+    let pushed = match run {
+        Ok(Outcome::Unchanged(_)) => Ok(()),
+        _ => bucket.push_catalog(&catalog, monitor),
+    };
+    match (run, pushed) {
+        (Ok(outcome), Ok(())) => {
+            if let Some(identity) = outcome.version() {
+                bucket.set_last_version(&options.region, identity)?;
+            }
+            Ok(outcome.succeeded())
+        }
+        (Ok(_), Err(push)) => Err(push),
+        (Err(failure), Ok(())) => Err(failure),
+        (Err(failure), Err(push)) => {
+            Err(format!("{failure}; the catalog was not written back: {push}").into())
+        }
+    }
+}
+
+/// Exports the current version of `region` as `options` say, and publishes it to `bucket` when
+/// there is one.
+fn export_version(
+    options: &Options,
+    region: Region,
+    bucket: Option<&Bucket>,
+    monitor: &Monitor,
+) -> Result<Outcome, lexopt::Error> {
+    let region_name = options.region.as_str();
     // A directory lists no dependencies; they are read from the bundles once they are fetched.
     let listed = region.kind != Kind::Dir;
     let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
@@ -517,12 +817,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let hca_key = secrets
         .hca_key(&region.secrets)
         .map_err(|e| e.to_string())?;
-    let tables = region
-        .tables
-        .as_ref()
-        .map(|source| Tables::open(source, &region.network))
-        .transpose()
-        .map_err(|e| e.to_string())?;
+    let tables = open_tables(&region)?;
     let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
 
     let directory = |name: &str| {
@@ -545,17 +840,37 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             return Err(conflict.into());
         }
     }
-    let mut identity = {
-        let _span = monitor.span("plan", "identity", region_name);
-        source
-            .identity(previous.as_ref())
-            .map_err(|e| e.to_string())?
-    };
-    identity.tables = tables.as_ref().map(|tables| tables.revision().to_owned());
+    let identity = current_identity(
+        region_name,
+        source.as_ref(),
+        tables.as_ref(),
+        previous.as_ref(),
+        monitor,
+    )?;
     let name = identity.name();
     if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
         println!("{region_name} {name} unchanged");
-        return Ok(true);
+        return Ok(Outcome::Unchanged(identity));
+    }
+
+    let held = catalog.holdings();
+    if options.verify
+        && let Some(bucket) = bucket
+    {
+        let listed = bucket.holdings(monitor)?;
+        held.replace(&listed).map_err(|e| e.to_string())?;
+        println!("bucket holds {} objects", listed.len());
+    }
+    let objects = match bucket {
+        Some(bucket) => Objects {
+            local: &store,
+            held: &held,
+            remote: bucket.remote(),
+        },
+        None => Objects::local(&store),
+    };
+    if let Some(bucket) = bucket {
+        bucket.pull_documents(region_name, &store, monitor)?;
     }
 
     let all = {
@@ -567,13 +882,10 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         .map(|entry| Entry {
             name: entry.name.clone(),
             size: entry.size,
+            content: declared_content(&entry.declared),
             dependencies: entry.dependencies.clone(),
         })
         .collect();
-    if listed {
-        manifest = select(manifest, &options.only);
-    }
-    let entries = in_opening_order(&all, &manifest);
     let fetcher = Fetcher {
         source: source.as_ref(),
         identity: &identity,
@@ -582,45 +894,69 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         earlier: &earlier,
         region: region_name,
         monitor,
+        fetched: Mutex::default(),
     };
-    let dependencies = if listed {
-        Dependencies::Listed
+    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+    let indexes =
+        IndexCache::open(&options.output.join("indexes.redb")).map_err(|e| e.to_string())?;
+    if listed {
+        let selected = selected(&manifest, &options.only);
+        let fetchable = |name: &str| selected.as_ref().is_none_or(|names| names.contains(name));
+        fetcher.add_file_dependencies(
+            &all,
+            &mut manifest,
+            fetchable,
+            &cache,
+            &indexes,
+            concurrency,
+        )?;
+        manifest = select(manifest, &options.only);
+        identify(&fetcher, &all, &mut manifest, concurrency)?;
+    }
+    let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
+    let converters = converters(hca_key);
+    let stream = Stream {
+        converters: &converters,
+        naming: &InBundle,
+        store: &objects,
+        derivations: &derivations,
+        indexes: &indexes,
+        cache: &cache,
+        classes: &NoClasses,
+        recorder: monitor,
+        fusion: options
+            .storage
+            .is_some()
+            .then_some(&fusion as &dyn sekai_pipeline::Fusion),
+        options: budget::options(options.threads, options.memory, options.plain),
+        segment: Segment::default(),
+        ledger: Some(IGNORED),
+        limit: None,
+    };
+    let evaluating = if listed {
+        let reuse = if options.force {
+            Reuse::refresh(&manifest, &stream)
+        } else {
+            Reuse::new(&manifest, &stream, catalog)
+        };
+        let reuse = reuse.map_err(|e| e.to_string())?;
+        println!("units {} recorded {}", manifest.len(), reuse.reused());
+        Evaluating::Listed(reuse)
     } else {
-        Dependencies::Read {
+        Evaluating::Read {
+            manifest,
             only: &options.only,
         }
     };
-    let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-    let indexes = catalog.bundle_indexes();
-    let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
-    let converters = converters(hca_key);
-    let (mut streamed, failed) = fetch_and_evaluate(
-        &fetcher,
-        &entries,
-        concurrency,
-        manifest,
-        dependencies,
-        &Stream {
-            converters: &converters,
-            naming: &InBundle,
-            store: &store,
-            derivations: &derivations,
-            indexes: &indexes,
-            cache: &cache,
-            classes: &NoClasses,
-            recorder: monitor,
-            fusion: options
-                .storage
-                .is_some()
-                .then_some(&fusion as &dyn sekai_pipeline::Fusion),
-            options: budget::options(options.threads, options.memory, options.plain),
-            segment: Segment::default(),
-            ledger: Some(IGNORED),
-            limit: None,
-        },
-    )?;
+    let entries = in_opening_order(&all, evaluating.entries());
+    let Evaluated {
+        mut streamed,
+        units,
+        failed,
+    } = fetch_and_evaluate(&fetcher, &entries, concurrency, evaluating, &stream)?;
+    record_units(catalog, &units)?;
     if failed > 0 || report(&streamed) > 0 {
-        return Ok(false);
+        return Ok(Outcome::Incomplete);
     }
     if let Some(tables) = &tables {
         let read = |name: &str| tables.read(name).map_err(io::Error::other);
@@ -628,7 +964,7 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
             &sekai_pipeline::tables::TableStage {
                 converters: &table_converters(),
                 read: &read,
-                store: &store,
+                store: &objects,
                 recorder: monitor,
                 threads: options.threads,
             },
@@ -645,8 +981,9 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
+            layout: bucket.map_or(Layout::Sqlite, Bucket::layout),
         },
-        &store,
+        &objects,
         options.threads,
         monitor,
     )?;
@@ -658,15 +995,17 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.storage.as_deref(),
+            layout: Layout::Paths,
         },
-        &store,
+        &objects,
         &derivations,
         options.threads,
         monitor,
     )?;
-    if !selection {
+    if let Some(bucket) = bucket {
         let storage = storage.as_ref().map(|plan| (storage_target.as_str(), plan));
-        publish_bucket(&config, options, &store, (&target, &plan), storage, monitor)?;
+        bucket.publish(&objects, (&target, &plan), storage, monitor)?;
+        bucket.push_documents(region_name, &plan, &objects, monitor)?;
     }
 
     let record = || -> io::Result<()> {
@@ -710,17 +1049,21 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         evaluation.converted,
         evaluation.reused
     );
-    Ok(true)
+    Ok(Outcome::Updated(identity))
 }
 
-/// The `publish.s3` section of the configuration, if there is one.
-fn bucket_section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
-    let config: serde_json::Value = serde_json::from_str(config).map_err(|e| e.to_string())?;
-    Ok(config.get("publish").and_then(|p| p.get("s3")).cloned())
+/// Records in `catalog` the result of each of `units` that a later run may take.
+fn record_units(catalog: &Catalog, units: &[UnitResult]) -> Result<(), String> {
+    let reusable = units.iter().filter_map(|unit| {
+        let key = unit.reusable_key()?;
+        Some(unit.record.bytes().map(|bytes| (key.0, bytes)))
+    });
+    let reusable = reusable.collect::<io::Result<Vec<_>>>();
+    reusable
+        .and_then(|reusable| catalog.put(&reusable))
+        .map_err(|e| format!("catalog: {e}"))
 }
 
-/// The value of the secret `name`: the environment variable of that name, or else the file of that
-/// name in `secrets`, without surrounding whitespace.
 /// The converters that build assets from game data tables.
 fn table_converters() -> Vec<Box<dyn TableConverter>> {
     let mut converters = episode_converters();
@@ -774,136 +1117,10 @@ fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
     Vec::new()
 }
 
-#[cfg(feature = "s3")]
-fn secret(name: &str, secrets: Option<&Path>) -> Result<String, lexopt::Error> {
-    if let Ok(value) = std::env::var(name) {
-        return Ok(value.trim().to_owned());
-    }
-    secrets
-        .and_then(|directory| std::fs::read_to_string(directory.join(name)).ok())
-        .map(|value| value.trim().to_owned())
-        .ok_or_else(|| format!("the secret {name} is not set").into())
-}
-
-/// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one, to
-/// the bucket that the `publish.s3` section of the configuration describes, with the secrets of
-/// `options`. The canonical view is published in the layout the section names, and the storage
-/// view with its path index alone. With `--verify`, what the bucket holds is learned from a
-/// listing of its whole store.
-#[cfg(feature = "s3")]
-fn publish_bucket(
-    config: &str,
-    options: &Options,
-    store: &LocalStore,
-    canonical: (&str, &Plan),
-    storage: Option<(&str, &Plan)>,
-    monitor: &Monitor,
-) -> Result<(), lexopt::Error> {
-    use sekai_publish::Layout;
-    use sekai_publish::s3::{self, Bucket, Check, Credentials, S3};
-
-    let secrets = options.secrets.as_deref();
-
-    let Some(section) = bucket_section(config)? else {
-        return Ok(());
-    };
-    let text = |value: Option<&serde_json::Value>, key: &str| {
-        value
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
-            .ok_or_else(|| lexopt::Error::from(format!("publish.s3.{key} is not a string")))
-    };
-    let names = section.get("secrets");
-    let credentials = Credentials {
-        access_key_id: secret(
-            &text(
-                names.and_then(|n| n.get("access_key_id")),
-                "secrets.access_key_id",
-            )?,
-            secrets,
-        )?,
-        secret_access_key: secret(
-            &text(
-                names.and_then(|n| n.get("secret_access_key")),
-                "secrets.secret_access_key",
-            )?,
-            secrets,
-        )?,
-    };
-    let bucket = Bucket {
-        endpoint: text(section.get("endpoint"), "endpoint")?,
-        region: text(section.get("region"), "region")?,
-        prefix: match section.get("prefix") {
-            None => String::new(),
-            value => text(value, "prefix")?,
-        },
-        connections: match section.get("connections") {
-            None => 8,
-            Some(value) => value
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .ok_or("publish.s3.connections is not a number")?,
-        },
-    };
-    let layout = match section.get("layout") {
-        None => Layout::Sqlite,
-        Some(value) => match text(Some(value), "layout")?.as_str() {
-            "sqlite" => Layout::Sqlite,
-            "index" => Layout::Index,
-            other => {
-                return Err(
-                    format!("publish.s3.layout {other:?} must be \"sqlite\" or \"index\"").into(),
-                );
-            }
-        },
-    };
-    let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
-    let check = if options.verify {
-        Check::Listing
-    } else {
-        Check::Pointer
-    };
-    let views =
-        std::iter::once((canonical, layout)).chain(storage.map(|view| (view, Layout::Paths)));
-    for ((target, plan), layout) in views {
-        let _span = monitor.span("publish", "s3", target);
-        let (_, report) =
-            s3::publish_with(store, &s3, target, plan, layout, check, options.threads)
-                .map_err(|e| e.to_string())?;
-        println!(
-            "bucket {target} uploaded {} present {} pointer {}",
-            report.uploaded,
-            report.present,
-            if report.pointer_written {
-                "written"
-            } else {
-                "unchanged"
-            }
-        );
-    }
-    Ok(())
-}
-
-/// Refuses a configuration that names a bucket, which this build cannot publish to.
-#[cfg(not(feature = "s3"))]
-fn publish_bucket(
-    config: &str,
-    _options: &Options,
-    _store: &LocalStore,
-    _canonical: (&str, &Plan),
-    _storage: Option<(&str, &Plan)>,
-    _monitor: &Monitor,
-) -> Result<(), lexopt::Error> {
-    match bucket_section(config)? {
-        Some(_) => {
-            Err("the configuration names an S3 bucket, but this build has no s3 feature".into())
-        }
-        None => Ok(()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use sekai_pipeline::NoBundleIndexes;
+
     use super::*;
 
     fn entry(name: &str, dependencies: &[&str]) -> BundleEntry {
@@ -918,6 +1135,189 @@ mod tests {
 
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The manifest of `all`, as a run lists it before identifying any bundle.
+    fn listed(all: &[BundleEntry]) -> Vec<Entry> {
+        all.iter()
+            .map(|entry| Entry {
+                name: entry.name.clone(),
+                size: entry.size,
+                content: declared_content(&entry.declared),
+                dependencies: entry.dependencies.clone(),
+            })
+            .collect()
+    }
+
+    fn identity() -> VersionIdentity {
+        VersionIdentity {
+            asset: sekai_format::identity::AssetIdentity::Nuverse {
+                application_version: "1.0.0".to_owned(),
+                value: "1".to_owned(),
+            },
+            client: sekai_format::identity::ClientIdentity {
+                application_version: "1.0.0".to_owned(),
+                application_hash: None,
+                multiplayer_version: None,
+            },
+            tables: None,
+        }
+    }
+
+    /// Bundles in memory, counting how often each is fetched.
+    #[derive(Default)]
+    struct Bundles {
+        bytes: HashMap<String, Vec<u8>>,
+        fetched: Mutex<HashMap<String, usize>>,
+    }
+
+    impl Source for Bundles {
+        fn identity(
+            &self,
+            _previous: Option<&VersionIdentity>,
+        ) -> Result<VersionIdentity, cdn::SourceError> {
+            unreachable!("the tests name the version")
+        }
+
+        fn manifest(&self, _: &VersionIdentity) -> Result<Vec<BundleEntry>, cdn::SourceError> {
+            unreachable!("the tests list the manifest")
+        }
+
+        fn fetch(
+            &self,
+            _: &VersionIdentity,
+            entry: &BundleEntry,
+            sink: &mut dyn Sink,
+        ) -> Result<u64, cdn::SourceError> {
+            *self
+                .fetched
+                .lock()
+                .unwrap()
+                .entry(entry.name.clone())
+                .or_default() += 1;
+            let bytes = self.bytes.get(&entry.name).ok_or(cdn::SourceError {
+                code: "status",
+                message: format!("{} is missing", entry.name),
+                status: Some(404),
+            })?;
+            sink.write_all(bytes).unwrap();
+            Ok(bytes.len() as u64)
+        }
+    }
+
+    #[test]
+    fn bundles_without_a_declared_hash_are_identified_by_their_bytes() {
+        let root = std::env::temp_dir().join(format!("sekai-identify-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = LocalStore::open(root.join("store")).unwrap();
+        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
+        let inputs = LocalStore::open(root.join("inputs")).unwrap();
+        let source = Bundles {
+            bytes: HashMap::from([("b/plain".to_owned(), b"UnityFS\0plain".to_vec())]),
+            ..Bundles::default()
+        };
+        let identity = identity();
+        let mut undeclared = entry("b/plain", &[]);
+        undeclared.declared = String::new();
+        let mut lost = entry("c/lost", &[]);
+        lost.declared = String::new();
+        let all = [entry("a/declared", &[]), undeclared, lost];
+        let mut manifest = listed(&all);
+
+        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
+            let fetcher = Fetcher {
+                source: &source,
+                identity: &identity,
+                inputs: &inputs,
+                catalog: &catalog,
+                earlier: &[],
+                region: "r",
+                monitor,
+                fetched: Mutex::default(),
+            };
+            identify(&fetcher, &all, &mut manifest, 2).unwrap();
+            let key = Key::of(b"UnityFS\0plain", INPUT_EXTENSION);
+            assert_eq!(manifest[0].content, "declared h");
+            assert_eq!(manifest[1].content, format!("bytes {key}"));
+            assert_eq!(manifest[2].content, "");
+            // The identified bundle is not fetched again; the lost one is tried again.
+            assert_eq!(fetcher.fetch(&all[1]).unwrap(), (key, false));
+            assert!(fetcher.fetch(&all[2]).is_err());
+        })
+        .unwrap();
+        let fetched = source.fetched.into_inner().unwrap();
+        assert_eq!(
+            fetched,
+            HashMap::from([("b/plain".to_owned(), 1), ("c/lost".to_owned(), 2)])
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundles_depend_on_the_bundles_that_hold_the_files_they_name() {
+        let root = std::env::temp_dir().join(format!("sekai-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = LocalStore::open(root.join("store")).unwrap();
+        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
+        let inputs = LocalStore::open(root.join("inputs")).unwrap();
+        // The two fixture bundles name each other's serialized file as an external file.
+        let fixture = |name: &str| {
+            let fixtures =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma");
+            std::fs::read(fixtures.join(name)).unwrap()
+        };
+        let source = Bundles {
+            bytes: HashMap::from([
+                ("data".to_owned(), fixture("fixture_data")),
+                ("scene".to_owned(), fixture("fixture_scene")),
+            ]),
+            ..Bundles::default()
+        };
+        let identity = identity();
+        let all = [
+            entry("data", &[]),
+            entry("scene", &["data"]),
+            entry("unread", &[]),
+        ];
+        let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+        let dependencies = |manifest: &[Entry]| -> Vec<Vec<String>> {
+            manifest.iter().map(|e| e.dependencies.clone()).collect()
+        };
+
+        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
+            let fetcher = || Fetcher {
+                source: &source,
+                identity: &identity,
+                inputs: &inputs,
+                catalog: &catalog,
+                earlier: &[],
+                region: "r",
+                monitor,
+                fetched: Mutex::default(),
+            };
+            // A run fetches and reads the bundles it may fetch; a listed dependency stays once.
+            let mut first = listed(&all);
+            let fetchable = |name: &str| name != "unread";
+            fetcher()
+                .add_file_dependencies(&all, &mut first, fetchable, &cache, &NoBundleIndexes, 2)
+                .unwrap();
+            assert_eq!(dependencies(&first), [vec!["scene"], vec!["data"], vec![]]);
+            // A later run finds the files in the catalog and fetches nothing.
+            let mut later = listed(&all);
+            fetcher()
+                .add_file_dependencies(&all, &mut later, |_| false, &cache, &NoBundleIndexes, 2)
+                .unwrap();
+            assert_eq!(later, first);
+        })
+        .unwrap();
+        let fetched = source.fetched.into_inner().unwrap();
+        assert_eq!(
+            fetched,
+            HashMap::from([("data".to_owned(), 1), ("scene".to_owned(), 1)])
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -992,6 +1392,7 @@ mod tests {
         .map(|entry| Entry {
             name: entry.name,
             size: entry.size,
+            content: entry.declared,
             dependencies: entry.dependencies,
         })
         .collect();

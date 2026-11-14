@@ -5,12 +5,12 @@ use std::fmt;
 use std::io;
 
 use sekai_catalog::store::parse_hex;
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Key, Store};
 use sekai_format::AssetDocument;
 use sekai_format::publication::{AssetFailure, ListingEntry};
-use sha2::{Digest, Sha256};
 
 use crate::parallel;
+use crate::patch::Change;
 
 /// A failure of a publication, with the name of the stage that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,7 +70,8 @@ pub struct File {
     pub role: String,
 }
 
-/// A published asset and its decoded asset document.
+/// A published asset, with what the publication itself needs of its asset document. The whole
+/// document stays in the store, where [`PublishedAsset::read`] reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishedAsset {
     /// The name of the asset.
@@ -79,8 +80,20 @@ pub struct PublishedAsset {
     pub bundle: String,
     /// The asset document in the store.
     pub document: Key,
-    /// The parsed asset document.
-    pub metadata: AssetDocument,
+    /// The asset form.
+    pub form: String,
+    /// The version of the asset form.
+    pub form_version: u32,
+    /// Whether the asset was produced. One that was not is listed among the failures and has no
+    /// member files.
+    pub produced: bool,
+}
+
+impl PublishedAsset {
+    /// The asset document, read from `store`.
+    pub fn read(&self, store: &dyn Store) -> Result<AssetDocument, PublishError> {
+        read(store, &self.name, &self.document).map(|(document, _)| document)
+    }
 }
 
 /// Everything a publication contains.
@@ -96,8 +109,6 @@ pub struct Plan {
     pub listings: BTreeMap<String, Vec<ListingEntry>>,
     /// The assets that could not be produced, in name order.
     pub failures: Vec<AssetFailure>,
-    /// The hash of the sorted records of the publication, as lowercase hexadecimal.
-    pub revision: String,
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -114,94 +125,113 @@ fn member_path(name: &str, role: &str, extension: &str, members: usize) -> Strin
     }
 }
 
-/// The asset document of `binding` and the size of its file.
-fn read(store: &LocalStore, binding: &Binding) -> Result<(AssetDocument, u64), PublishError> {
-    let bytes = store
-        .read(&binding.document)
-        .map_err(PublishError::wrap("plan"))?;
+/// The asset document `key` of the asset `name`, read from `store`, and the size of its file.
+fn read(store: &dyn Store, name: &str, key: &Key) -> Result<(AssetDocument, u64), PublishError> {
+    let bytes = store.read(key).map_err(PublishError::wrap("plan"))?;
     let document = AssetDocument::from_bytes(&bytes)
-        .map_err(|e| PublishError::new("plan", format!("{}: {e}", binding.name)))?;
+        .map_err(|e| PublishError::new("plan", format!("{name}: {e}")))?;
     Ok((document, bytes.len() as u64))
 }
 
-/// Reads the asset documents of `bindings` on up to `threads` threads and lists what a
-/// publication of them contains.
-pub fn plan(
-    version: &str,
-    bindings: &[Binding],
-    store: &LocalStore,
-    threads: usize,
-) -> Result<Plan, PublishError> {
-    let mut files = Vec::new();
-    let mut assets = Vec::with_capacity(bindings.len());
-    let mut listings: BTreeMap<String, Vec<ListingEntry>> = BTreeMap::new();
-    let mut failures = Vec::new();
-    let documents = parallel::map(bindings, threads, |binding| read(store, binding));
-    for (binding, document) in bindings.iter().zip(documents) {
-        let (document, size) = document?;
-        files.push(File {
-            path: format!("{}.asset.json", binding.name),
-            key: binding.document.clone(),
-            size,
-            media_type: "application/json".to_owned(),
-            asset: binding.name.clone(),
-            role: "document".to_owned(),
-        });
-        let bundle = document
-            .sources
-            .first()
-            .map(|source| source.bundle.clone())
-            .unwrap_or_default();
-        if let Some(error) = &document.error {
-            failures.push(AssetFailure {
+/// What one asset adds to a publication: the asset, its files, and its listing entry or, for an
+/// asset that was not produced, its failure.
+pub(crate) struct Contribution {
+    pub(crate) asset: PublishedAsset,
+    pub(crate) files: Vec<File>,
+    pub(crate) outcome: Result<ListingEntry, AssetFailure>,
+}
+
+/// The contribution of `binding`, from its asset document in `store`. The document itself is not
+/// kept, so that a publication holds only what it lists.
+fn contribution(store: &dyn Store, binding: &Binding) -> Result<Contribution, PublishError> {
+    let (document, size) = read(store, &binding.name, &binding.document)?;
+    let mut files = vec![File {
+        path: format!("{}.asset.json", binding.name),
+        key: binding.document.clone(),
+        size,
+        media_type: "application/json".to_owned(),
+        asset: binding.name.clone(),
+        role: "document".to_owned(),
+    }];
+    let outcome = match &document.error {
+        Some(error) => Err(AssetFailure {
+            name: binding.name.clone(),
+            code: error.code.clone(),
+        }),
+        None => {
+            let members = member_files(&binding.name, &document)?;
+            let total = members.iter().map(|file| file.size).sum();
+            files.extend(members);
+            Ok(ListingEntry {
                 name: binding.name.clone(),
-                code: error.code.clone(),
-            });
-            assets.push(PublishedAsset {
-                name: binding.name.clone(),
-                bundle,
-                document: binding.document.clone(),
-                metadata: document,
-            });
-            continue;
+                fingerprint: document.fingerprint.clone(),
+                size: total,
+            })
         }
-        let mut total = 0;
-        for member in &document.members {
-            let sha256 = parse_hex(&member.sha256).ok_or_else(|| {
-                PublishError::new("plan", format!("{}: bad member hash", binding.name))
-            })?;
-            total += member.size;
-            files.push(File {
-                path: member_path(
-                    &binding.name,
-                    &member.role,
-                    &member.extension,
-                    document.members.len(),
-                ),
+    };
+    let bundle = document.sources.first().map(|source| source.bundle.clone());
+    let asset = PublishedAsset {
+        name: binding.name.clone(),
+        bundle: bundle.unwrap_or_default(),
+        document: binding.document.clone(),
+        form: document.form,
+        form_version: document.form_version,
+        produced: outcome.is_ok(),
+    };
+    Ok(Contribution {
+        asset,
+        files,
+        outcome,
+    })
+}
+
+/// The member files of the asset `name`, whose asset document is `document`.
+fn member_files(name: &str, document: &AssetDocument) -> Result<Vec<File>, PublishError> {
+    let members = &document.members;
+    members
+        .iter()
+        .map(|member| {
+            let sha256 = parse_hex(&member.sha256)
+                .ok_or_else(|| PublishError::new("plan", format!("{name}: bad member hash")))?;
+            Ok(File {
+                path: member_path(name, &member.role, &member.extension, members.len()),
                 key: Key {
                     sha256,
                     extension: member.extension.clone(),
                 },
                 size: member.size,
                 media_type: member.media_type.clone(),
-                asset: binding.name.clone(),
+                asset: name.to_owned(),
                 role: member.role.clone(),
-            });
+            })
+        })
+        .collect()
+}
+
+/// Reads the asset documents of `bindings` from `store` on up to `threads` threads and lists what
+/// a publication of them contains.
+pub fn plan(
+    version: &str,
+    bindings: &[Binding],
+    store: &dyn Store,
+    threads: usize,
+) -> Result<Plan, PublishError> {
+    let mut files = Vec::new();
+    let mut assets = Vec::with_capacity(bindings.len());
+    let mut listings: BTreeMap<String, Vec<ListingEntry>> = BTreeMap::new();
+    let mut failures = Vec::new();
+    let contributions = parallel::map(bindings, threads, |binding| contribution(store, binding));
+    for contribution in contributions {
+        let contribution = contribution?;
+        files.extend(contribution.files);
+        match contribution.outcome {
+            Ok(entry) => listings
+                .entry(contribution.asset.form.clone())
+                .or_default()
+                .push(entry),
+            Err(failure) => failures.push(failure),
         }
-        listings
-            .entry(document.form.clone())
-            .or_default()
-            .push(ListingEntry {
-                name: binding.name.clone(),
-                fingerprint: document.fingerprint.clone(),
-                size: total,
-            });
-        assets.push(PublishedAsset {
-            name: binding.name.clone(),
-            bundle,
-            document: binding.document.clone(),
-            metadata: document,
-        });
+        assets.push(contribution.asset);
     }
     files.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(pair) = files.windows(2).find(|pair| pair[0].path == pair[1].path) {
@@ -215,30 +245,42 @@ pub fn plan(
         listing.sort_by(|a, b| a.name.cmp(&b.name));
     }
     failures.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut records = Sha256::new();
-    records.update(format!("publication 1\nversion {version}\n"));
-    for file in &files {
-        records.update(format!(
-            "file {}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            file.path,
-            hex(&file.key.sha256),
-            file.key.extension,
-            file.size,
-            file.media_type,
-            file.asset,
-            file.role
-        ));
-    }
-    for failure in &failures {
-        records.update(format!("failure {}\t{}\n", failure.name, failure.code));
-    }
     Ok(Plan {
         version: version.to_owned(),
         files,
         assets,
         listings,
         failures,
-        revision: hex(&records.finalize()),
     })
+}
+
+/// The change from a publication of the assets `old` to one of the assets `new`, both in name
+/// order. Only the asset documents of the bindings that differ are read from `store`, on up to
+/// `threads` threads.
+pub fn change(
+    old: &[Binding],
+    new: &[Binding],
+    store: &dyn Store,
+    threads: usize,
+) -> Result<Change, PublishError> {
+    let old_documents: BTreeMap<&str, &Key> =
+        old.iter().map(|b| (b.name.as_str(), &b.document)).collect();
+    let new_documents: BTreeMap<&str, &Key> =
+        new.iter().map(|b| (b.name.as_str(), &b.document)).collect();
+    let differs = |binding: &&Binding, other: &BTreeMap<&str, &Key>| {
+        other.get(binding.name.as_str()) != Some(&&binding.document)
+    };
+    let removed: Vec<&Binding> = old.iter().filter(|b| differs(b, &new_documents)).collect();
+    let added: Vec<&Binding> = new.iter().filter(|b| differs(b, &old_documents)).collect();
+    let read = |bindings: &[&Binding]| {
+        parallel::map(bindings, threads, |binding| contribution(store, binding))
+    };
+    let mut change = Change::default();
+    for removed in read(&removed) {
+        change.remove(&removed?);
+    }
+    for added in read(&added) {
+        change.add(added?)?;
+    }
+    Ok(change)
 }

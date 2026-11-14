@@ -1317,6 +1317,7 @@ name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
  "cpu-time",
+ "flate2",
  "lexopt",
  "mimalloc",
  "sekai-catalog",
@@ -1343,6 +1344,7 @@ version = "0.0.0"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1381,6 +1383,7 @@ dependencies = [
 name = "sekai-moesekai"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "png",
  "sekai-codec",
  "sekai-convert",
@@ -1388,6 +1391,7 @@ dependencies = [
  "sekai-format",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
@@ -1405,12 +1409,15 @@ dependencies = [
 name = "sekai-pipeline"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "sekai-catalog",
  "sekai-convert",
  "sekai-encode",
  "sekai-format",
  "sekai-game",
  "sekai-unity",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 

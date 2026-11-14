@@ -106,7 +106,7 @@ fn json(out: &mut String, value: &Value, path: &str) -> Result<(), ConvertError>
 }
 
 /// Writes `s` as a JSON string.
-fn string(out: &mut String, s: &str) {
+pub fn string(out: &mut String, s: &str) {
     out.push('"');
     for c in s.chars() {
         match c {

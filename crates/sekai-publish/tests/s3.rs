@@ -7,10 +7,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects, Remote};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
-use sekai_publish::s3::{Bucket, Check, Credentials, S3, publish, publish_with};
+use sekai_publish::s3::{Bucket, Credentials, S3, publish, publish_with};
 use sekai_publish::{Binding, Layout, Plan, documents, plan};
 use sha2::{Digest, Sha256};
 
@@ -140,6 +140,89 @@ struct State {
     lists: AtomicUsize,
     /// Uploads of objects other than pointers are refused once this many have been accepted.
     refuse_after: Mutex<Option<usize>>,
+    /// The multipart uploads in progress, by upload ID.
+    uploads: Mutex<BTreeMap<String, Upload>>,
+    /// The parts accepted, of every multipart upload.
+    parts: AtomicUsize,
+}
+
+/// A multipart upload in progress.
+struct Upload {
+    name: String,
+    cache_control: Option<String>,
+    /// The bytes of each part by number, with the entity tag the server gave it.
+    parts: BTreeMap<usize, (String, Vec<u8>)>,
+}
+
+impl State {
+    /// Whether an upload to `name` is refused.
+    fn refuses(&self, name: &str) -> bool {
+        !name.ends_with("current.json")
+            && self
+                .refuse_after
+                .lock()
+                .unwrap()
+                .is_some_and(|n| self.puts.load(Ordering::SeqCst) >= n)
+    }
+
+    /// Starts a multipart upload of `request` to `name` and answers with its ID.
+    fn start_upload(&self, name: String, request: &Request) -> Vec<u8> {
+        let mut uploads = self.uploads.lock().unwrap();
+        let id = format!("upload+{}", uploads.len());
+        let upload = Upload {
+            name,
+            cache_control: request.headers.get("cache-control").cloned(),
+            parts: BTreeMap::new(),
+        };
+        uploads.insert(id.clone(), upload);
+        format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>")
+            .into_bytes()
+    }
+
+    /// Takes the body of `request` as a part of the upload `id`, and returns its entity tag.
+    fn put_part(&self, id: &str, request: &Request) -> Option<String> {
+        let number = request.query["partNumber"].parse().unwrap();
+        let tag = format!("\"{}\"", &sha256(&request.body)[..32]);
+        let mut uploads = self.uploads.lock().unwrap();
+        let upload = uploads.get_mut(id)?;
+        upload
+            .parts
+            .insert(number, (tag.clone(), request.body.clone()));
+        self.parts.fetch_add(1, Ordering::SeqCst);
+        self.puts.fetch_add(1, Ordering::SeqCst);
+        Some(tag)
+    }
+
+    /// Joins the parts of the upload `id` that `request` lists into its object, when every part
+    /// is listed in order with its entity tag.
+    fn complete_upload(&self, id: &str, request: &Request) -> bool {
+        let listed = String::from_utf8_lossy(&request.body).into_owned();
+        let Some(upload) = self.uploads.lock().unwrap().remove(id) else {
+            return false;
+        };
+        let tags: Vec<String> = listed
+            .split("<ETag>")
+            .skip(1)
+            .map(|rest| rest.split("</ETag>").next().unwrap().to_owned())
+            .collect();
+        let held: Vec<&String> = upload.parts.values().map(|(tag, _)| tag).collect();
+        if tags.iter().collect::<Vec<_>>() != held {
+            return false;
+        }
+        let bytes = upload
+            .parts
+            .into_values()
+            .flat_map(|(_, bytes)| bytes)
+            .collect();
+        if let Some(cache_control) = upload.cache_control {
+            self.cache_controls
+                .lock()
+                .unwrap()
+                .insert(upload.name.clone(), cache_control);
+        }
+        self.objects.lock().unwrap().insert(upload.name, bytes);
+        true
+    }
 }
 
 struct Server {
@@ -269,10 +352,36 @@ fn serve(state: &State, mut stream: TcpStream) {
         .strip_prefix("/bucket/")
         .unwrap_or_default()
         .to_owned();
+    let mut etag = None;
+    let upload = request.query.get("uploadId").cloned();
     let (status, body) = if !request.signed(SECRET_KEY) {
         (403, Vec::new())
+    } else if let Some(id) = upload {
+        match request.method.as_str() {
+            "PUT" if state.refuses(&name) => (403, Vec::new()),
+            "PUT" if request.headers["x-amz-content-sha256"] != sha256(&request.body) => {
+                (400, Vec::new())
+            }
+            "PUT" => {
+                etag = state.put_part(&id, &request);
+                (if etag.is_some() { 200 } else { 404 }, Vec::new())
+            }
+            "POST" if state.complete_upload(&id, &request) => (
+                200,
+                b"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>".to_vec(),
+            ),
+            "POST" => (200, b"<Error><Code>InvalidPart</Code></Error>".to_vec()),
+            "DELETE" => {
+                state.uploads.lock().unwrap().remove(&id);
+                (204, Vec::new())
+            }
+            _ => (405, Vec::new()),
+        }
     } else {
         match request.method.as_str() {
+            "POST" if request.query.contains_key("uploads") => {
+                (200, state.start_upload(name, &request))
+            }
             "HEAD" => {
                 state.heads.fetch_add(1, Ordering::SeqCst);
                 match state.objects.lock().unwrap().get(&name) {
@@ -293,13 +402,7 @@ fn serve(state: &State, mut stream: TcpStream) {
                 None => (404, Vec::new()),
             },
             "PUT" => {
-                let refused = !name.ends_with("current.json")
-                    && state
-                        .refuse_after
-                        .lock()
-                        .unwrap()
-                        .is_some_and(|n| state.puts.load(Ordering::SeqCst) >= n);
-                if refused {
+                if state.refuses(&name) {
                     (403, Vec::new())
                 } else if request.headers["x-amz-content-sha256"] != sha256(&request.body) {
                     (400, Vec::new())
@@ -319,8 +422,9 @@ fn serve(state: &State, mut stream: TcpStream) {
             _ => (405, Vec::new()),
         }
     };
+    let etag = etag.map_or(String::new(), |tag| format!("etag: {tag}\r\n"));
     let mut response = format!(
-        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n{etag}connection: close\r\n\r\n",
         body.len()
     )
     .into_bytes();
@@ -403,13 +507,20 @@ const POINTER: &str = "out/published/jp/canonical/current.json";
 fn a_second_publication_uploads_nothing() {
     let s = Scratch::new("twice");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
-    // Seven files, three shards, one listing and the root, and a path index of one chunk.
-    assert_eq!((report.uploaded, report.present), (14, 0));
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    // Seven files, three shards, a chunk of directories, a chunk of one listing and the root, and
+    // a path index of one chunk.
+    assert_eq!((report.uploaded, report.present), (15, 0));
     assert!(report.pointer_written);
     for file in &plan.files {
         assert_eq!(
@@ -430,9 +541,9 @@ fn a_second_publication_uploads_nothing() {
     assert!(server.object(&object_name(&root)).is_some());
 
     let puts = server.state.puts.load(Ordering::SeqCst);
-    let (again, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (again, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(again, pointer);
-    assert_eq!((report.uploaded, report.present), (0, 14));
+    assert_eq!((report.uploaded, report.present), (0, 15));
     assert!(!report.pointer_written);
     assert_eq!(server.state.puts.load(Ordering::SeqCst), puts);
 }
@@ -441,9 +552,15 @@ fn a_second_publication_uploads_nothing() {
 fn a_wrong_key_is_refused_and_writes_no_pointer() {
     let s = Scratch::new("signature");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
-    let e = publish(&store, &server.client("wrong"), "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan).unwrap_err();
     // Reading the live pointer is the first signed request, and its refusal stops the publication.
     assert_eq!(e.stage, "pointer");
     assert!(server.object(POINTER).is_none());
@@ -454,18 +571,24 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
 fn an_interrupted_publication_converges() {
     let s = Scratch::new("interrupted");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
     server.refuse_after(Some(4));
-    let e = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &s3, "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
 
     server.refuse_after(None);
-    let (pointer, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
-    assert_eq!(report.uploaded + report.present, 14);
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    assert_eq!(report.uploaded + report.present, 15);
     assert!(report.present >= 4);
     assert_eq!(
         server.object(POINTER),
@@ -477,27 +600,25 @@ fn an_interrupted_publication_converges() {
 fn a_failed_publication_keeps_the_previous_pointer() {
     let s = Scratch::new("keeps");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     let previous = server.object(POINTER).unwrap();
 
     server.refuse_after(Some(0));
-    let e = publish(
-        &store,
-        &s3,
-        "jp/canonical",
-        &sample(&store, "v2", b"new"),
-        2,
-    )
-    .unwrap_err();
+    let e = publish(&objects, &s3, "jp/canonical", &sample(&store, "v2", b"new")).unwrap_err();
     assert_eq!(e.stage, "files");
     assert_eq!(server.object(POINTER), Some(previous));
 }
@@ -506,6 +627,12 @@ fn a_failed_publication_keeps_the_previous_pointer() {
 fn an_object_missing_from_the_store_stops_before_the_pointer() {
     let s = Scratch::new("missing");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
     let file = plan
@@ -514,96 +641,235 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
-    let e = publish(&store, &server.client(SECRET_KEY), "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
 }
 
 #[test]
-fn incremental_publication_skips_head_for_live_objects() {
+fn a_publication_uploads_only_unrecorded_objects() {
     let s = Scratch::new("incremental");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
 
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     server.state.heads.store(0, Ordering::SeqCst);
 
     // Identical publication sends 0 HEADs and 0 PUTs.
     publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 
-    // Changing one member checks only the 8 changed objects (1 member, 1 document, the shards "a"
-    // and "a/two", 1 listing, the root, and the chunk and root of the path index), skipping HEAD
-    // on the 6 unchanged objects of v1.
+    // Changing one member uploads only the 8 changed objects (1 member, 1 document, the shards "a"
+    // and "a/two", 1 listing, the root, and the chunk and root of the path index): the 6
+    // unchanged objects of v1 are recorded as held. The bucket is never asked about an object.
     let (_, report) = publish(
-        &store,
+        &objects,
         &s3,
         "jp/canonical",
         &sample(&store, "v2", b"mask2"),
-        2,
     )
     .unwrap();
-    assert_eq!((report.uploaded, report.present), (8, 6));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 8);
+    assert_eq!((report.uploaded, report.present), (9, 6));
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }
 
 #[test]
-fn verifying_lists_the_store_and_restores_lost_objects() {
+fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
     let s = Scratch::new("verify");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
-    publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     let lost = object_name(&plan.files[0].key);
     server.remove(&lost);
 
-    // The pointer names the publication, so a plain publication trusts it.
-    let (_, report) = publish(&store, &s3, "jp/canonical", &plan, 2).unwrap();
+    // The holdings record the lost object, so a plain publication trusts them.
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(report.uploaded, 0);
     assert!(server.object(&lost).is_none());
 
+    let listed = MemoryHoldings::new(s3.holdings().unwrap());
+    // One request for each empty store directory, and more where a directory fills pages.
+    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
     server.state.heads.store(0, Ordering::SeqCst);
-    let (_, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &plan,
-        Layout::Index,
-        Check::Listing,
-        2,
-    )
-    .unwrap();
-    assert_eq!((report.uploaded, report.present), (1, 13));
+    let objects = Objects {
+        local: &store,
+        held: &listed,
+        remote: &NoRemote,
+    };
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    assert_eq!((report.uploaded, report.present), (1, 14));
     assert!(!report.pointer_written);
     assert_eq!(
         server.object(&lost),
         Some(store.read(&plan.files[0].key).unwrap())
     );
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
-    // One request for each empty store directory, and more where a directory fills pages.
-    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
+    assert_eq!(
+        listed.size(&plan.files[0].key).unwrap(),
+        Some(plan.files[0].size)
+    );
 }
 
 #[test]
-fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
+fn an_object_the_bucket_holds_may_leave_the_store() {
+    let s = Scratch::new("evicted");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    publish(
+        &objects,
+        &s3,
+        "jp/canonical",
+        &sample(&store, "v1", b"mask"),
+    )
+    .unwrap();
+    let plan = sample(&store, "v2", b"mask");
+    for file in &plan.files {
+        std::fs::remove_file(store.path(&file.key)).unwrap();
+    }
+
+    // The evicted files are held, so only the documents of the new version go up.
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    assert!(report.present >= plan.files.len());
+    assert!(report.pointer_written);
+}
+
+#[test]
+fn an_object_larger_than_ten_megabytes_is_read_back() {
+    let server = Server::start();
+    let bytes: Vec<u8> = (0..11 << 20).map(|i: u32| (i % 251) as u8).collect();
+    let key = Key::of(&bytes, "bin");
+    server
+        .state
+        .objects
+        .lock()
+        .unwrap()
+        .insert(object_name(&key), bytes.clone());
+
+    let fetched = server.client(SECRET_KEY).fetch(&key).unwrap();
+    assert_eq!(fetched.as_deref(), Some(bytes.as_slice()));
+}
+
+#[test]
+fn the_bucket_keeps_state_files_outside_its_publications() {
+    let s = Scratch::new("state");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, b"local catalog").unwrap();
+
+    // A bucket that keeps no state leaves the local file alone.
+    assert!(!s3.fetch_state("catalog.redb", &local).unwrap());
+    assert_eq!(std::fs::read(&local).unwrap(), b"local catalog");
+
+    s3.store_state("catalog.redb", &local).unwrap();
+    let name = "out/state/catalog.redb";
+    assert_eq!(server.object(name).as_deref(), Some(&b"local catalog"[..]));
+    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    assert_eq!(cache_control, "private, no-store");
+
+    let pulled = s.0.join("pulled.redb");
+    assert!(s3.fetch_state("catalog.redb", &pulled).unwrap());
+    assert_eq!(std::fs::read(&pulled).unwrap(), b"local catalog");
+
+    // Small state files are read and written as bytes.
+    let read_to_end = |body: &mut dyn std::io::Read| {
+        let mut bytes = Vec::new();
+        body.read_to_end(&mut bytes).map(|_| bytes)
+    };
+    assert_eq!(
+        s3.read_state("versions/jp.json", read_to_end).unwrap(),
+        None
+    );
+    s3.write_state("versions/jp.json", b"{}").unwrap();
+    let name = "out/state/versions/jp.json";
+    assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
+    let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
+    assert_eq!(read.as_deref(), Some(&b"{}"[..]));
+}
+
+/// Bytes of 33 MiB and a few more, which make three parts.
+fn large_state() -> Vec<u8> {
+    (0..(33u32 << 20) + 5).map(|i| (i % 253) as u8).collect()
+}
+
+#[test]
+fn a_large_state_file_is_written_in_parts() {
+    let s = Scratch::new("parts");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let bytes = large_state();
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, &bytes).unwrap();
+
+    s3.store_state("catalog.redb", &local).unwrap();
+    s3.write_state("documents/jp.pack.gz", &bytes).unwrap();
+    for name in ["out/state/catalog.redb", "out/state/documents/jp.pack.gz"] {
+        assert!(server.object(name) == Some(bytes.clone()), "{name}");
+        let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+        assert_eq!(cache_control, "private, no-store");
+    }
+    assert_eq!(server.state.parts.load(Ordering::SeqCst), 6);
+    assert!(server.state.uploads.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_upload_in_parts_is_aborted() {
+    let s = Scratch::new("aborted");
+    let server = Server::start();
+    let s3 = server.client(SECRET_KEY);
+    let local = s.0.join("catalog.redb");
+    std::fs::write(&local, large_state()).unwrap();
+    server.refuse_after(Some(1));
+
+    assert!(s3.store_state("catalog.redb", &local).is_err());
+    assert_eq!(server.object("out/state/catalog.redb"), None);
+    assert!(server.state.uploads.lock().unwrap().is_empty());
+}
+
+#[test]
+fn sqlite_layout_sets_cache_control_and_uploads_only_new_objects() {
     let s = Scratch::new("sqlite-s3");
     let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
 
@@ -652,22 +918,14 @@ fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
     };
     let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
 
-    let objects = |plan: &Plan| -> BTreeSet<Key> {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
+    let referred = |plan: &Plan| -> BTreeSet<Key> {
+        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
         publication.objects.into_iter().map(|o| o.key).collect()
     };
     let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
-    let (pointer, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &v1,
-        Layout::Sqlite,
-        Check::Pointer,
-        2,
-    )
-    .unwrap();
-    assert_eq!((report.uploaded, report.present), (objects(&v1).len(), 0));
+    let (pointer, report) =
+        publish_with(&objects, &s3, "jp/canonical", &v1, Layout::Sqlite).unwrap();
+    assert_eq!((report.uploaded, report.present), (referred(&v1).len(), 0));
     assert!(pointer.sqlite.is_some() && pointer.paths.is_some());
 
     let sqlite_key = Key {
@@ -683,22 +941,13 @@ fn sqlite_layout_sets_cache_control_and_asks_only_about_new_objects() {
     );
     assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
 
-    // A second version asks only about the objects the first did not have.
+    // A second version uploads only the objects the first did not have.
     server.state.heads.store(0, Ordering::SeqCst);
     let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
     let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
-    let (_, report) = publish_with(
-        &store,
-        &s3,
-        "jp/canonical",
-        &v2,
-        Layout::Sqlite,
-        Check::Pointer,
-        2,
-    )
-    .unwrap();
-    let all = objects(&v2);
-    let new = all.difference(&objects(&v1)).count();
+    let (_, report) = publish_with(&objects, &s3, "jp/canonical", &v2, Layout::Sqlite).unwrap();
+    let all = referred(&v2);
+    let new = all.difference(&referred(&v1)).count();
     assert_eq!((report.uploaded, report.present), (new, all.len() - new));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), new);
+    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }

@@ -6,7 +6,7 @@ pub mod s3;
 mod index;
 mod layout;
 mod parallel;
-mod paths;
+pub mod patch;
 pub mod plan;
 mod sqlite;
 pub mod tree;

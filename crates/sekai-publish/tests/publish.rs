@@ -2,10 +2,14 @@
 
 use std::path::{Path, PathBuf};
 
-use sekai_catalog::{Key, LocalStore};
+use sekai_catalog::{
+    Holdings, Key, LocalStore, MemoryHoldings, MemoryStore, NoRemote, Objects, Store,
+};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
+use sekai_publish::patch::{self, Previous};
+use sekai_publish::plan::change;
 use sekai_publish::{Binding, Layout, Plan, documents, plan, publish, tree};
 
 struct Scratch(PathBuf);
@@ -123,10 +127,15 @@ fn the_revision_does_not_depend_on_the_order_of_bindings() {
     let a = asset(&store, "a", &[("image", b"1")]);
     let b = asset(&store, "b", &[("image", b"2")]);
     let first = plan("v1", &[a.clone(), b.clone()], &store, 2).unwrap();
-    let second = plan("v1", &[b, a], &store, 2).unwrap();
+    let second = plan("v1", &[b, a.clone()], &store, 2).unwrap();
     assert_eq!(first, second);
-    let other = plan("v2", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
-    assert_ne!(first.revision, other.revision);
+    let revision = |plan: &Plan| {
+        let publication = documents(&store, "jp/canonical", plan, Layout::Index).unwrap();
+        publication.pointer.revision
+    };
+    let other = plan("v1", &[a], &store, 2).unwrap();
+    assert_eq!(revision(&first), revision(&second));
+    assert_ne!(revision(&first), revision(&other));
 }
 
 #[test]
@@ -136,16 +145,32 @@ fn an_index_publication_is_reproducible() {
     let bindings = [asset(&store, "a/one", &[("image", b"1")])];
     let plan = plan("v1", &bindings, &store, 2).unwrap();
     let root = s.0.join("published");
-    let first = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
+    let first = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     let bytes = std::fs::read(root.join("jp/canonical/current.json")).unwrap();
-    let second = publish(&store, &root, "jp/canonical", &plan, Layout::Index, 2).unwrap();
+    let second = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     assert_eq!(first, second);
     assert_eq!(
         bytes,
         std::fs::read(root.join("jp/canonical/current.json")).unwrap()
     );
     let read: Pointer = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(read.revision, plan.revision);
+    assert_eq!(read, first);
 }
 
 #[test]
@@ -154,19 +179,61 @@ fn a_missing_object_stops_the_pointer() {
     let store = s.store();
     let root = s.0.join("published");
     let good = plan("v1", &[asset(&store, "a", &[("image", b"1")])], &store, 2).unwrap();
-    publish(&store, &root, "jp/t", &good, Layout::Index, 2).unwrap();
+    publish(
+        &Objects::local(&store),
+        &root,
+        "jp/t",
+        &good,
+        Layout::Index,
+        2,
+    )
+    .unwrap();
     let before = std::fs::read(root.join("jp/t/current.json")).unwrap();
 
     let binding = asset(&store, "b", &[("image", b"gone")]);
     let plan = plan("v2", &[binding], &store, 2).unwrap();
     let member = plan.files.iter().find(|f| f.role == "image").unwrap();
     std::fs::remove_file(store.path(&member.key)).unwrap();
-    let error = publish(&store, &root, "jp/t", &plan, Layout::Index, 2).unwrap_err();
+    let error = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/t",
+        &plan,
+        Layout::Index,
+        2,
+    )
+    .unwrap_err();
     assert_eq!(error.stage, "verify");
     assert_eq!(
         before,
         std::fs::read(root.join("jp/t/current.json")).unwrap()
     );
+}
+
+#[test]
+fn an_object_the_destination_holds_may_leave_the_store() {
+    let s = Scratch::new("held");
+    let store = s.store();
+    let root = s.0.join("published");
+    let plan = plan(
+        "v1",
+        &[asset(&store, "a", &[("image", b"evicted")])],
+        &store,
+        2,
+    )
+    .unwrap();
+    let member = plan.files.iter().find(|f| f.role == "image").unwrap();
+    std::fs::remove_file(store.path(&member.key)).unwrap();
+    let held = MemoryHoldings::default();
+    held.hold(&[(member.key.clone(), member.size)]).unwrap();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+
+    let pointer = publish(&objects, &root, "jp/t", &plan, Layout::Index, 2).unwrap();
+    assert!(pointer.root.is_some());
 }
 
 #[test]
@@ -338,12 +405,20 @@ fn sqlite_index_is_deterministic_and_valid() {
     let backward = plan("v1", &rev_bindings, &store, 2).unwrap();
 
     let sqlite_of = |plan: &Plan| {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
+        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
         publication.pointer.sqlite.unwrap()
     };
     let sqlite = sqlite_of(&forward);
     assert_eq!(sqlite, sqlite_of(&backward));
-    let pointer = publish(&store, &root, "jp/canonical", &forward, Layout::Sqlite, 2).unwrap();
+    let pointer = publish(
+        &Objects::local(&store),
+        &root,
+        "jp/canonical",
+        &forward,
+        Layout::Sqlite,
+        2,
+    )
+    .unwrap();
     assert_eq!(pointer.sqlite.as_deref(), Some(sqlite.as_str()));
 
     // SQLite itself checks the database, through the `sqlite3` module of Python.
@@ -376,4 +451,135 @@ fn sqlite_index_is_deterministic_and_valid() {
         "sqlite3 integrity check failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[test]
+fn a_plan_reads_the_documents_that_only_the_destination_holds() {
+    let s = Scratch::new("read-back");
+    let earlier = LocalStore::open(s.0.join("earlier")).unwrap();
+    let bindings = [
+        asset(&earlier, "a", &[("image", b"1")]),
+        failed(&earlier, "b"),
+    ];
+    let remote = MemoryStore::default();
+    let held = MemoryHoldings::default();
+    for Binding { document, .. } in &bindings {
+        let bytes = earlier.read(document).unwrap();
+        remote.put(&bytes, &document.extension).unwrap();
+        held.hold(&[(document.clone(), bytes.len() as u64)])
+            .unwrap();
+    }
+    let local = s.store();
+    let objects = Objects {
+        local: &local,
+        held: &held,
+        remote: &remote,
+    };
+
+    let read_back = plan("v1", &bindings, &objects, 2).unwrap();
+    assert_eq!(read_back, plan("v1", &bindings, &earlier, 2).unwrap());
+    assert!(bindings.iter().all(|b| local.contains(&b.document)));
+}
+
+/// `count` assets in a few directories, every seventh of them failed.
+fn many(store: &LocalStore, count: usize, salt: &str) -> Vec<Binding> {
+    (0..count)
+        .map(|i| {
+            let name = format!("group_{:02}/item_{i:05}", i % 9);
+            match i % 7 {
+                0 => failed(store, &name),
+                3 => asset(store, &name, &[("image", b"a"), ("mask", salt.as_bytes())]),
+                _ => asset(store, &name, &[("image", format!("{i}").as_bytes())]),
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_change_gives_the_publication_of_the_new_assets() {
+    let s = Scratch::new("change");
+    let store = s.store();
+    let old = many(&store, 6000, "x");
+    let mut new = old.clone();
+    new.remove(4321);
+    new.remove(10);
+    new[77] = failed(&store, &new[77].name);
+    new[700] = asset(&store, &new[700].name, &[("image", b"changed")]);
+    new[3500] = asset(&store, &new[3500].name, &[("image", b"a"), ("mask", b"y")]);
+    new.push(asset(&store, "new_directory/one", &[("image", b"new")]));
+    new.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for layout in [Layout::Index, Layout::Paths] {
+        let before = documents(
+            &store,
+            "jp/canonical",
+            &plan("v1", &old, &store, 2).unwrap(),
+            layout,
+        );
+        let before = before.unwrap();
+        let previous = Previous::read(&store, &before.pointer).unwrap();
+        let change = change(&old, &new, &store, 2).unwrap();
+        let patched =
+            patch::apply(&store, &store, "canonical", "v2", layout, &previous, change).unwrap();
+        let whole = plan("v2", &new, &store, 2).unwrap();
+        let whole = documents(&store, "jp/canonical", &whole, layout).unwrap();
+        assert_eq!(patched.pointer, whole.pointer, "{layout:?}");
+        assert!(
+            patched.objects.len() * 20 < whole.objects.len(),
+            "{layout:?}: {} of {}",
+            patched.objects.len(),
+            whole.objects.len()
+        );
+    }
+}
+
+#[test]
+fn a_change_that_changes_nothing_keeps_every_document() {
+    let s = Scratch::new("unchanged");
+    let store = s.store();
+    let assets = many(&store, 2000, "x");
+    let before = documents(
+        &store,
+        "jp/canonical",
+        &plan("v1", &assets, &store, 2).unwrap(),
+        Layout::Index,
+    );
+    let before = before.unwrap();
+    let previous = Previous::read(&store, &before.pointer).unwrap();
+    let change = change(&assets, &assets, &store, 2).unwrap();
+    assert!(change.is_empty());
+    let after = patch::apply(
+        &store,
+        &store,
+        "canonical",
+        "v1",
+        Layout::Index,
+        &previous,
+        change,
+    )
+    .unwrap();
+    assert_eq!(after.pointer, before.pointer);
+}
+
+#[test]
+fn a_change_may_not_publish_two_files_at_one_path() {
+    let s = Scratch::new("conflict");
+    let store = s.store();
+    let old = vec![asset(&store, "d/a", &[("image", b"1"), ("mask", b"2")])];
+    let before = documents(
+        &store,
+        "jp/t",
+        &plan("v1", &old, &store, 2).unwrap(),
+        Layout::Index,
+    );
+    let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
+    // The single member of d/a/image lands on the path of the image of d/a.
+    let mut new = old.clone();
+    new.push(asset(&store, "d/a/image", &[("image", b"3")]));
+    for layout in [Layout::Index, Layout::Paths] {
+        let change = change(&old, &new, &store, 2).unwrap();
+        let error = patch::apply(&store, &store, "t", "v2", layout, &previous, change);
+        let error = error.unwrap_err();
+        assert!(error.message.contains("d/a/image.webp"), "{error}");
+    }
 }

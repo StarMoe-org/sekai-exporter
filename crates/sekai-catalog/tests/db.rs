@@ -1,10 +1,11 @@
 //! The catalog database: batches, snapshots and rebuilding.
 #![cfg(feature = "catalog-db")]
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use sekai_catalog::db::{AssetRow, BundleRow, Catalog, PublicationRow};
-use sekai_catalog::{Derivations, Derived, Key, LocalStore};
+use sekai_catalog::db::{AssetRow, BundleRow, Catalog, IndexCache, PublicationRow};
+use sekai_catalog::{BundleIndexes, Derivations, Derived, Holdings, Key, LocalStore};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError};
 
@@ -129,6 +130,24 @@ fn readers_do_not_see_an_uncommitted_batch() {
 }
 
 #[test]
+fn holdings_are_listed_by_store_directory_and_replaced_whole() {
+    let s = Scratch::new("holdings");
+    let catalog = Catalog::open_or_rebuild(&s.file(), &s.store()).unwrap();
+    let held = catalog.holdings();
+    held.hold(&[(key(0x10), 3), (key(0x11), 4)]).unwrap();
+
+    assert_eq!(held.size(&key(0x10)).unwrap(), Some(3));
+    assert_eq!(held.size(&key(0x12)).unwrap(), None);
+    let sizes = held.sizes(0x11).unwrap();
+    assert_eq!(sizes.into_iter().collect::<Vec<_>>(), [(key(0x11), 4)]);
+    assert!(held.sizes(0xff).unwrap().is_empty());
+
+    held.replace(&BTreeMap::from([(key(0xff), 6)])).unwrap();
+    assert_eq!(held.size(&key(0x10)).unwrap(), None);
+    assert_eq!(held.sizes(0xff).unwrap().get(&key(0xff)), Some(&6));
+}
+
+#[test]
 fn derivations_survive_reopening_after_a_flush() {
     let s = Scratch::new("flush");
     let store = s.store();
@@ -170,4 +189,38 @@ fn a_damaged_file_is_rebuilt_from_the_store() {
     );
     assert_eq!(catalog.derivation(&[0xcd; 32]).unwrap(), None);
     assert!(s.0.join("catalog.redb.corrupt").is_file());
+}
+
+#[test]
+fn bundle_indexes_survive_reopening_their_cache() {
+    let s = Scratch::new("indexes");
+    let path = s.0.join("indexes.redb");
+    let cache = IndexCache::open(&path).unwrap();
+    cache.put([7; 32], b"index".to_vec()).unwrap();
+    assert_eq!(cache.get(&[7; 32]).unwrap().as_deref(), Some(&b"index"[..]));
+    cache.flush().unwrap();
+    drop(cache);
+    let cache = IndexCache::open(&path).unwrap();
+    assert_eq!(cache.get(&[7; 32]).unwrap().as_deref(), Some(&b"index"[..]));
+    assert_eq!(cache.get(&[8; 32]).unwrap(), None);
+}
+
+#[test]
+fn a_catalog_keeps_no_bundle_indexes() {
+    let s = Scratch::new("no-indexes");
+    let cache = IndexCache::open(&s.file()).unwrap();
+    for byte in 0..64 {
+        cache.put([byte; 32], vec![byte; 64 << 10]).unwrap();
+    }
+    cache.flush().unwrap();
+    drop(cache);
+    let before = std::fs::metadata(s.file()).unwrap().len();
+
+    let catalog = Catalog::open_or_rebuild(&s.file(), &s.store()).unwrap();
+    catalog.holdings().hold(&[(key(1), 4)]).unwrap();
+    drop(catalog);
+    let after = std::fs::metadata(s.file()).unwrap().len();
+    assert!(after < before / 4, "{after} of {before} bytes are left");
+    let catalog = Catalog::open_or_rebuild(&s.file(), &s.store()).unwrap();
+    assert_eq!(catalog.holdings().size(&key(1)).unwrap(), Some(4));
 }

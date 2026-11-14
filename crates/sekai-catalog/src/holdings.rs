@@ -119,9 +119,9 @@ impl<'a> Objects<'a> {
         }
     }
 
-    /// Reads `key` from the destination into the local store. An object named by a document or a
-    /// record that is not local is there, also when it is not recorded as held. Bytes that do not
-    /// match the key are refused.
+    /// Reads `key` from the destination into the local store, and records that the destination
+    /// holds it. An object named by a document or a record that is not local is there, also when
+    /// it is not recorded as held. Bytes that do not match the key are refused.
     fn read_back(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
         let Some(bytes) = self.remote.fetch(key)? else {
             return Ok(None);
@@ -133,6 +133,7 @@ impl<'a> Objects<'a> {
             ));
         }
         self.local.put(&bytes, &key.extension)?;
+        self.held.hold(&[(key.clone(), bytes.len() as u64)])?;
         Ok(Some(bytes))
     }
 
@@ -194,6 +195,27 @@ mod tests {
         assert_eq!(sizes.get(&evicted), Some(&7));
         assert_eq!(objects.read(&evicted).unwrap(), b"evicted");
         assert!(local.contains(&evicted));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_object_read_back_is_recorded_as_held() {
+        let root = std::env::temp_dir().join(format!("sekai-read-back-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let local = LocalStore::open(&root).unwrap();
+        let remote = MemoryStore::default();
+        let named = remote.put(b"named", "json").unwrap();
+        let held = MemoryHoldings::default();
+        let objects = Objects {
+            local: &local,
+            held: &held,
+            remote: &remote,
+        };
+        assert_eq!(objects.read(&named).unwrap(), b"named");
+        assert_eq!(held.size(&named).unwrap(), Some(5));
+        let missing = Key::of(b"missing", "json");
+        assert!(objects.read(&missing).is_err());
+        assert_eq!(held.size(&missing).unwrap(), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

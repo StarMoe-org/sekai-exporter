@@ -97,6 +97,11 @@ impl Bucket {
         &self.s3
     }
 
+    /// The number of requests to the bucket in flight at once.
+    pub(crate) fn connections(&self) -> usize {
+        self.s3.connections()
+    }
+
     /// Every object of the store in the bucket with its size, from a listing of the whole store.
     pub(crate) fn holdings(&self, monitor: &Monitor) -> Result<BTreeMap<Key, u64>, lexopt::Error> {
         let _span = monitor.span("publish", "listing", "");
@@ -176,6 +181,10 @@ impl Bucket {
     }
 
     pub(crate) fn remote(&self) -> &dyn Remote {
+        match *self {}
+    }
+
+    pub(crate) fn connections(&self) -> usize {
         match *self {}
     }
 

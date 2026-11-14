@@ -164,6 +164,11 @@ impl S3 {
         })
     }
 
+    /// The number of requests in flight at once.
+    pub fn connections(&self) -> usize {
+        self.bucket.connections
+    }
+
     /// Every object of the store in the bucket with its size, from a listing of the whole store,
     /// one store directory per connection.
     pub fn holdings(&self) -> Result<BTreeMap<Key, u64>, PublishError> {

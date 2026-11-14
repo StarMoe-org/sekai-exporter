@@ -51,6 +51,15 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// How many reads and writes of objects and state files run at once: the connections of a
+    /// bucket, or `threads` for the output directory.
+    pub(super) fn requests(&self, threads: usize) -> usize {
+        match self {
+            Self::Local { .. } => threads,
+            Self::Bucket(bucket) => bucket.connections(),
+        }
+    }
+
     /// The layout of the canonical view.
     pub(super) fn layout(&self) -> Layout {
         match self {

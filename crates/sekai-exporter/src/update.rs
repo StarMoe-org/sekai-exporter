@@ -395,7 +395,8 @@ fn export_version(
         records: &records,
         catalog: &opened.catalog,
     };
-    let baseline = Baseline::read(files, site, region_name, &objects, options.threads)?;
+    let requests = site.requests(options.threads);
+    let baseline = Baseline::read(files, site, region_name, &objects, requests)?;
     let Baseline {
         mut state,
         root,
@@ -656,15 +657,15 @@ struct Publications {
 
 impl Baseline {
     /// The baseline of `region`, from the state in `files` and the publications of `site`, whose
-    /// documents are read from `store`.
+    /// documents are read from `store`, with up to `requests` reads at once.
     fn read(
         files: &dyn StateFiles,
         site: &Site<'_>,
         region: &str,
         store: &dyn Store,
-        threads: usize,
+        requests: usize,
     ) -> Result<Self, String> {
-        let read = RegionState::read(files, region, threads);
+        let read = RegionState::read(files, region, requests);
         let read = read.map_err(|e| format!("the state of {region}: {e}"))?;
         let (state, root) = read.map_or_else(Default::default, |(state, root)| (state, Some(root)));
         let canonical = site.current(&canonical_target(region))?;
@@ -762,6 +763,11 @@ struct Committed {
 }
 
 impl Context<'_> {
+    /// How many reads and writes of the site run at once.
+    fn requests(&self) -> usize {
+        self.site.requests(self.options.threads)
+    }
+
     /// The publications of the version `name` that `advance` reaches, patched from the previous
     /// `publications`, with the converters of `opened`.
     fn publish(
@@ -780,8 +786,11 @@ impl Context<'_> {
             name: output.name.clone(),
             document: output.document.clone(),
         }));
-        let threads = self.options.threads;
-        let change = views::canonical_change(old, new, self.objects, threads)?;
+        let requests = self.requests();
+        let change = {
+            let _span = self.monitor.span("publish", "canonical change", "");
+            views::canonical_change(old, new, self.objects, requests)?
+        };
         let layout = self.site.layout();
         let canonical_publication =
             self.apply("canonical", name, layout, &publications.canonical, change)?;
@@ -794,7 +803,7 @@ impl Context<'_> {
             &previous,
             self.objects,
             self.backed,
-            threads,
+            requests,
             self.monitor,
         )?;
         let storage = self.apply(
@@ -834,7 +843,7 @@ impl Context<'_> {
             read: &read,
             store: self.objects,
             recorder: self.monitor,
-            threads: self.options.threads,
+            threads: self.requests(),
         };
         let forms: Vec<&'static str> = opened.converters.iter().map(|c| c.name()).collect();
         build_tables(&stage, claims, &forms, &document)
@@ -874,15 +883,21 @@ impl Context<'_> {
         views: &Views,
         identity: &VersionIdentity,
     ) -> Result<Committed, String> {
-        let threads = self.options.threads;
+        let requests = self.requests();
         let region = self.options.region.as_str();
         let records = self.backed.records;
         let results: Vec<&UnitResult> = results.iter().collect();
-        let mut referred: Vec<Object> = record_objects(records, &results, self.objects, threads)?;
-        // The publications come last, so the media types they give are the ones stored.
-        referred.extend(views.objects());
-        self.site.store(self.objects, referred)?;
-        let written = records.write(&results, threads);
+        {
+            let _span = self.monitor.span("commit", "objects", "");
+            let mut referred = record_objects(records, &results, self.objects, requests)?;
+            // The publications come last, so the media types they give are the ones stored.
+            referred.extend(views.objects());
+            self.site.store(self.objects, referred)?;
+        }
+        let written = {
+            let _span = self.monitor.span("commit", "records", "");
+            records.write(&results, requests)
+        };
         let written = written.map_err(|e| format!("records: {e}"))?;
 
         let published = views.published(region);
@@ -895,7 +910,10 @@ impl Context<'_> {
             tables: views.tables.iter().map(TableOutput::of).collect(),
             ..advanced
         };
-        let chunks = state.write(self.files, region, root, threads);
+        let chunks = {
+            let _span = self.monitor.span("commit", "state", "");
+            state.write(self.files, region, root, requests)
+        };
         let chunks = chunks.map_err(|e| format!("the state of {region}: {e}"))?;
         for (target, publication) in &published {
             self.site.make_current(target, &publication.pointer)?;
@@ -932,18 +950,18 @@ fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &r
     );
 }
 
-/// The objects that the records of `units` name, read from `objects` on up to `threads` threads:
-/// the asset documents and their members.
+/// The objects that the records of `units` name, read from `objects` with up to `requests` reads
+/// at once: the asset documents and their members.
 fn record_objects(
     records: &Records<'_>,
     units: &[&UnitResult],
     objects: &Objects<'_>,
-    threads: usize,
+    requests: usize,
 ) -> Result<Vec<Object>, String> {
     let documents = records
         .documents(units)
         .map_err(|e| format!("records: {e}"))?;
-    let named = parallel(documents.len(), threads, |i| {
+    let named = parallel(documents.len(), requests, |i| {
         document_objects(objects, &documents[i])
     });
     let mut all = Vec::new();

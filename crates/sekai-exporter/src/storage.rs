@@ -224,20 +224,14 @@ pub(crate) fn publish(
     }
     failures.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.code.cmp(&b.code)));
     failures.dedup_by(|a, b| a.name == b.name);
-    let mut records = Sha256::new();
-    for file in &files {
-        records.update(format!("{} {}\n", file.path, file.key));
-    }
-    let revision: [u8; 32] = records.finalize().into();
     let plan = Plan {
         version: index.version.clone(),
         files,
         assets: Vec::new(),
         listings: BTreeMap::new(),
         failures,
-        revision: revision.iter().map(|b| format!("{b:02x}")).collect(),
     };
-    sekai_publish::publish(
+    let pointer = sekai_publish::publish(
         objects,
         &destination.output.join("published"),
         target,
@@ -250,7 +244,7 @@ pub(crate) fn publish(
         "storage files {} transformed {made} shadowed {shadowed} failed {} revision {}",
         plan.files.len(),
         plan.failures.len(),
-        plan.revision
+        pointer.revision
     );
     if let Some(root) = destination.tree {
         let report =

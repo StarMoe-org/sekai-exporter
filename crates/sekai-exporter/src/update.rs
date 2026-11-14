@@ -1004,13 +1004,7 @@ fn export_version(
     )?;
     if let Some(bucket) = bucket {
         let storage = storage.as_ref().map(|plan| (storage_target.as_str(), plan));
-        bucket.publish(
-            &objects,
-            (&target, &plan),
-            storage,
-            options.threads,
-            monitor,
-        )?;
+        bucket.publish(&objects, (&target, &plan), storage, monitor)?;
         bucket.push_documents(region_name, &plan, &objects, monitor)?;
     }
 

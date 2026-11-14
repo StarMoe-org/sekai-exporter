@@ -8,9 +8,9 @@ use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, Store};
 use sekai_format::AssetDocument;
 use sekai_format::publication::{AssetFailure, ListingEntry};
-use sha2::{Digest, Sha256};
 
 use crate::parallel;
+use crate::patch::Change;
 
 /// A failure of a publication, with the name of the stage that failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,8 +109,6 @@ pub struct Plan {
     pub listings: BTreeMap<String, Vec<ListingEntry>>,
     /// The assets that could not be produced, in name order.
     pub failures: Vec<AssetFailure>,
-    /// The hash of the sorted records of the publication, as lowercase hexadecimal.
-    pub revision: String,
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
@@ -137,10 +135,10 @@ fn read(store: &dyn Store, name: &str, key: &Key) -> Result<(AssetDocument, u64)
 
 /// What one asset adds to a publication: the asset, its files, and its listing entry or, for an
 /// asset that was not produced, its failure.
-struct Contribution {
-    asset: PublishedAsset,
-    files: Vec<File>,
-    outcome: Result<ListingEntry, AssetFailure>,
+pub(crate) struct Contribution {
+    pub(crate) asset: PublishedAsset,
+    pub(crate) files: Vec<File>,
+    pub(crate) outcome: Result<ListingEntry, AssetFailure>,
 }
 
 /// The contribution of `binding`, from its asset document in `store`. The document itself is not
@@ -247,30 +245,42 @@ pub fn plan(
         listing.sort_by(|a, b| a.name.cmp(&b.name));
     }
     failures.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut records = Sha256::new();
-    records.update(format!("publication 1\nversion {version}\n"));
-    for file in &files {
-        records.update(format!(
-            "file {}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            file.path,
-            hex(&file.key.sha256),
-            file.key.extension,
-            file.size,
-            file.media_type,
-            file.asset,
-            file.role
-        ));
-    }
-    for failure in &failures {
-        records.update(format!("failure {}\t{}\n", failure.name, failure.code));
-    }
     Ok(Plan {
         version: version.to_owned(),
         files,
         assets,
         listings,
         failures,
-        revision: hex(&records.finalize()),
     })
+}
+
+/// The change from a publication of the assets `old` to one of the assets `new`, both in name
+/// order. Only the asset documents of the bindings that differ are read from `store`, on up to
+/// `threads` threads.
+pub fn change(
+    old: &[Binding],
+    new: &[Binding],
+    store: &dyn Store,
+    threads: usize,
+) -> Result<Change, PublishError> {
+    let old_documents: BTreeMap<&str, &Key> =
+        old.iter().map(|b| (b.name.as_str(), &b.document)).collect();
+    let new_documents: BTreeMap<&str, &Key> =
+        new.iter().map(|b| (b.name.as_str(), &b.document)).collect();
+    let differs = |binding: &&Binding, other: &BTreeMap<&str, &Key>| {
+        other.get(binding.name.as_str()) != Some(&&binding.document)
+    };
+    let removed: Vec<&Binding> = old.iter().filter(|b| differs(b, &new_documents)).collect();
+    let added: Vec<&Binding> = new.iter().filter(|b| differs(b, &old_documents)).collect();
+    let read = |bindings: &[&Binding]| {
+        parallel::map(bindings, threads, |binding| contribution(store, binding))
+    };
+    let mut change = Change::default();
+    for removed in read(&removed) {
+        change.remove(&removed?);
+    }
+    for added in read(&added) {
+        change.add(added?)?;
+    }
+    Ok(change)
 }

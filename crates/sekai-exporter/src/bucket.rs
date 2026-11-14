@@ -226,7 +226,6 @@ impl Bucket {
         objects: &Objects<'_>,
         canonical: (&str, &Plan),
         storage: Option<(&str, &Plan)>,
-        threads: usize,
         monitor: &Monitor,
     ) -> Result<(), lexopt::Error> {
         let views = std::iter::once((canonical, self.layout))
@@ -234,7 +233,7 @@ impl Bucket {
         for ((target, plan), layout) in views {
             let _span = monitor.span("publish", "s3", target);
             let (_, report) =
-                sekai_publish::s3::publish_with(objects, &self.s3, target, plan, layout, threads)
+                sekai_publish::s3::publish_with(objects, &self.s3, target, plan, layout)
                     .map_err(|e| e.to_string())?;
             println!(
                 "bucket {target} uploaded {} present {} pointer {}",
@@ -333,7 +332,6 @@ impl Bucket {
         _objects: &Objects<'_>,
         _canonical: (&str, &Plan),
         _storage: Option<(&str, &Plan)>,
-        _threads: usize,
         _monitor: &Monitor,
     ) -> Result<(), lexopt::Error> {
         match *self {}

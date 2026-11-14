@@ -1,5 +1,6 @@
-//! Types of the published documents: object documents, asset documents, index shards, listings,
-//! path indexes, the chunking they share, and the documents asset forms carry as members.
+//! Types of the published documents: object documents, asset documents, index roots with their
+//! table chunks and shards, path indexes, the chunking they share, and the documents asset forms
+//! carry as members.
 //!
 //! Consumers depend on this crate to read the published output.
 

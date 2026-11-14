@@ -2,8 +2,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::chunks::{self, Row};
+
 /// The version of these document formats.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
+
+/// A chunk of a table of the index root ends after a row whose key hashes to a multiple of this,
+/// so chunks hold this many rows on average.
+const AVERAGE: u32 = 512;
 
 /// Whether `text` can name a region, a view or a published version in a path: ASCII letters,
 /// digits, `.`, `_` and `-`, and not only dots.
@@ -55,34 +61,12 @@ pub struct ListingEntry {
     pub size: u64,
 }
 
-/// Every asset of one form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Listing {
-    /// Always `"listing"`.
-    pub format: String,
-    /// The version of the format.
-    pub version: u32,
-    /// The asset form.
-    pub form: String,
-    /// The assets, in name order.
-    pub entries: Vec<ListingEntry>,
-}
-
 /// A shard named by its directory.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShardReference {
     /// The directory, empty for the top level.
     pub directory: String,
     /// The SHA-256 of the shard, as lowercase hexadecimal.
-    pub sha256: String,
-}
-
-/// A listing named by its form.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ListingReference {
-    /// The asset form.
-    pub form: String,
-    /// The SHA-256 of the listing, as lowercase hexadecimal.
     pub sha256: String,
 }
 
@@ -95,8 +79,39 @@ pub struct AssetFailure {
     pub code: String,
 }
 
-/// Everything a publication contains.
+/// A chunk of a table, as the index root lists it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TableChunk {
+    /// The key of the first row: a directory, or an asset name.
+    pub first: String,
+    /// The SHA-256 of the chunk, as lowercase hexadecimal.
+    pub sha256: String,
+    /// The number of rows.
+    pub rows: u64,
+}
+
+/// A chunk of the rows of a table, in key order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexChunk<R> {
+    /// Always `"index-chunk"`.
+    pub format: String,
+    /// The version of the format.
+    pub version: u32,
+    /// The rows.
+    pub rows: Vec<R>,
+}
+
+/// The listing of a form, as the chunks of its entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListingTable {
+    /// The asset form.
+    pub form: String,
+    /// The chunks of [`ListingEntry`] rows, in name order.
+    pub chunks: Vec<TableChunk>,
+}
+
+/// Everything a publication contains.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexRoot {
     /// Always `"index-root"`.
     pub format: String,
@@ -104,15 +119,35 @@ pub struct IndexRoot {
     pub version: u32,
     /// The name of the published version.
     pub published_version: String,
-    /// The revision: the hash of the sorted records of the publication.
+    /// The revision of the publication.
     pub revision: String,
-    /// The shards, in directory order.
-    pub shards: Vec<ShardReference>,
-    /// The listings, in form order.
-    pub listings: Vec<ListingReference>,
-    /// The assets that could not be produced, in name order.
-    pub failures: Vec<AssetFailure>,
+    /// The chunks of [`ShardReference`] rows, in directory order.
+    pub directories: Vec<TableChunk>,
+    /// The listing of each form, in form order.
+    pub listings: Vec<ListingTable>,
+    /// The chunks of [`AssetFailure`] rows, in name order.
+    pub failures: Vec<TableChunk>,
 }
+
+/// Makes each type a row of a table of the index root, keyed by the field given with it.
+macro_rules! index_rows {
+    ($($row:ty => $key:ident),* $(,)?) => {$(
+        impl Row for $row {
+            type Key = String;
+            const MOST: usize = 4 * AVERAGE as usize;
+
+            fn key(&self) -> &String {
+                &self.$key
+            }
+
+            fn ends_chunk(&self) -> bool {
+                chunks::ends_after(self.$key.as_bytes(), AVERAGE)
+            }
+        }
+    )*};
+}
+
+index_rows!(ShardReference => directory, ListingEntry => name, AssetFailure => name);
 
 /// The current publication of a region and view.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

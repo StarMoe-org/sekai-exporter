@@ -597,9 +597,8 @@ pub fn publish(
     s3: &S3,
     target: &str,
     plan: &Plan,
-    threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
-    publish_with(objects, s3, target, plan, Layout::Index, threads)
+    publish_with(objects, s3, target, plan, Layout::Index)
 }
 
 /// Publishes `plan` as `target` in `layout` to the bucket of `s3`: the objects first, then the
@@ -607,21 +606,19 @@ pub fn publish(
 /// local store of `objects`, whose holdings record what the bucket holds. Every object they do not
 /// record is uploaded from the local store, and recorded once the bucket accepts it, also when the
 /// publication fails later. A failed stage leaves the previous pointer in place, and running the
-/// publication again uploads only what is still unrecorded. The documents are written on up to
-/// `threads` threads.
+/// publication again uploads only what is still unrecorded.
 pub fn publish_with(
     objects: &Objects<'_>,
     s3: &S3,
     target: &str,
     plan: &Plan,
     layout: Layout,
-    threads: usize,
 ) -> Result<(Pointer, S3Report), PublishError> {
     check_version(&plan.version)?;
     let Publication {
         pointer,
         objects: referred,
-    } = documents(objects.local, target, plan, layout, threads)?;
+    } = documents(objects.local, target, plan, layout)?;
     let referred: BTreeMap<Key, (u64, String)> = referred
         .into_iter()
         .map(|object| (object.key, (object.size, object.media_type)))

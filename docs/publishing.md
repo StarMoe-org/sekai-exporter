@@ -26,7 +26,7 @@ The documents of a publication are specified in [Publication documents](spec/pub
 | Layout | Shape | Duplication | How a consumer reads it |
 |---|---|---|---|
 | `paths` | The store itself, plus a [path index](spec/path-index.md) per region and view: chunks of paths in byte order with the hash, size and type of each file | None | Through a resolver, such as `sekai-exporter serve` ([Serving](serving.md)), that maps a path to its object |
-| `index` | The `paths` layout, plus small JSON shards by directory, mapping each name to its hash, size, type, owning asset and role, and the listings | None | Look up the index, then fetch the object. A small TypeScript resolver with caching is provided outside the Rust workspace |
+| `index` | The `paths` layout, plus small JSON shards by directory, mapping each name to its hash, size, type, owning asset and role, and an index root whose directories, listings and failures are tables cut into chunks | None | Look up the index, then fetch the object. A small TypeScript resolver with caching is provided outside the Rust workspace |
 | `sqlite` | The `index` layout, plus an `index.sqlite` database of the directories, assets and files | None | Query the database with HTTP range requests, then fetch the object |
 | `tree` | A path tree per region and view | Bytes that appear in several regions are stored once per tree, unless the backend supports links | Fetch by path |
 
@@ -48,7 +48,7 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 
 1. A version is published only when its run completed without a run failure: a failed download, a failed write or a crash. Asset errors do not stop publication; they are listed with the version.
 2. Index shards are immutable and named by their SHA-256.
-3. The revision of a publication is the hash of its sorted records, so it does not depend on how the JSON is formatted.
+3. The revision of a publication is made from the chunks of its path index and failures, which depend only on what they hold. A publication may be written as a change to the previous one, which reads and writes only the shards and chunks the change falls in and gives the same documents as writing it whole.
 4. Before the pointer of a version is advanced, every object the publication refers to is checked to exist in the store under its recorded hash. Objects are written under a temporary name and renamed, so an object that exists under its name is complete.
 5. The pointer is written to `<region>/<view>/versions/<published version>.json`, and then made current at `<region>/<view>/current.json`, so every published version stays reachable for as long as its objects are kept. A published version is named by ASCII letters, digits, `.`, `_` and `-`, and not only dots.
 6. Failures are reported with the name of the stage that failed. A failed stage leaves the previous pointer in place.

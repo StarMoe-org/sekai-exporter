@@ -56,7 +56,6 @@ fn view(store: &LocalStore, version: &str, paths: &[String]) -> Plan {
         assets: Vec::new(),
         listings: BTreeMap::new(),
         failures: Vec::new(),
-        revision: format!("revision of {version}"),
     }
 }
 

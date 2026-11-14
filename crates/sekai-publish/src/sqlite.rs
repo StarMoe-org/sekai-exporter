@@ -29,13 +29,17 @@ enum SqlValue {
 }
 
 /// Builds the `index.sqlite` database of `plan` and writes it to `store`.
-pub(crate) fn build(store: &LocalStore, plan: &Plan) -> Result<Object, PublishError> {
+pub(crate) fn build(
+    store: &LocalStore,
+    plan: &Plan,
+    revision: &str,
+) -> Result<Object, PublishError> {
     let wrap_doc = PublishError::wrap("documents");
     let rows = prepare_rows(store, plan)?;
 
     let mut db = DbWriter::new();
     let roots = Roots {
-        meta: write_meta(&mut db, plan),
+        meta: write_meta(&mut db, plan, revision),
         bundles: write_bundles(&mut db, &rows.bundles),
         forms: write_forms(&mut db, &rows.forms),
         directories: write_directories(&mut db, &rows.directories),
@@ -488,11 +492,11 @@ fn write_index<T>(db: &mut DbWriter, rows: &[T], encode: impl Fn(&T) -> Vec<u8>)
 }
 
 /// Writes the `meta` table, whose rows are in key order.
-fn write_meta(db: &mut DbWriter, plan: &Plan) -> u32 {
+fn write_meta(db: &mut DbWriter, plan: &Plan, revision: &str) -> u32 {
     let mut entries = vec![
         ("format", "sqlite-index".to_owned()),
         ("published_version", plan.version.clone()),
-        ("revision", plan.revision.clone()),
+        ("revision", revision.to_owned()),
         ("schema_version", SCHEMA_VERSION.to_string()),
     ];
     entries.sort_by(|a, b| a.0.cmp(b.0));

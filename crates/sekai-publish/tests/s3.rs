@@ -517,9 +517,10 @@ fn a_second_publication_uploads_nothing() {
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
-    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
-    // Seven files, three shards, one listing and the root, and a path index of one chunk.
-    assert_eq!((report.uploaded, report.present), (14, 0));
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    // Seven files, three shards, a chunk of directories, a chunk of one listing and the root, and
+    // a path index of one chunk.
+    assert_eq!((report.uploaded, report.present), (15, 0));
     assert!(report.pointer_written);
     for file in &plan.files {
         assert_eq!(
@@ -540,9 +541,9 @@ fn a_second_publication_uploads_nothing() {
     assert!(server.object(&object_name(&root)).is_some());
 
     let puts = server.state.puts.load(Ordering::SeqCst);
-    let (again, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (again, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(again, pointer);
-    assert_eq!((report.uploaded, report.present), (0, 14));
+    assert_eq!((report.uploaded, report.present), (0, 15));
     assert!(!report.pointer_written);
     assert_eq!(server.state.puts.load(Ordering::SeqCst), puts);
 }
@@ -559,7 +560,7 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
     };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
-    let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan).unwrap_err();
     // Reading the live pointer is the first signed request, and its refusal stops the publication.
     assert_eq!(e.stage, "pointer");
     assert!(server.object(POINTER).is_none());
@@ -581,13 +582,13 @@ fn an_interrupted_publication_converges() {
     let plan = sample(&store, "v1", b"mask");
 
     server.refuse_after(Some(4));
-    let e = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap_err();
+    let e = publish(&objects, &s3, "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
 
     server.refuse_after(None);
-    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
-    assert_eq!(report.uploaded + report.present, 14);
+    let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    assert_eq!(report.uploaded + report.present, 15);
     assert!(report.present >= 4);
     assert_eq!(
         server.object(POINTER),
@@ -612,20 +613,12 @@ fn a_failed_publication_keeps_the_previous_pointer() {
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     let previous = server.object(POINTER).unwrap();
 
     server.refuse_after(Some(0));
-    let e = publish(
-        &objects,
-        &s3,
-        "jp/canonical",
-        &sample(&store, "v2", b"new"),
-        2,
-    )
-    .unwrap_err();
+    let e = publish(&objects, &s3, "jp/canonical", &sample(&store, "v2", b"new")).unwrap_err();
     assert_eq!(e.stage, "files");
     assert_eq!(server.object(POINTER), Some(previous));
 }
@@ -648,14 +641,7 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
-    let e = publish(
-        &objects,
-        &server.client(SECRET_KEY),
-        "jp/canonical",
-        &plan,
-        2,
-    )
-    .unwrap_err();
+    let e = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
 }
@@ -678,7 +664,6 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     server.state.heads.store(0, Ordering::SeqCst);
@@ -689,7 +674,6 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
@@ -702,10 +686,9 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &s3,
         "jp/canonical",
         &sample(&store, "v2", b"mask2"),
-        2,
     )
     .unwrap();
-    assert_eq!((report.uploaded, report.present), (8, 6));
+    assert_eq!((report.uploaded, report.present), (9, 6));
     assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }
 
@@ -722,12 +705,12 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
-    publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
+    publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     let lost = object_name(&plan.files[0].key);
     server.remove(&lost);
 
     // The holdings record the lost object, so a plain publication trusts them.
-    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(report.uploaded, 0);
     assert!(server.object(&lost).is_none());
 
@@ -740,8 +723,8 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
         held: &listed,
         remote: &NoRemote,
     };
-    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
-    assert_eq!((report.uploaded, report.present), (1, 13));
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    assert_eq!((report.uploaded, report.present), (1, 14));
     assert!(!report.pointer_written);
     assert_eq!(
         server.object(&lost),
@@ -771,7 +754,6 @@ fn an_object_the_bucket_holds_may_leave_the_store() {
         &s3,
         "jp/canonical",
         &sample(&store, "v1", b"mask"),
-        2,
     )
     .unwrap();
     let plan = sample(&store, "v2", b"mask");
@@ -780,7 +762,7 @@ fn an_object_the_bucket_holds_may_leave_the_store() {
     }
 
     // The evicted files are held, so only the documents of the new version go up.
-    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan, 2).unwrap();
+    let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert!(report.present >= plan.files.len());
     assert!(report.pointer_written);
 }
@@ -937,12 +919,12 @@ fn sqlite_layout_sets_cache_control_and_uploads_only_new_objects() {
     let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
 
     let referred = |plan: &Plan| -> BTreeSet<Key> {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite, 2).unwrap();
+        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
         publication.objects.into_iter().map(|o| o.key).collect()
     };
     let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
     let (pointer, report) =
-        publish_with(&objects, &s3, "jp/canonical", &v1, Layout::Sqlite, 2).unwrap();
+        publish_with(&objects, &s3, "jp/canonical", &v1, Layout::Sqlite).unwrap();
     assert_eq!((report.uploaded, report.present), (referred(&v1).len(), 0));
     assert!(pointer.sqlite.is_some() && pointer.paths.is_some());
 
@@ -963,7 +945,7 @@ fn sqlite_layout_sets_cache_control_and_uploads_only_new_objects() {
     server.state.heads.store(0, Ordering::SeqCst);
     let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
     let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
-    let (_, report) = publish_with(&objects, &s3, "jp/canonical", &v2, Layout::Sqlite, 2).unwrap();
+    let (_, report) = publish_with(&objects, &s3, "jp/canonical", &v2, Layout::Sqlite).unwrap();
     let all = referred(&v2);
     let new = all.difference(&referred(&v1)).count();
     assert_eq!((report.uploaded, report.present), (new, all.len() - new));

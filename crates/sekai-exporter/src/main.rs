@@ -115,7 +115,8 @@ commands:
       <output>/published with their path indexes; --tree and --storage also
       write them as path trees. A version that matches the last complete run is
       left alone unless --force or --verify is given. Each bundle is evaluated
-      with the bundles it depends on, and when all of them hold the same content
+      with the bundles it depends on: those the manifest lists and those that
+      hold the external files it names. When all of them hold the same content
       as in an earlier run, the result that run recorded is taken instead, so
       only the bundles of changed units are fetched. Content is the hash the
       manifest declares, or else the bytes, which are fetched to compare;

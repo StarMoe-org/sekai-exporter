@@ -36,6 +36,9 @@ const PUBLICATIONS: TableDefinition<'_, (&str, &str), (&str, &str)> =
 const UNITS: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("units");
 /// The size of each object the bucket of the catalog holds, by object name.
 const OBJECTS: TableDefinition<'_, &str, u64> = TableDefinition::new("objects");
+/// What the serialized files of each bundle are and which external files they name, by the
+/// SHA-256 of the bundle's bytes.
+const BUNDLE_FILES: TableDefinition<'_, &[u8; 32], &[u8]> = TableDefinition::new("bundle_files");
 
 /// How many outputs [`CatalogDerivations`] holds before it writes them.
 const BATCH: usize = 1024;
@@ -163,6 +166,7 @@ impl Catalog {
         tx.open_table(PUBLICATIONS).map_err(other)?;
         tx.open_table(OBJECTS).map_err(other)?;
         tx.open_table(UNITS).map_err(other)?;
+        tx.open_table(BUNDLE_FILES).map_err(other)?;
         tx.commit().map_err(other)?;
         if held_indexes {
             db.compact().map_err(other)?;
@@ -277,6 +281,15 @@ impl Catalog {
         }))
     }
 
+    /// The serialized files of the bundle with SHA-256 `bundle`, as recorded with
+    /// [`Batch::put_bundle_files`].
+    pub fn bundle_files(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(BUNDLE_FILES).map_err(other)?;
+        let value = table.get(bundle).map_err(other)?;
+        Ok(value.map(|v| v.value().to_vec()))
+    }
+
     /// The identity document of a version.
     pub fn version(&self, region: &str, version: &str) -> io::Result<Option<String>> {
         let tx = self.db.begin_read().map_err(other)?;
@@ -388,6 +401,13 @@ impl Batch {
         table
             .insert((region, name), (row.declared.as_str(), row.sha256.as_str()))
             .map_err(other)?;
+        Ok(())
+    }
+
+    /// Records the serialized files of the bundle with SHA-256 `bundle`.
+    pub fn put_bundle_files(&mut self, bundle: &[u8; 32], files: &[u8]) -> io::Result<()> {
+        let mut table = self.0.open_table(BUNDLE_FILES).map_err(other)?;
+        table.insert(bundle, files).map_err(other)?;
         Ok(())
     }
 

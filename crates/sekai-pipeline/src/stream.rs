@@ -35,7 +35,7 @@ use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
 use crate::sched::Scheduler;
-use crate::version::{BundleError, BundleInput, Parsed, Version, bundle_files};
+use crate::version::{BundleError, BundleFiles, BundleInput, Parsed, Version, bundle_files};
 
 /// The estimated memory of the bundles that stay parsed while a version streams, in bytes.
 pub(crate) const PARSED_BYTES: u64 = 512 << 20;
@@ -182,32 +182,42 @@ pub fn with_dependencies(
         Ok(bundle_files(&input, cache, indexes)?.unwrap_or_default())
     });
     let files = files.into_iter().collect::<io::Result<Vec<_>>>()?;
-    let mut order: Vec<usize> = (0..manifest.len()).collect();
-    order.sort_by(|&a, &b| manifest[a].name.cmp(&manifest[b].name));
-    let mut holders: HashMap<&str, usize> = HashMap::new();
-    for &entry in &order {
-        for (path, _) in &files[entry] {
-            holders.entry(path.as_str()).or_insert(entry);
-        }
-    }
-    let dependencies: Vec<Vec<String>> = files
+    let bundles: Vec<(&str, &BundleFiles)> = manifest
         .iter()
-        .enumerate()
-        .map(|(entry, files)| {
-            let names: BTreeSet<&str> = files
-                .iter()
-                .flat_map(|(_, externals)| externals)
-                .filter_map(|external| holders.get(external.rsplit('/').next()?))
-                .filter(|&&holder| holder != entry)
-                .map(|&holder| manifest[holder].name.as_str())
-                .collect();
-            names.into_iter().map(str::to_owned).collect()
-        })
+        .map(|entry| entry.name.as_str())
+        .zip(&files)
         .collect();
+    let dependencies = referred_bundles(&bundles);
     for (entry, dependencies) in manifest.iter_mut().zip(dependencies) {
         entry.dependencies = dependencies;
     }
     Ok(())
+}
+
+/// The bundles each of `bundles`, given by name with its serialized files, refers to: the other
+/// bundles that hold a file its files name as an external file, in name order. When more than one
+/// bundle holds a file of the same name, the first in name order holds it, as in a version.
+pub fn referred_bundles(bundles: &[(&str, &BundleFiles)]) -> Vec<Vec<String>> {
+    let mut order: Vec<usize> = (0..bundles.len()).collect();
+    order.sort_by_key(|&bundle| bundles[bundle].0);
+    let mut holders: HashMap<&str, usize> = HashMap::new();
+    for &bundle in &order {
+        for (path, _) in bundles[bundle].1 {
+            holders.entry(path.as_str()).or_insert(bundle);
+        }
+    }
+    let referred = |bundle: usize| -> Vec<String> {
+        let names: BTreeSet<&str> = bundles[bundle]
+            .1
+            .iter()
+            .flat_map(|(_, externals)| externals)
+            .filter_map(|external| holders.get(external.rsplit('/').next()?))
+            .filter(|&&holder| holder != bundle)
+            .map(|&holder| bundles[holder].0)
+            .collect();
+        names.into_iter().map(str::to_owned).collect()
+    };
+    (0..bundles.len()).map(referred).collect()
 }
 
 /// The names of the bundles of `manifest` in the order an evaluation first opens them: the window
@@ -1163,6 +1173,43 @@ mod tests {
         );
         assert_eq!(names(&units, &units.windows[0]), ["a"]);
         assert_eq!(names(&units, &units.windows[1]), ["c"]);
+    }
+
+    #[test]
+    fn a_bundle_refers_to_the_first_holder_of_each_external_file() {
+        let files = |files: &[(&str, &[&str])]| -> BundleFiles {
+            let owned = |paths: &[&str]| paths.iter().map(|p| (*p).to_owned()).collect();
+            files
+                .iter()
+                .map(|(path, externals)| ((*path).to_owned(), owned(externals)))
+                .collect()
+        };
+        let model = files(&[(
+            "CAB-model",
+            &[
+                "archive:/CAB-shader/CAB-shader",
+                "archive:/CAB-model/CAB-model",
+            ],
+        )]);
+        let shader = files(&[(
+            "CAB-shader",
+            &[
+                "archive:/CAB-global/CAB-global",
+                "Resources/unity_builtin_extra",
+            ],
+        )]);
+        let global = files(&[("CAB-global", &[])]);
+        let copy = files(&[("CAB-global", &[])]);
+        let bundles = [
+            ("model", &model),
+            ("shader", &shader),
+            ("z/global", &copy),
+            ("global", &global),
+        ];
+        assert_eq!(
+            referred_bundles(&bundles),
+            [vec!["shader"], vec!["global"], vec![], vec![]]
+        );
     }
 
     #[test]

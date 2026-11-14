@@ -29,6 +29,8 @@ use crate::export::{
 };
 use crate::monitor::{self, Monitor};
 
+mod files;
+
 const INPUT_EXTENSION: &str = "bundle";
 /// How many fetched bundles are recorded together.
 const RECORD_BATCH: usize = 1024;
@@ -162,9 +164,18 @@ fn previous_identity(catalog: &Catalog, region: &str) -> io::Result<Option<Versi
 
 /// The entries whose names start with one of `only`, with everything they depend on. Without
 /// prefixes, every entry.
-fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
+fn select(mut entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
+    if let Some(selected) = selected(&entries, only) {
+        entries.retain(|entry| selected.contains(&entry.name));
+    }
+    entries
+}
+
+/// The names of the entries whose names start with one of `only`, with everything they depend
+/// on, or `None` without prefixes, which select every entry.
+fn selected(entries: &[Entry], only: &[String]) -> Option<BTreeSet<String>> {
     if only.is_empty() {
-        return entries;
+        return None;
     }
     let by_name: BTreeMap<&str, &Entry> = entries.iter().map(|e| (e.name.as_str(), e)).collect();
     let mut pending: Vec<&str> = by_name
@@ -180,9 +191,7 @@ fn select(entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
             pending.extend(entry.dependencies.iter().map(String::as_str));
         }
     }
-    let mut entries = entries;
-    entries.retain(|entry| selected.contains(&entry.name));
-    entries
+    Some(selected)
 }
 
 /// The bundles of a run in the input store, as they arrive. Opening one waits until it has been
@@ -254,13 +263,18 @@ impl Inputs for Arriving<'_> {
             }
         };
         drop(arrivals);
-        let source = FileSource::open(self.inputs.path(&key)).map_err(io::Error::other)?;
-        Ok(BundleInput {
-            name: name.to_owned(),
-            source: Arc::new(source),
-            sha256: key.sha256,
-        })
+        open_input(self.inputs, name, &key)
     }
+}
+
+/// The bundle `name` that `inputs` hold under `key`.
+fn open_input(inputs: &LocalStore, name: &str, key: &Key) -> io::Result<BundleInput> {
+    let source = FileSource::open(inputs.path(key)).map_err(io::Error::other)?;
+    Ok(BundleInput {
+        name: name.to_owned(),
+        source: Arc::new(source),
+        sha256: key.sha256,
+    })
 }
 
 /// Why a selection of bundles cannot run here. A selection is not a version, so it must not
@@ -864,13 +878,23 @@ fn export_version(
         monitor,
         fetched: Mutex::default(),
     };
-    if listed {
-        manifest = select(manifest, &options.only);
-        identify(&fetcher, &all, &mut manifest, concurrency)?;
-    }
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
     let indexes =
         IndexCache::open(&options.output.join("indexes.redb")).map_err(|e| e.to_string())?;
+    if listed {
+        let selected = selected(&manifest, &options.only);
+        let fetchable = |name: &str| selected.as_ref().is_none_or(|names| names.contains(name));
+        fetcher.add_file_dependencies(
+            &all,
+            &mut manifest,
+            fetchable,
+            &cache,
+            &indexes,
+            concurrency,
+        )?;
+        manifest = select(manifest, &options.only);
+        identify(&fetcher, &all, &mut manifest, concurrency)?;
+    }
     let fusion = crate::storage::Fusion::new(&store, &derivations, monitor);
     let converters = converters(hca_key);
     let stream = Stream {
@@ -1067,6 +1091,8 @@ fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
 
 #[cfg(test)]
 mod tests {
+    use sekai_pipeline::NoBundleIndexes;
+
     use super::*;
 
     fn entry(name: &str, dependencies: &[&str]) -> BundleEntry {
@@ -1081,6 +1107,33 @@ mod tests {
 
     fn names(entries: &[Entry]) -> Vec<&str> {
         entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The manifest of `all`, as a run lists it before identifying any bundle.
+    fn listed(all: &[BundleEntry]) -> Vec<Entry> {
+        all.iter()
+            .map(|entry| Entry {
+                name: entry.name.clone(),
+                size: entry.size,
+                content: declared_content(&entry.declared),
+                dependencies: entry.dependencies.clone(),
+            })
+            .collect()
+    }
+
+    fn identity() -> VersionIdentity {
+        VersionIdentity {
+            asset: sekai_format::identity::AssetIdentity::Nuverse {
+                application_version: "1.0.0".to_owned(),
+                value: "1".to_owned(),
+            },
+            client: sekai_format::identity::ClientIdentity {
+                application_version: "1.0.0".to_owned(),
+                application_hash: None,
+                multiplayer_version: None,
+            },
+            tables: None,
+        }
     }
 
     /// Bundles in memory, counting how often each is fetched.
@@ -1135,32 +1188,13 @@ mod tests {
             bytes: HashMap::from([("b/plain".to_owned(), b"UnityFS\0plain".to_vec())]),
             ..Bundles::default()
         };
-        let identity = VersionIdentity {
-            asset: sekai_format::identity::AssetIdentity::Nuverse {
-                application_version: "1.0.0".to_owned(),
-                value: "1".to_owned(),
-            },
-            client: sekai_format::identity::ClientIdentity {
-                application_version: "1.0.0".to_owned(),
-                application_hash: None,
-                multiplayer_version: None,
-            },
-            tables: None,
-        };
+        let identity = identity();
         let mut undeclared = entry("b/plain", &[]);
         undeclared.declared = String::new();
         let mut lost = entry("c/lost", &[]);
         lost.declared = String::new();
         let all = [entry("a/declared", &[]), undeclared, lost];
-        let mut manifest: Vec<Entry> = all
-            .iter()
-            .map(|entry| Entry {
-                name: entry.name.clone(),
-                size: entry.size,
-                content: declared_content(&entry.declared),
-                dependencies: entry.dependencies.clone(),
-            })
-            .collect();
+        let mut manifest = listed(&all);
 
         Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
             let fetcher = Fetcher {
@@ -1187,6 +1221,72 @@ mod tests {
         assert_eq!(
             fetched,
             HashMap::from([("b/plain".to_owned(), 1), ("c/lost".to_owned(), 2)])
+        );
+        drop(catalog);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundles_depend_on_the_bundles_that_hold_the_files_they_name() {
+        let root = std::env::temp_dir().join(format!("sekai-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = LocalStore::open(root.join("store")).unwrap();
+        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
+        let inputs = LocalStore::open(root.join("inputs")).unwrap();
+        // The two fixture bundles name each other's serialized file as an external file.
+        let fixture = |name: &str| {
+            let fixtures =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma");
+            std::fs::read(fixtures.join(name)).unwrap()
+        };
+        let source = Bundles {
+            bytes: HashMap::from([
+                ("data".to_owned(), fixture("fixture_data")),
+                ("scene".to_owned(), fixture("fixture_scene")),
+            ]),
+            ..Bundles::default()
+        };
+        let identity = identity();
+        let all = [
+            entry("data", &[]),
+            entry("scene", &["data"]),
+            entry("unread", &[]),
+        ];
+        let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
+        let dependencies = |manifest: &[Entry]| -> Vec<Vec<String>> {
+            manifest.iter().map(|e| e.dependencies.clone()).collect()
+        };
+
+        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
+            let fetcher = || Fetcher {
+                source: &source,
+                identity: &identity,
+                inputs: &inputs,
+                catalog: &catalog,
+                earlier: &[],
+                region: "r",
+                monitor,
+                fetched: Mutex::default(),
+            };
+            // A run fetches and reads the bundles it may fetch; a listed dependency stays once.
+            let mut first = listed(&all);
+            let fetchable = |name: &str| name != "unread";
+            fetcher()
+                .add_file_dependencies(&all, &mut first, fetchable, &cache, &NoBundleIndexes, 2)
+                .unwrap();
+            assert_eq!(dependencies(&first), [vec!["scene"], vec!["data"], vec![]]);
+            // A later run finds the files in the catalog and fetches nothing.
+            let mut later = listed(&all);
+            fetcher()
+                .add_file_dependencies(&all, &mut later, |_| false, &cache, &NoBundleIndexes, 2)
+                .unwrap();
+            assert_eq!(later, first);
+        })
+        .unwrap();
+        let fetched = source.fetched.into_inner().unwrap();
+        assert_eq!(
+            fetched,
+            HashMap::from([("data".to_owned(), 1), ("scene".to_owned(), 1)])
         );
         drop(catalog);
         std::fs::remove_dir_all(root).unwrap();

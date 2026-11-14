@@ -1,437 +1,33 @@
 //! Publishing to an S3-compatible bucket, against a local server that checks signatures.
 
-use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
 
 use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects, Remote};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
 use sekai_publish::s3::{Bucket, Credentials, S3, publish};
 use sekai_publish::{Binding, Plan, plan};
-use sha2::{Digest, Sha256};
-
-const ACCESS_KEY: &str = "TESTACCESSKEY";
-const SECRET_KEY: &str = "test-secret-key";
-const REGION: &str = "test-region";
+use sekai_testkit::s3::{ACCESS_KEY, Operation, REGION, SECRET_KEY, Server};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn sha256(bytes: &[u8]) -> String {
-    let digest: [u8; 32] = Sha256::digest(bytes).into();
-    hex(&digest)
-}
-
-fn hmac(key: &[u8], message: &[u8]) -> Vec<u8> {
-    let mut block = [0u8; 64];
-    block[..key.len()].copy_from_slice(key);
-    let inner: [u8; 32] = Sha256::new()
-        .chain_update(block.map(|b| b ^ 0x36))
-        .chain_update(message)
-        .finalize()
-        .into();
-    let outer: [u8; 32] = Sha256::new()
-        .chain_update(block.map(|b| b ^ 0x5c))
-        .chain_update(inner)
-        .finalize()
-        .into();
-    outer.to_vec()
-}
-
-/// A request as the server received it.
-struct Request {
-    method: String,
-    path: String,
-    /// The query parameters, decoded, in name order.
-    query: BTreeMap<String, String>,
-    headers: BTreeMap<String, String>,
-    body: Vec<u8>,
-}
-
-/// `text` with every `%XX` replaced by its byte.
-fn decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' {
-            out.push(u8::from_str_radix(&text[i + 1..i + 3], 16).unwrap());
-            i += 3;
-        } else {
-            out.push(bytes[i]);
-            i += 1;
-        }
-    }
-    String::from_utf8(out).unwrap()
-}
-
-/// Every byte of `text` except unreserved characters as `%XX`.
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
-                char::from(b).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
-
-impl Request {
-    /// Whether the request carries a valid Signature Version 4 signature for `secret`.
-    fn signed(&self, secret: &str) -> bool {
-        let Some(authorization) = self.headers.get("authorization") else {
-            return false;
-        };
-        let fields: BTreeMap<&str, &str> = authorization
-            .trim_start_matches("AWS4-HMAC-SHA256 ")
-            .split(", ")
-            .filter_map(|field| field.split_once('='))
-            .collect();
-        let (Some(credential), Some(signed), Some(signature)) = (
-            fields.get("Credential"),
-            fields.get("SignedHeaders"),
-            fields.get("Signature"),
-        ) else {
-            return false;
-        };
-        let scope: Vec<&str> = credential.split('/').collect();
-        if scope.len() != 5 || scope[0] != ACCESS_KEY || scope[2] != REGION {
-            return false;
-        }
-        let payload = self.headers["x-amz-content-sha256"].as_str();
-        let query: Vec<String> = self
-            .query
-            .iter()
-            .map(|(name, value)| format!("{}={}", encode(name), encode(value)))
-            .collect();
-        let mut canonical = format!("{}\n{}\n{}\n", self.method, self.path, query.join("&"));
-        for name in signed.split(';') {
-            canonical.push_str(&format!("{name}:{}\n", self.headers[name].trim()));
-        }
-        canonical.push_str(&format!("\n{signed}\n{payload}"));
-        let time = &self.headers["x-amz-date"];
-        let to_sign = format!(
-            "AWS4-HMAC-SHA256\n{time}\n{}\n{}",
-            scope[1..].join("/"),
-            sha256(canonical.as_bytes())
-        );
-        let mut key = hmac(format!("AWS4{secret}").as_bytes(), scope[1].as_bytes());
-        for part in &scope[2..] {
-            key = hmac(&key, part.as_bytes());
-        }
-        hex(&hmac(&key, to_sign.as_bytes())) == *signature
-    }
-}
-
-/// A bucket served on a local port.
-#[derive(Default)]
-struct State {
-    objects: Mutex<BTreeMap<String, Vec<u8>>>,
-    cache_controls: Mutex<BTreeMap<String, String>>,
-    heads: AtomicUsize,
-    puts: AtomicUsize,
-    lists: AtomicUsize,
-    /// Uploads of objects other than pointers are refused once this many have been accepted.
-    refuse_after: Mutex<Option<usize>>,
-    /// The multipart uploads in progress, by upload ID.
-    uploads: Mutex<BTreeMap<String, Upload>>,
-    /// The parts accepted, of every multipart upload.
-    parts: AtomicUsize,
-}
-
-/// A multipart upload in progress.
-struct Upload {
-    name: String,
-    cache_control: Option<String>,
-    /// The bytes of each part by number, with the entity tag the server gave it.
-    parts: BTreeMap<usize, (String, Vec<u8>)>,
-}
-
-impl State {
-    /// Whether an upload to `name` is refused.
-    fn refuses(&self, name: &str) -> bool {
-        !name.ends_with("current.json")
-            && self
-                .refuse_after
-                .lock()
-                .unwrap()
-                .is_some_and(|n| self.puts.load(Ordering::SeqCst) >= n)
-    }
-
-    /// Starts a multipart upload of `request` to `name` and answers with its ID.
-    fn start_upload(&self, name: String, request: &Request) -> Vec<u8> {
-        let mut uploads = self.uploads.lock().unwrap();
-        let id = format!("upload+{}", uploads.len());
-        let upload = Upload {
-            name,
-            cache_control: request.headers.get("cache-control").cloned(),
-            parts: BTreeMap::new(),
-        };
-        uploads.insert(id.clone(), upload);
-        format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>")
-            .into_bytes()
-    }
-
-    /// Takes the body of `request` as a part of the upload `id`, and returns its entity tag.
-    fn put_part(&self, id: &str, request: &Request) -> Option<String> {
-        let number = request.query["partNumber"].parse().unwrap();
-        let tag = format!("\"{}\"", &sha256(&request.body)[..32]);
-        let mut uploads = self.uploads.lock().unwrap();
-        let upload = uploads.get_mut(id)?;
-        upload
-            .parts
-            .insert(number, (tag.clone(), request.body.clone()));
-        self.parts.fetch_add(1, Ordering::SeqCst);
-        self.puts.fetch_add(1, Ordering::SeqCst);
-        Some(tag)
-    }
-
-    /// Joins the parts of the upload `id` that `request` lists into its object, when every part
-    /// is listed in order with its entity tag.
-    fn complete_upload(&self, id: &str, request: &Request) -> bool {
-        let listed = String::from_utf8_lossy(&request.body).into_owned();
-        let Some(upload) = self.uploads.lock().unwrap().remove(id) else {
-            return false;
-        };
-        let tags: Vec<String> = listed
-            .split("<ETag>")
-            .skip(1)
-            .map(|rest| rest.split("</ETag>").next().unwrap().to_owned())
-            .collect();
-        let held: Vec<&String> = upload.parts.values().map(|(tag, _)| tag).collect();
-        if tags.iter().collect::<Vec<_>>() != held {
-            return false;
-        }
-        let bytes = upload
-            .parts
-            .into_values()
-            .flat_map(|(_, bytes)| bytes)
-            .collect();
-        if let Some(cache_control) = upload.cache_control {
-            self.cache_controls
-                .lock()
-                .unwrap()
-                .insert(upload.name.clone(), cache_control);
-        }
-        self.objects.lock().unwrap().insert(upload.name, bytes);
-        true
-    }
-}
-
-struct Server {
-    state: Arc<State>,
-    endpoint: String,
-}
-
-impl Server {
-    fn start() -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let endpoint = format!("http://{}/bucket", listener.local_addr().unwrap());
-        let state = Arc::new(State::default());
-        let shared = Arc::clone(&state);
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let state = Arc::clone(&shared);
-                std::thread::spawn(move || serve(&state, stream.unwrap()));
-            }
-        });
-        Self { state, endpoint }
-    }
-
-    fn client(&self, secret: &str) -> S3 {
-        S3::new(
-            Bucket {
-                endpoint: self.endpoint.clone(),
-                region: REGION.to_owned(),
-                prefix: "out/".to_owned(),
-                connections: 3,
-            },
-            Credentials {
-                access_key_id: ACCESS_KEY.to_owned(),
-                secret_access_key: secret.to_owned(),
-            },
-        )
-        .unwrap()
-    }
-
-    fn object(&self, name: &str) -> Option<Vec<u8>> {
-        self.state.objects.lock().unwrap().get(name).cloned()
-    }
-
-    fn refuse_after(&self, uploads: Option<usize>) {
-        *self.state.refuse_after.lock().unwrap() = uploads;
-    }
-
-    fn remove(&self, name: &str) {
-        self.state.objects.lock().unwrap().remove(name);
-    }
-}
-
-/// The names in a listing page.
-const PAGE: usize = 2;
-
-/// A `ListObjectsV2` page of the names under `prefix` after the continuation token `after`.
-fn list(state: &State, prefix: &str, after: Option<&String>) -> Vec<u8> {
-    let objects = state.objects.lock().unwrap();
-    let mut names = objects
-        .range(prefix.to_owned()..)
-        .take_while(|(name, _)| name.starts_with(prefix))
-        .filter(|(name, _)| after.is_none_or(|after| *name > after));
-    let page: Vec<_> = names.by_ref().take(PAGE).collect();
-    let mut xml = String::from("<ListBucketResult>");
-    for (name, bytes) in &page {
-        xml.push_str(&format!(
-            "<Contents><Key>{}</Key><Size>{}</Size></Contents>",
-            name.replace('&', "&amp;"),
-            bytes.len()
-        ));
-    }
-    match (names.next(), page.last()) {
-        (Some(_), Some((last, _))) => xml.push_str(&format!(
-            "<IsTruncated>true</IsTruncated><NextContinuationToken>{last}</NextContinuationToken>"
-        )),
-        _ => xml.push_str("<IsTruncated>false</IsTruncated>"),
-    }
-    xml.push_str("</ListBucketResult>");
-    xml.into_bytes()
-}
-
-fn read_request(stream: &TcpStream) -> Option<Request> {
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).ok()?;
-    let mut parts = line.split_whitespace();
-    let method = parts.next()?.to_owned();
-    let target = parts.next()?;
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let path = path.to_owned();
-    let query = query
-        .split('&')
-        .filter(|parameter| !parameter.is_empty())
-        .filter_map(|parameter| parameter.split_once('='))
-        .map(|(name, value)| (decode(name), decode(value)))
-        .collect();
-    let mut headers = BTreeMap::new();
-    loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).ok()?;
-        let line = line.trim_end();
-        if line.is_empty() {
-            break;
-        }
-        let (name, value) = line.split_once(':')?;
-        headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
-    }
-    let length: usize = headers
-        .get("content-length")
-        .map_or(0, |value| value.parse().unwrap());
-    let mut body = vec![0; length];
-    reader.read_exact(&mut body).ok()?;
-    Some(Request {
-        method,
-        path,
-        query,
-        headers,
-        body,
-    })
-}
-
-fn serve(state: &State, mut stream: TcpStream) {
-    let Some(request) = read_request(&stream) else {
-        return;
-    };
-    let name = request
-        .path
-        .strip_prefix("/bucket/")
-        .unwrap_or_default()
-        .to_owned();
-    let mut etag = None;
-    let upload = request.query.get("uploadId").cloned();
-    let (status, body) = if !request.signed(SECRET_KEY) {
-        (403, Vec::new())
-    } else if let Some(id) = upload {
-        match request.method.as_str() {
-            "PUT" if state.refuses(&name) => (403, Vec::new()),
-            "PUT" if request.headers["x-amz-content-sha256"] != sha256(&request.body) => {
-                (400, Vec::new())
-            }
-            "PUT" => {
-                etag = state.put_part(&id, &request);
-                (if etag.is_some() { 200 } else { 404 }, Vec::new())
-            }
-            "POST" if state.complete_upload(&id, &request) => (
-                200,
-                b"<CompleteMultipartUploadResult></CompleteMultipartUploadResult>".to_vec(),
-            ),
-            "POST" => (200, b"<Error><Code>InvalidPart</Code></Error>".to_vec()),
-            "DELETE" => {
-                state.uploads.lock().unwrap().remove(&id);
-                (204, Vec::new())
-            }
-            _ => (405, Vec::new()),
-        }
-    } else {
-        match request.method.as_str() {
-            "POST" if request.query.contains_key("uploads") => {
-                (200, state.start_upload(name, &request))
-            }
-            "HEAD" => {
-                state.heads.fetch_add(1, Ordering::SeqCst);
-                match state.objects.lock().unwrap().get(&name) {
-                    Some(bytes) => (200, bytes.clone()),
-                    None => (404, Vec::new()),
-                }
-            }
-            "GET" if request.query.get("list-type").is_some_and(|t| t == "2") => {
-                state.lists.fetch_add(1, Ordering::SeqCst);
-                let prefix = request.query.get("prefix").cloned().unwrap_or_default();
-                (
-                    200,
-                    list(state, &prefix, request.query.get("continuation-token")),
-                )
-            }
-            "GET" => match state.objects.lock().unwrap().get(&name) {
-                Some(bytes) => (200, bytes.clone()),
-                None => (404, Vec::new()),
-            },
-            "PUT" => {
-                if state.refuses(&name) {
-                    (403, Vec::new())
-                } else if request.headers["x-amz-content-sha256"] != sha256(&request.body) {
-                    (400, Vec::new())
-                } else {
-                    state.puts.fetch_add(1, Ordering::SeqCst);
-                    if let Some(cc) = request.headers.get("cache-control") {
-                        state
-                            .cache_controls
-                            .lock()
-                            .unwrap()
-                            .insert(name.clone(), cc.clone());
-                    }
-                    state.objects.lock().unwrap().insert(name, request.body);
-                    (200, Vec::new())
-                }
-            }
-            _ => (405, Vec::new()),
-        }
-    };
-    let etag = etag.map_or(String::new(), |tag| format!("etag: {tag}\r\n"));
-    let mut response = format!(
-        "HTTP/1.1 {status} X\r\ncontent-length: {}\r\n{etag}connection: close\r\n\r\n",
-        body.len()
+/// A client of the bucket of `server` under the prefix `out/`, signing with `secret`.
+fn client(server: &Server, secret: &str) -> S3 {
+    S3::new(
+        Bucket {
+            endpoint: server.endpoint().to_owned(),
+            region: REGION.to_owned(),
+            prefix: "out/".to_owned(),
+            connections: 3,
+        },
+        Credentials {
+            access_key_id: ACCESS_KEY.to_owned(),
+            secret_access_key: secret.to_owned(),
+        },
     )
-    .into_bytes();
-    if request.method != "HEAD" {
-        response.extend_from_slice(&body);
-    }
-    let _ = stream.write_all(&response);
+    .unwrap()
 }
 
 struct Scratch(PathBuf);
@@ -514,7 +110,7 @@ fn a_second_publication_uploads_nothing() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
     let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
@@ -540,12 +136,12 @@ fn a_second_publication_uploads_nothing() {
     };
     assert!(server.object(&object_name(&root)).is_some());
 
-    let puts = server.state.puts.load(Ordering::SeqCst);
+    let puts = server.count(Operation::Put);
     let (again, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(again, pointer);
     assert_eq!((report.uploaded, report.present), (0, 15));
     assert!(!report.pointer_written);
-    assert_eq!(server.state.puts.load(Ordering::SeqCst), puts);
+    assert_eq!(server.count(Operation::Put), puts);
 }
 
 #[test]
@@ -560,11 +156,11 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
     };
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
-    let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan).unwrap_err();
+    let e = publish(&objects, &client(&server, "wrong"), "jp/canonical", &plan).unwrap_err();
     // The first upload is refused, which stops the publication before any pointer.
     assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
-    assert_eq!(server.state.puts.load(Ordering::SeqCst), 0);
+    assert_eq!(server.count(Operation::Put), 0);
 }
 
 #[test]
@@ -578,7 +174,7 @@ fn an_interrupted_publication_converges() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
 
     server.refuse_after(Some(4));
@@ -607,7 +203,7 @@ fn a_failed_publication_keeps_the_previous_pointer() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     publish(
         &objects,
         &s3,
@@ -641,7 +237,13 @@ fn an_object_the_store_does_not_have_is_taken_to_be_in_the_bucket() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
-    let (_, report) = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap();
+    let (_, report) = publish(
+        &objects,
+        &client(&server, SECRET_KEY),
+        "jp/canonical",
+        &plan,
+    )
+    .unwrap();
     assert!(report.pointer_written);
     assert!(server.object(&object_name(&file.key)).is_none());
     assert_eq!(held.size(&file.key).unwrap(), None);
@@ -660,7 +262,13 @@ fn a_local_object_of_another_size_stops_before_the_pointer() {
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
     std::fs::write(store.path(&plan.files[0].key), b"other bytes").unwrap();
-    let e = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
+    let e = publish(
+        &objects,
+        &client(&server, SECRET_KEY),
+        "jp/canonical",
+        &plan,
+    )
+    .unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());
 }
@@ -676,7 +284,7 @@ fn a_publication_uploads_only_unrecorded_objects() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
 
     publish(
         &objects,
@@ -685,7 +293,6 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &sample(&store, "v1", b"mask"),
     )
     .unwrap();
-    server.state.heads.store(0, Ordering::SeqCst);
 
     // Identical publication sends 0 HEADs and 0 PUTs.
     publish(
@@ -695,7 +302,7 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &sample(&store, "v1", b"mask"),
     )
     .unwrap();
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+    assert_eq!(server.count(Operation::Head), 0);
 
     // Changing one member uploads only the 8 changed objects (1 member, 1 document, the shards "a"
     // and "a/two", 1 listing, the root, and the chunk and root of the path index): the 6
@@ -708,7 +315,7 @@ fn a_publication_uploads_only_unrecorded_objects() {
     )
     .unwrap();
     assert_eq!((report.uploaded, report.present), (9, 6));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+    assert_eq!(server.count(Operation::Head), 0);
 }
 
 #[test]
@@ -722,7 +329,7 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     let plan = sample(&store, "v1", b"mask");
     publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     let lost = object_name(&plan.files[0].key);
@@ -735,8 +342,7 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
 
     let listed = MemoryHoldings::new(s3.holdings().unwrap());
     // One request for each empty store directory, and more where a directory fills pages.
-    assert!(server.state.lists.load(Ordering::SeqCst) >= 256);
-    server.state.heads.store(0, Ordering::SeqCst);
+    assert!(server.count(Operation::List) >= 256);
     let objects = Objects {
         local: &store,
         held: &listed,
@@ -749,7 +355,7 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
         server.object(&lost),
         Some(store.read(&plan.files[0].key).unwrap())
     );
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
+    assert_eq!(server.count(Operation::Head), 0);
     assert_eq!(
         listed.size(&plan.files[0].key).unwrap(),
         Some(plan.files[0].size)
@@ -767,7 +373,7 @@ fn an_object_the_bucket_holds_may_leave_the_store() {
         remote: &NoRemote,
     };
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     publish(
         &objects,
         &s3,
@@ -791,21 +397,16 @@ fn an_object_larger_than_ten_megabytes_is_read_back() {
     let server = Server::start();
     let bytes: Vec<u8> = (0..11 << 20).map(|i: u32| (i % 251) as u8).collect();
     let key = Key::of(&bytes, "bin");
-    server
-        .state
-        .objects
-        .lock()
-        .unwrap()
-        .insert(object_name(&key), bytes.clone());
+    server.insert(&object_name(&key), bytes.clone());
 
-    let fetched = server.client(SECRET_KEY).fetch(&key).unwrap();
+    let fetched = client(&server, SECRET_KEY).fetch(&key).unwrap();
     assert_eq!(fetched.as_deref(), Some(bytes.as_slice()));
 }
 
 #[test]
 fn the_bucket_keeps_state_files_outside_its_publications() {
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     let read_to_end = |body: &mut dyn std::io::Read| {
         let mut bytes = Vec::new();
         body.read_to_end(&mut bytes).map(|_| bytes)
@@ -819,7 +420,7 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
     let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
     assert_eq!(read.as_deref(), Some(&b"{}"[..]));
-    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    let cache_control = server.cache_control(name).unwrap();
     assert_eq!(cache_control, "private, no-store");
 }
 
@@ -831,25 +432,25 @@ fn large_state() -> Vec<u8> {
 #[test]
 fn a_large_state_file_is_written_in_parts() {
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     let bytes = large_state();
 
     s3.write_state("regions/jp.json", &bytes).unwrap();
     let name = "out/state/regions/jp.json";
     assert!(server.object(name) == Some(bytes), "{name}");
-    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    let cache_control = server.cache_control(name).unwrap();
     assert_eq!(cache_control, "private, no-store");
-    assert_eq!(server.state.parts.load(Ordering::SeqCst), 3);
-    assert!(server.state.uploads.lock().unwrap().is_empty());
+    assert_eq!(server.count(Operation::PutPart), 3);
+    assert!(server.uploads_in_progress() == 0);
 }
 
 #[test]
 fn a_failed_upload_in_parts_is_aborted() {
     let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
+    let s3 = client(&server, SECRET_KEY);
     server.refuse_after(Some(1));
 
     assert!(s3.write_state("regions/jp.json", &large_state()).is_err());
     assert_eq!(server.object("out/state/regions/jp.json"), None);
-    assert!(server.state.uploads.lock().unwrap().is_empty());
+    assert!(server.uploads_in_progress() == 0);
 }

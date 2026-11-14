@@ -26,6 +26,7 @@ sekai-moesekai = { path = "crates/sekai-moesekai" }
 sekai-serve = { path = "crates/sekai-serve" }
 sekai-mysekai = { path = "crates/sekai-mysekai" }
 sekai-wasm = { path = "crates/sekai-wasm" }
+sekai-testkit = { path = "crates/sekai-testkit" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

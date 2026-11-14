@@ -901,6 +901,30 @@ fn count_reads(tallies: &mut BTreeMap<usize, Tally>, units: &Units<'_>, document
     }
 }
 
+/// Whether one of `converters` has a root in the unit of `bundle`, whose window holds the bundles
+/// `window` of `index`: an object of `bundle` with a container path that the converter takes as
+/// a root, as [`plan_unit`] finds them.
+pub(crate) fn has_roots(
+    index: &VersionIndex,
+    bundle: usize,
+    window: &BTreeSet<usize>,
+    converters: &[&dyn Converter],
+) -> bool {
+    let unit = &index.bundles()[bundle].name;
+    let mut files = index.bundles()[bundle].files.iter().enumerate();
+    files.any(|(f, file)| {
+        file.objects.iter().enumerate().any(|(o, object)| {
+            let paths = index.container_paths(bundle, f, object.path_id);
+            if paths.is_empty() {
+                return false;
+            }
+            let script = script_within(index, unit, bundle, f, o, window, &mut BTreeSet::new());
+            let root = |converter: &&dyn Converter| converter.is_root(object, script, paths);
+            converters.iter().any(root)
+        })
+    })
+}
+
 /// Finds, names and fingerprints the roots of the unit of `bundle`, whose window holds the
 /// bundles `window` of `version`, and counts the objects of `bundle` in `tally` with the ignored
 /// classes it comes with.

@@ -18,10 +18,11 @@ use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
 use sekai_pipeline::records::Earlier;
-use sekai_pipeline::reuse::{self, Reuse, UnitResult};
+use sekai_pipeline::reuse::{self, EntryIndexes, NoEntryIndexes, Reuse, UnitResult};
 use sekai_pipeline::state::RegionState;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
-use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
+use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options, Version};
+use sekai_unity::index::BundleIndex;
 use sekai_unity::{NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
@@ -48,6 +49,25 @@ impl Inputs for Fixtures {
             return Err(io::Error::new(io::ErrorKind::NotFound, "no such bundle"));
         }
         Ok(input(name))
+    }
+}
+
+/// The indexes of the fixture bundles, as a run that indexed them before knows them.
+struct FixtureIndexes(BTreeMap<String, BundleIndex>);
+
+impl FixtureIndexes {
+    fn new() -> Self {
+        let inputs = vec![input("fixture_data"), input("fixture_scene")];
+        let (version, errors) = Version::open(inputs, &NoBlockCache);
+        assert!(errors.is_empty());
+        let bundles = version.index().bundles().iter();
+        Self(bundles.map(|b| (b.name.clone(), b.clone())).collect())
+    }
+}
+
+impl EntryIndexes for FixtureIndexes {
+    fn index(&self, entry: &Entry) -> io::Result<Option<BundleIndex>> {
+        Ok(self.0.get(&entry.name).cloned())
     }
 }
 
@@ -217,6 +237,8 @@ struct Run<'a> {
     naming: &'a dyn Naming,
     fusion: Option<&'a dyn Fusion>,
     inputs: &'a Fixtures,
+    /// The indexes of the bundles that earlier runs left.
+    indexes: &'a dyn EntryIndexes,
     limit: Option<u64>,
 }
 
@@ -230,6 +252,7 @@ impl Default for Run<'_> {
             naming: &InBundle,
             fusion: None,
             inputs: FIXTURES.get_or_init(Fixtures::default),
+            indexes: &NoEntryIndexes,
             limit: None,
         }
     }
@@ -296,7 +319,7 @@ fn streamed_reusing_with(
     let store = LocalStore::open(root).unwrap();
     let derivations = MemoryDerivations::default();
     let stream = stream_of(run, &store, converters, &derivations);
-    let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
+    let reuse = Reuse::new(&run.manifest, &stream, records, run.indexes).unwrap();
     let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
     let reused = reuse.reused();
     let outcome = reuse.evaluate(run.inputs, &stream).unwrap();
@@ -383,10 +406,10 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
         ..Run::default()
     };
     let stream = stream_of(&first, &store, &converters, &derivations);
-    let reuse = Reuse::new(&first.manifest, &stream, &records).unwrap();
+    let reuse = Reuse::new(&first.manifest, &stream, &records, first.indexes).unwrap();
     let outcome = reuse.evaluate(first.inputs, &stream).unwrap();
     let mut state = RegionState::default();
-    state.advance(Vec::new(), &outcome.kept, &outcome.results);
+    state.advance(Vec::new(), &outcome);
 
     // fixture_data has new content. No record is written, so what fixture_scene gave comes from
     // the state alone.
@@ -397,8 +420,8 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
         ..Run::default()
     };
     let stream = stream_of(&second, &store, &converters, &derivations);
-    let earlier = Earlier::new(&state.units, &records);
-    let reuse = Reuse::new(&second.manifest, &stream, &earlier).unwrap();
+    let earlier = Earlier::new(&state, &records);
+    let reuse = Reuse::new(&second.manifest, &stream, &earlier, second.indexes).unwrap();
     let outcome = reuse.evaluate(second.inputs, &stream).unwrap();
     assert_eq!(outcome.kept, ["fixture_scene"]);
     let units: Vec<&str> = outcome.results.iter().map(|r| r.unit.as_str()).collect();
@@ -410,7 +433,7 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
 
     // The claims are those of the first run, and fixture_data has its new key.
     let mut again = state.clone();
-    again.advance(Vec::new(), &outcome.kept, &outcome.results);
+    again.advance(Vec::new(), &outcome);
     assert_eq!(again.claims, state.claims);
     let keys = |state: &RegionState| state.units.iter().map(|u| u.key).collect::<Vec<_>>();
     assert_eq!(keys(&again)[1], keys(&state)[1]);
@@ -438,6 +461,46 @@ fn a_new_version_evaluates_again_only_the_units_with_roots_of_its_form() {
     let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
     assert!(evaluated.is_empty());
     assert_eq!(reused, 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_new_form_evaluates_again_only_the_units_its_index_shows_roots_of() {
+    let root = scratch("added");
+    let records = MemoryUnitRecords::default();
+    let indexes = FixtureIndexes::new();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        indexes: &indexes,
+        ..Run::default()
+    };
+    let whole = streamed(&root, &run);
+    let textures: Vec<Box<dyn Converter>> = vec![Box::new(Texture)];
+    streamed_reusing_with(&root, &run, &records, &textures);
+    assert_eq!(records.len(), 2);
+
+    // Only fixture_data has roots of the data form, so fixture_scene keeps its result.
+    let (evaluated, reused, added) = streamed_reusing(&root, &run, &records);
+    assert_eq!(evaluated, ["fixture_data"]);
+    assert_eq!(reused, 1);
+    assert_eq!(content(&added), content(&whole));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_new_form_evaluates_again_the_units_whose_index_is_not_known() {
+    let root = scratch("unindexed");
+    let records = MemoryUnitRecords::default();
+    let run = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    let textures: Vec<Box<dyn Converter>> = vec![Box::new(Texture)];
+    streamed_reusing_with(&root, &run, &records, &textures);
+
+    let (evaluated, reused, _) = streamed_reusing(&root, &run, &records);
+    assert_eq!(evaluated, ["fixture_data", "fixture_scene"]);
+    assert_eq!(reused, 0);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -516,7 +579,8 @@ fn every_unit_has_a_result_and_only_recordable_ones_are_reusable() {
         ..Run::default()
     };
     let stream = stream_of(&run, &store, &converters, &derivations);
-    let reuse = Reuse::new(&run.manifest, &stream, &MemoryUnitRecords::default()).unwrap();
+    let records = MemoryUnitRecords::default();
+    let reuse = Reuse::new(&run.manifest, &stream, &records, run.indexes).unwrap();
     let reuse::Outcome {
         streamed, results, ..
     } = reuse.evaluate(run.inputs, &stream).unwrap();

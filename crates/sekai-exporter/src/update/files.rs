@@ -14,13 +14,31 @@ use std::sync::PoisonError;
 
 use sekai_catalog::store::parse_hex;
 use sekai_game::cdn::BundleEntry;
+use sekai_pipeline::reuse::EntryIndexes;
 use sekai_pipeline::state::BundleState;
 use sekai_pipeline::stream::{self, Content, Entry};
-use sekai_pipeline::version::{BundleFiles, bundle_files, indexed_files};
+use sekai_pipeline::version::{BundleFiles, bundle_files, indexed_bundle, indexed_files};
 use sekai_pipeline::{BundleIndexes, parallel};
 use sekai_unity::BlockCache;
+use sekai_unity::index::BundleIndex;
 
 use super::fetch::{Fetcher, open_input};
+
+/// The indexes that `indexes` keep of the bundles of a run, found by what `fetcher` knows of
+/// their bytes.
+pub(super) struct KnownIndexes<'a> {
+    pub(super) fetcher: &'a Fetcher<'a>,
+    pub(super) indexes: &'a dyn BundleIndexes,
+}
+
+impl EntryIndexes for KnownIndexes<'_> {
+    fn index(&self, entry: &Entry) -> io::Result<Option<BundleIndex>> {
+        let Some(sha256) = self.fetcher.known_sha256(entry)? else {
+            return Ok(None);
+        };
+        indexed_bundle(&entry.name, &sha256, self.indexes)
+    }
+}
 
 /// The serialized files of a bundle.
 struct Files {

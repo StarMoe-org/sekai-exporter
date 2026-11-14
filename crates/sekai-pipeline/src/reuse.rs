@@ -1,14 +1,20 @@
 //! Units whose results earlier runs recorded.
 //!
 //! The result of a unit follows from the bytes of the bundles of its window and from what the
-//! evaluation runs with: the forms of the converters and the rules that pick their roots, the
+//! evaluation runs with: the forms whose roots it looks for and the rules that pick them, the
 //! converters of the forms the unit has roots of, the class layouts, the size limit of assets, the
 //! naming of roots and the evaluator itself. When the content of every bundle of a window is
-//! identified ([`Entry::content`]), the unit is keyed by those contents and by all of these but
-//! the converters, and the result a run gives the unit is recorded under that key with the version
-//! of each converter it has roots of. A later run takes the recorded result while those versions
-//! are the same, and fetches and evaluates only the windows of the other units. A new version of
-//! a converter therefore evaluates again only the units that have roots of its form.
+//! identified ([`Entry::content`]), the unit is keyed by those contents and by the class layouts,
+//! the size limit, the naming and the evaluator, and the result a run gives the unit is recorded
+//! under that key with the forms the run looked for and the version of each converter the unit
+//! has roots of. A later run takes the recorded result while those versions are the same, and
+//! fetches and evaluates only the windows of the other units. A new version of a converter
+//! therefore evaluates again only the units that have roots of its form.
+//!
+//! A form that a result was not looked for in changes it only when the unit has roots of that
+//! form. A run checks that from the indexes of the bundles of the window ([`EntryIndexes`]),
+//! without their bytes, and takes the result when the unit has none; when an index is not known,
+//! the unit is evaluated. A new form therefore evaluates again only the units with its roots.
 //!
 //! A unit is recorded only when no bundle of its window had an error. When an asset of a form
 //! failed to convert, the record also holds the revision of the converter of that form, and a later
@@ -32,6 +38,7 @@ use std::io;
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, UnitRecords};
 use sekai_convert::Converter;
+use sekai_unity::index::{BundleIndex, VersionIndex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
@@ -42,7 +49,7 @@ use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Un
 /// The revision of how units are evaluated and recorded, which is part of every unit key. It also
 /// changes when a rule that picks the roots of a form picks other objects, since a version of a
 /// converter does not cover its rule.
-const REVISION: &str = "unit 2";
+const REVISION: &str = "unit 3";
 
 /// The key of a unit: the SHA-256 of what its result follows from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -72,20 +79,66 @@ impl<'de> Deserialize<'de> for UnitKey {
 /// What a run finds for a unit under its key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
-    /// The last run of the region gave the unit under the same key, with converters of these
-    /// identities; the state of the region holds what it gave.
-    Kept(BTreeSet<String>),
+    /// The last run of the region gave the unit under the same key; the state of the region holds
+    /// what it gave.
+    Kept(Kept),
     /// A result recorded by any run.
     Recorded(Record),
+}
+
+/// What the state of a region holds of a unit whose result a later run may keep.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Kept {
+    /// The identity of each converter the unit has roots of.
+    pub forms: BTreeSet<String>,
+    /// The forms whose roots the run that gave the result looked for.
+    pub scanned: BTreeSet<String>,
 }
 
 impl Found {
     /// The identity of each converter the unit has roots of.
     fn forms(&self) -> &BTreeSet<String> {
         match self {
-            Found::Kept(forms) => forms,
+            Found::Kept(kept) => &kept.forms,
             Found::Recorded(record) => &record.forms,
         }
+    }
+
+    /// The forms whose roots the run that gave the result looked for.
+    fn scanned(&self) -> &BTreeSet<String> {
+        match self {
+            Found::Kept(kept) => &kept.scanned,
+            Found::Recorded(record) => &record.scanned,
+        }
+    }
+
+    /// The result as one that the forms `scanned` were looked for in.
+    fn scanned_for(self, scanned: &BTreeSet<String>) -> Self {
+        match self {
+            Found::Kept(kept) => Found::Kept(Kept {
+                scanned: scanned.clone(),
+                ..kept
+            }),
+            Found::Recorded(record) => Found::Recorded(Record {
+                scanned: scanned.clone(),
+                ..record
+            }),
+        }
+    }
+}
+
+/// Where a run finds the index of the bundle of a manifest entry without its bytes.
+pub trait EntryIndexes: Sync {
+    /// The index of the bundle of `entry`, when it is known.
+    fn index(&self, entry: &Entry) -> io::Result<Option<BundleIndex>>;
+}
+
+/// No index is known.
+pub struct NoEntryIndexes;
+
+impl EntryIndexes for NoEntryIndexes {
+    fn index(&self, _entry: &Entry) -> io::Result<Option<BundleIndex>> {
+        Ok(None)
     }
 }
 
@@ -149,6 +202,8 @@ pub struct Reuse<'m> {
     rest: Vec<Entry>,
     /// The identities of each converter, by form.
     identities: BTreeMap<&'static str, Identities>,
+    /// The forms whose roots the run looks for.
+    scanned: BTreeSet<String>,
 }
 
 /// A unit to evaluate, with its key and the names of the bundles of its window.
@@ -160,31 +215,37 @@ struct Pending<'m> {
 
 impl<'m> Reuse<'m> {
     /// Splits `manifest` into the units that `recorded` finds a result for, as an evaluation
-    /// with `stream` would give it, and the entries the other units need. A unit that is in the
-    /// window of another unit to evaluate is evaluated too.
+    /// with `stream` would give it, and the entries the other units need. Whether a unit has roots
+    /// of a form its result was not looked for in is read from the bundle indexes of `indexes`. A
+    /// unit that is in the window of another unit to evaluate is evaluated too.
     pub fn new(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
         recorded: &dyn Recorded,
+        indexes: &dyn EntryIndexes,
     ) -> io::Result<Self> {
-        Self::split(manifest, stream, |unit, key| recorded.record(unit, key))
+        Self::split(manifest, stream, indexes, |unit, key| {
+            recorded.record(unit, key)
+        })
     }
 
     /// Evaluates every unit of `manifest`.
     pub fn refresh(manifest: &'m [Entry], stream: &Stream<'_>) -> io::Result<Self> {
-        Self::split(manifest, stream, |_, _| Ok(None))
+        Self::split(manifest, stream, &NoEntryIndexes, |_, _| Ok(None))
     }
 
     /// Splits `manifest` with what `lookup` finds for each unit and key.
     fn split(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
+        indexes: &dyn EntryIndexes,
         lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Found>> + Sync,
     ) -> io::Result<Self> {
         let units = Units::new(manifest);
         let context = context(stream);
         let identities = identities(stream);
         let current: BTreeSet<&str> = identities.values().flat_map(Identities::both).collect();
+        let scanned: BTreeSet<String> = identities.keys().map(|&form| form.to_owned()).collect();
         let name = |entry: usize| units.entries[entry].name.as_str();
         let found_for = |unit: usize| -> io::Result<(Option<UnitKey>, Option<Found>)> {
             let key = key(&context, &units, unit);
@@ -192,10 +253,12 @@ impl<'m> Reuse<'m> {
                 Some(key) => lookup(name(unit), key)?,
                 None => None,
             };
-            Ok((
-                key,
-                found.filter(|found| holds_with(found.forms(), &current)),
-            ))
+            let found = found.filter(|found| holds_with(found.forms(), &current));
+            let found = match found {
+                Some(found) => holds_for(found, &units, unit, stream, indexes)?,
+                None => None,
+            };
+            Ok((key, found.map(|found| found.scanned_for(&scanned))))
         };
         // A lookup may wait on a request, so the units are looked up on the threads of the run.
         let found = eval::parallel(units.entries.len(), stream.options.threads, found_for);
@@ -239,6 +302,7 @@ impl<'m> Reuse<'m> {
             pending,
             rest: entries_to_evaluate(manifest, &units, &needed),
             identities,
+            scanned,
         })
     }
 
@@ -266,6 +330,7 @@ impl<'m> Reuse<'m> {
             streamed: stream::finish(gathered),
             results,
             kept: self.kept,
+            scanned: self.scanned,
         })
     }
 
@@ -277,16 +342,17 @@ impl<'m> Reuse<'m> {
             .keys()
             .map(|(name, _)| name.as_str())
             .collect();
-        let mut records = Record::of_each(gathered, &self.identities);
+        let mut records = Record::of_each(gathered, &self.identities, &self.scanned);
         self.pending
             .iter()
             .map(|pending| {
                 let broken = pending.window.iter().any(|bundle| broken.contains(bundle));
+                let record = records.remove(pending.unit);
                 UnitResult {
                     unit: pending.unit.to_owned(),
                     key: pending.key,
                     reusable: pending.key.is_some() && !broken,
-                    record: records.remove(pending.unit).unwrap_or_default(),
+                    record: record.unwrap_or_else(|| Record::empty(&self.scanned)),
                 }
             })
             .collect()
@@ -294,7 +360,7 @@ impl<'m> Reuse<'m> {
 }
 
 /// What a run of a manifest gave.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Outcome {
     /// The evaluation of the units that do not keep what the last run gave them. Of the names
     /// that several of its assets received, none is given; the names of kept units are not
@@ -304,6 +370,8 @@ pub struct Outcome {
     pub results: Vec<UnitResult>,
     /// The units that keep what the last run of their region gave them, in manifest order.
     pub kept: Vec<String>,
+    /// The forms whose roots the run looked for, which every result now holds for.
+    pub scanned: BTreeSet<String>,
 }
 
 /// The evaluation that `results` give together, as [`Reuse::evaluate`] gives it from them: their
@@ -335,14 +403,10 @@ fn entries_to_evaluate(
         .collect()
 }
 
-/// What every unit key of an evaluation with `stream` starts with: the revision, the forms of the
-/// converters in their order, whose names stand for the rules that pick their roots, the class
+/// What every unit key of an evaluation with `stream` starts with: the revision, the class
 /// layouts and the size limit of assets.
 fn context(stream: &Stream<'_>) -> String {
     let mut text = format!("{REVISION}\n");
-    for converter in stream.converters {
-        text.push_str(&format!("form {}\n", converter.name()));
-    }
     if let Some(identity) = stream.classes.identity() {
         text.push_str(&format!("classes {}\n", eval::hex(&identity)));
     }
@@ -393,6 +457,46 @@ fn holds_with(forms: &BTreeSet<String>, current: &BTreeSet<&str>) -> bool {
     forms.iter().all(|form| current.contains(form.as_str()))
 }
 
+/// `found`, when it holds for an evaluation with `stream` of `unit` of `units`: when the unit has
+/// no roots of the forms of `stream` that `found` was not looked for in, as the indexes of its
+/// window in `indexes` tell.
+fn holds_for(
+    found: Found,
+    units: &Units<'_>,
+    unit: usize,
+    stream: &Stream<'_>,
+    indexes: &dyn EntryIndexes,
+) -> io::Result<Option<Found>> {
+    let unscanned: Vec<&dyn Converter> = stream
+        .converters
+        .iter()
+        .map(Box::as_ref)
+        .filter(|converter| !found.scanned().contains(converter.name()))
+        .collect();
+    if unscanned.is_empty() {
+        return Ok(Some(found));
+    }
+    let mut window = Vec::new();
+    for &entry in &units.windows[unit] {
+        match indexes.index(units.entries[entry])? {
+            Some(index) => window.push(index),
+            None => return Ok(None),
+        }
+    }
+    let index = VersionIndex::new(window);
+    let name = units.entries[unit].name.as_str();
+    let Some(bundle) = index
+        .bundles()
+        .iter()
+        .position(|bundle| bundle.name == name)
+    else {
+        return Ok(None);
+    };
+    let window: BTreeSet<usize> = (0..index.bundles().len()).collect();
+    let rootless = !stream::has_roots(&index, bundle, &window, &unscanned);
+    Ok(rootless.then_some(found))
+}
+
 /// The key of `unit`, when the content of every bundle of its window is identified.
 fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
     let mut text = format!("{context}unit {}\n", units.entries[unit].name);
@@ -408,6 +512,8 @@ fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
 /// window, with the converters that gave them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
+    /// The forms whose roots the run that gave the result looked for.
+    scanned: BTreeSet<String>,
     /// The identity of each converter the unit has roots of.
     forms: BTreeSet<String>,
     assets: Vec<RecordedAsset>,
@@ -443,6 +549,15 @@ impl RecordedAsset {
 }
 
 impl Record {
+    /// The record of a unit that gave nothing in an evaluation that looked for the forms
+    /// `scanned`.
+    fn empty(scanned: &BTreeSet<String>) -> Self {
+        Self {
+            scanned: scanned.clone(),
+            ..Self::default()
+        }
+    }
+
     /// The record in `bytes`, or `None` when they hold none, so that the unit is evaluated again.
     pub fn read(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
@@ -471,12 +586,14 @@ impl Record {
         asset.map(RecordedAsset::document).transpose()
     }
 
-    /// The record of each unit that gave something in `gathered`, by unit name, with the
-    /// `identities` of the converters by form.
+    /// The record of each unit that gave something in `gathered`, an evaluation that looked for
+    /// the forms `scanned`, by unit name, with the `identities` of the converters by form.
     fn of_each<'g>(
         gathered: &'g Gathered,
         identities: &BTreeMap<&str, Identities>,
+        scanned: &BTreeSet<String>,
     ) -> BTreeMap<&'g str, Record> {
+        let empty = || Record::empty(scanned);
         let failing: BTreeSet<(&str, &str)> = gathered
             .outputs
             .iter()
@@ -492,12 +609,12 @@ impl Record {
                     false => identities.converted.clone(),
                 }
             };
-            records.entry(unit).or_default().forms = forms.iter().map(identity).collect();
+            records.entry(unit).or_insert_with(empty).forms = forms.iter().map(identity).collect();
         }
         for (output, logical, path_id) in &gathered.outputs {
             records
                 .entry(&output.bundle)
-                .or_default()
+                .or_insert_with(empty)
                 .assets
                 .push(RecordedAsset {
                     name: output.name.clone(),
@@ -510,10 +627,14 @@ impl Record {
         }
         for (unit, logical, path_id) in &gathered.unnamed {
             let unnamed = (logical.clone(), *path_id);
-            records.entry(unit).or_default().unnamed.push(unnamed);
+            records
+                .entry(unit)
+                .or_insert_with(empty)
+                .unnamed
+                .push(unnamed);
         }
         for outside in &gathered.outside {
-            let record = records.entry(&outside.unit).or_default();
+            let record = records.entry(&outside.unit).or_insert_with(empty);
             record.outside.push(outside.clone());
         }
         records

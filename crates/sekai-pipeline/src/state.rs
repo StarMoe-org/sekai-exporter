@@ -25,12 +25,12 @@ use sha2::{Digest, Sha256};
 
 use crate::claims::{self, Claims, Ruling};
 use crate::eval::{Output, hex, parallel};
-use crate::reuse::{UnitKey, UnitResult};
+use crate::reuse::{Outcome, UnitKey, UnitResult};
 use crate::stream::Content;
 use crate::version::BundleFiles;
 
 /// The format version of the root of a region.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// A chunk ends after a row whose name hashes to a multiple of this, so chunks hold this many
 /// rows on average.
@@ -195,6 +195,8 @@ pub struct RegionState {
     pub version: String,
     /// The revision of each view published from it, by target.
     pub published: BTreeMap<String, String>,
+    /// The forms whose roots the run looked for, which the results of its units hold for.
+    pub scanned: BTreeSet<String>,
     /// The bundles of the version, in name order.
     pub bundles: Vec<BundleState>,
     /// The units whose results a later run may keep, in name order.
@@ -212,6 +214,7 @@ pub struct Root {
     version: u32,
     published_version: String,
     published: BTreeMap<String, String>,
+    scanned: BTreeSet<String>,
     bundles: Vec<ChunkReference>,
     units: Vec<ChunkReference>,
     claims: Vec<ChunkReference>,
@@ -280,21 +283,17 @@ macro_rules! state_rows {
 state_rows!(BundleState => name, UnitState => unit, Claims => name, TableOutput => name);
 
 impl RegionState {
-    /// Advances the bundles, units and claims of the state by a run of a version with `bundles`,
-    /// which kept what the units `kept` gave last time and gave `results` for every other unit.
-    /// Returns a ruling for each name the owner of which may have changed.
-    pub fn advance(
-        &mut self,
-        bundles: Vec<BundleState>,
-        kept: &[String],
-        results: &[UnitResult],
-    ) -> Vec<Ruling> {
+    /// Advances the bundles, units and claims of the state by `outcome`, a run of a version with
+    /// `bundles`. Returns a ruling for each name the owner of which may have changed.
+    pub fn advance(&mut self, bundles: Vec<BundleState>, outcome: &Outcome) -> Vec<Ruling> {
         self.bundles = bundles;
-        let kept: BTreeSet<&str> = kept.iter().map(String::as_str).collect();
+        self.scanned = outcome.scanned.clone();
+        let kept: BTreeSet<&str> = outcome.kept.iter().map(String::as_str).collect();
         self.units.retain(|unit| kept.contains(unit.unit.as_str()));
-        self.units.extend(results.iter().filter_map(UnitState::of));
+        self.units
+            .extend(outcome.results.iter().filter_map(UnitState::of));
         self.units.sort_by(|a, b| a.unit.cmp(&b.unit));
-        let new = results.iter().flat_map(UnitResult::claims);
+        let new = outcome.results.iter().flat_map(UnitResult::claims);
         let (claims, rulings) = claims::advance(std::mem::take(&mut self.claims), &kept, new);
         self.claims = claims;
         rulings
@@ -321,6 +320,7 @@ impl RegionState {
         let state = Self {
             version: root.published_version.clone(),
             published: root.published.clone(),
+            scanned: root.scanned.clone(),
             bundles: read_table(files, &root.bundles, threads)?,
             units: read_table(files, &root.units, threads)?,
             claims: read_table(files, &root.claims, threads)?,
@@ -345,6 +345,7 @@ impl RegionState {
             version: VERSION,
             published_version: self.version.clone(),
             published: self.published.clone(),
+            scanned: self.scanned.clone(),
             bundles: write_table(files, &self.bundles, &kept, threads, &mut written)?,
             units: write_table(files, &self.units, &kept, threads, &mut written)?,
             claims: write_table(files, &self.claims, &kept, threads, &mut written)?,
@@ -477,6 +478,7 @@ mod tests {
         RegionState {
             version: "1.0".to_owned(),
             published: BTreeMap::from([("jp/canonical".to_owned(), "r1".to_owned())]),
+            scanned: BTreeSet::from(["texture".to_owned()]),
             bundles: (0..units)
                 .map(|i| BundleState {
                     name: name(i),
@@ -544,13 +546,23 @@ mod tests {
             })
             .collect();
         let record = serde_json::json!({
-            "forms": ["texture 1"], "assets": assets, "unnamed": [], "outside": [],
+            "scanned": ["texture"], "forms": ["texture 1"], "assets": assets, "unnamed": [],
+            "outside": [],
         });
         UnitResult {
             unit: unit.to_owned(),
             key: Some(key(unit)),
             reusable: true,
             record: Record::read(&serde_json::to_vec(&record).unwrap()).unwrap(),
+        }
+    }
+
+    /// A run that kept what the units `kept` gave last time and gave `results`.
+    fn ran(kept: &[&str], results: impl Into<Vec<UnitResult>>) -> Outcome {
+        Outcome {
+            results: results.into(),
+            kept: kept.iter().map(|unit| (*unit).to_owned()).collect(),
+            ..Outcome::default()
         }
     }
 
@@ -562,7 +574,7 @@ mod tests {
             result("b", &["y"]),
             result("c", &["z"]),
         ];
-        state.advance(Vec::new(), &[], &first);
+        state.advance(Vec::new(), &ran(&[], first));
         let owners = |state: &RegionState| -> Vec<(String, Option<String>)> {
             let owner = |c: &Claims| c.owner().map(|o| o.unit.clone());
             state
@@ -574,7 +586,7 @@ mod tests {
         assert_eq!(owners(&state).len(), 3);
 
         // b now gives x as well, c is gone, and a is kept.
-        let rulings = state.advance(Vec::new(), &["a".to_owned()], &[result("b", &["x", "y"])]);
+        let rulings = state.advance(Vec::new(), &ran(&["a"], [result("b", &["x", "y"])]));
         let units: Vec<&str> = state.units.iter().map(|u| u.unit.as_str()).collect();
         assert_eq!(units, ["a", "b"]);
         assert_eq!(

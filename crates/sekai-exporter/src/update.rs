@@ -44,6 +44,7 @@ mod views;
 
 use backed::Backed;
 use fetch::{Arriving, EarlierRun, Fetcher, declared_content, identify, in_opening_order};
+use files::KnownIndexes;
 use site::Site;
 use tables::{build_tables, table_bindings, table_converters};
 use views::Advance;
@@ -401,7 +402,7 @@ fn export_version(
     let Some(Evaluation { outcome, bundles }) = evaluation else {
         return Ok(Outcome::Incomplete);
     };
-    let rulings = state.advance(bundles, &outcome.kept, &outcome.results);
+    let rulings = state.advance(bundles, &outcome);
 
     let context = Context {
         options,
@@ -549,12 +550,16 @@ impl Opened {
             ledger: Some(IGNORED),
             limit: None,
         };
-        let earlier = Earlier::new(&state.units, backed);
+        let earlier = Earlier::new(state, backed);
+        let known = KnownIndexes {
+            fetcher: &fetcher,
+            indexes: &indexes,
+        };
         let evaluating = if self.listed {
             let reuse = if options.force {
                 Reuse::refresh(&manifest, &stream)
             } else {
-                Reuse::new(&manifest, &stream, &earlier)
+                Reuse::new(&manifest, &stream, &earlier, &known)
             };
             let reuse = reuse.map_err(|e| e.to_string())?;
             println!("units {} reused {}", manifest.len(), reuse.reused());

@@ -6,7 +6,7 @@
 //! not hold is not recorded. Every object a record names is therefore there, and a run knows the
 //! size of each object a derivation record names without asking.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -14,8 +14,8 @@ use sekai_catalog::{Derivations, Derived, Holdings, Key, MemoryHoldings};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{hex, parallel};
-use crate::reuse::{Found, Record, Recorded, UnitKey, UnitResult};
-use crate::state::{StateFiles, UnitState};
+use crate::reuse::{Found, Kept, Record, Recorded, UnitKey, UnitResult};
+use crate::state::{RegionState, StateFiles, UnitState};
 
 fn unit_file(key: &UnitKey) -> String {
     let key = key.to_string();
@@ -202,24 +202,31 @@ impl Recorded for Records<'_> {
 pub struct Earlier<'a> {
     /// The units of the last version of the region whose results a later run may keep, by name.
     units: HashMap<&'a str, &'a UnitState>,
+    /// The forms whose roots the last run of the region looked for.
+    scanned: &'a BTreeSet<String>,
     records: &'a dyn Recorded,
 }
 
 impl<'a> Earlier<'a> {
-    /// The units `units` that the last run of the region left, and the records `records`.
-    pub fn new(units: &'a [UnitState], records: &'a dyn Recorded) -> Self {
-        let units = units
-            .iter()
-            .map(|unit| (unit.unit.as_str(), unit))
-            .collect();
-        Self { units, records }
+    /// The units that the last run of the region left, `state`, and the records `records`.
+    pub fn new(state: &'a RegionState, records: &'a dyn Recorded) -> Self {
+        let units = state.units.iter();
+        let units = units.map(|unit| (unit.unit.as_str(), unit)).collect();
+        Self {
+            units,
+            scanned: &state.scanned,
+            records,
+        }
     }
 }
 
 impl Recorded for Earlier<'_> {
     fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
         match self.units.get(unit) {
-            Some(earlier) if earlier.key == *key => Ok(Some(Found::Kept(earlier.forms.clone()))),
+            Some(earlier) if earlier.key == *key => Ok(Some(Found::Kept(Kept {
+                forms: earlier.forms.clone(),
+                scanned: self.scanned.clone(),
+            }))),
             _ => self.records.record(unit, key),
         }
     }
@@ -309,14 +316,22 @@ mod tests {
         let elsewhere = unit("shared", 3, true);
         records.write(&[&elsewhere], 1).unwrap();
 
-        let last: Vec<UnitState> = [unit("a", 1, true), unit("b", 2, false)]
-            .iter()
-            .filter_map(UnitState::of)
-            .collect();
+        let last = RegionState {
+            units: [unit("a", 1, true), unit("b", 2, false)]
+                .iter()
+                .filter_map(UnitState::of)
+                .collect(),
+            scanned: BTreeSet::from(["texture".to_owned()]),
+            ..RegionState::default()
+        };
         let earlier = Earlier::new(&last, &records);
+        let kept = Kept {
+            scanned: last.scanned.clone(),
+            ..Kept::default()
+        };
         assert_eq!(
             earlier.record("a", &UnitKey([1; 32])).unwrap(),
-            Some(Found::Kept(Default::default()))
+            Some(Found::Kept(kept))
         );
         // A result that may not be taken, or one under another key, is not.
         assert!(earlier.record("b", &UnitKey([2; 32])).unwrap().is_none());

@@ -5,7 +5,7 @@
 //! the objects they name are in the destination. Every object a record names is therefore there,
 //! and a run knows the size of each object a derivation record names without asking.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -50,6 +50,8 @@ pub struct Records<'a> {
     derivations: Mutex<HashMap<[u8; 32], Option<Derived>>>,
     /// The derivations made by this run, to write.
     made: Mutex<Vec<([u8; 32], Derived)>>,
+    /// The keys of the unit records read, which need not be written again.
+    read: Mutex<HashSet<UnitKey>>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -70,15 +72,44 @@ impl<'a> Records<'a> {
             store,
             derivations: Mutex::default(),
             made: Mutex::default(),
+            read: Mutex::default(),
         }
     }
 
+    /// The asset documents that [`Records::write`] of `units` names: those of the derivations
+    /// this run made and of the assets of the units it writes.
+    pub fn documents(&self, units: &[&UnitResult]) -> io::Result<Vec<Key>> {
+        let mut documents: Vec<Key> = lock(&self.made)
+            .iter()
+            .filter_map(|(_, derived)| match derived {
+                Derived::Document(key) => Some(key.clone()),
+                Derived::Nothing => None,
+            })
+            .collect();
+        for unit in self.to_write(units) {
+            documents.extend(unit.record.documents()?);
+        }
+        documents.sort();
+        documents.dedup();
+        Ok(documents)
+    }
+
+    /// The units of `units` whose records a write writes: those a later run may take, unless
+    /// their records were read from the files.
+    fn to_write<'u>(&self, units: &[&'u UnitResult]) -> Vec<&'u UnitResult> {
+        let read = lock(&self.read);
+        let written = units.iter().copied();
+        written
+            .filter(|unit| unit.reusable_key().is_some_and(|key| !read.contains(key)))
+            .collect()
+    }
+
     /// Writes the derivations this run made and the record of each of `units` that a later run
-    /// may take, on up to `threads` threads. Call it once the objects they name are in the
-    /// destination. Returns how many records were written.
+    /// may take and that was not read from the records, on up to `threads` threads. Call it once
+    /// the objects they name are in the destination. Returns how many records were written.
     pub fn write(&self, units: &[&UnitResult], threads: usize) -> io::Result<usize> {
+        let units = self.to_write(units);
         let made = std::mem::take(&mut *lock(&self.made));
-        let units: Vec<&UnitResult> = units.iter().copied().filter(|u| u.reusable).collect();
         let derivations = parallel(made.len(), threads, |i| {
             let (fingerprint, derived) = &made[i];
             self.write_derivation(fingerprint, derived)
@@ -156,8 +187,11 @@ impl Derivations for Records<'_> {
 impl Recorded for Records<'_> {
     fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
         let bytes = self.files.read(&unit_file(key))?;
-        let record = bytes.and_then(|bytes| Record::read(&bytes));
-        Ok(record.map(Found::Recorded))
+        let Some(record) = bytes.and_then(|bytes| Record::read(&bytes)) else {
+            return Ok(None);
+        };
+        lock(&self.read).insert(*key);
+        Ok(Some(Found::Recorded(record)))
     }
 }
 
@@ -248,6 +282,21 @@ mod tests {
             Some(Found::Recorded(Record::default()))
         );
         assert_eq!(records.record("b", &key(&broken)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_record_read_is_not_written_again() {
+        let files = MemoryFiles::default();
+        let store = MemoryStore::default();
+        let held = MemoryHoldings::default();
+        let first = Records::new(&files, &held, &store);
+        let shared = unit("shared", 3, true);
+        assert_eq!(first.write(&[&shared], 1).unwrap(), 1);
+
+        let later = Records::new(&files, &held, &store);
+        assert!(later.record("shared", &UnitKey([3; 32])).unwrap().is_some());
+        let new = unit("new", 4, true);
+        assert_eq!(later.write(&[&shared, &new], 1).unwrap(), 1);
     }
 
     #[test]

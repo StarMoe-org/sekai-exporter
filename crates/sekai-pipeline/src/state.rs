@@ -11,6 +11,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use flate2::Compression;
@@ -65,6 +66,40 @@ impl StateFiles for MemoryFiles {
     fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         self.files().insert(name.to_owned(), bytes.to_vec());
         Ok(())
+    }
+}
+
+/// State files in a directory, at their names as relative paths. A file is written beside its
+/// place first and then moved there, so a reader finds the old bytes or the new ones.
+#[derive(Debug, Clone)]
+pub struct DirectoryFiles(PathBuf);
+
+impl DirectoryFiles {
+    /// The state files in `root`, which is made when the first file is written.
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self(root.into())
+    }
+}
+
+impl StateFiles for DirectoryFiles {
+    fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        match std::fs::read(self.0.join(name)) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let path = self.0.join(name);
+        if let Some(directory) = path.parent() {
+            std::fs::create_dir_all(directory)?;
+        }
+        let digest = hex(&Sha256::digest(bytes));
+        let partial =
+            path.with_file_name(format!(".{}.{}.part", &digest[..16], std::process::id()));
+        std::fs::write(&partial, bytes)?;
+        std::fs::rename(&partial, &path)
     }
 }
 
@@ -554,6 +589,19 @@ mod tests {
                 ("z", Some("c"), None)
             ]
         );
+    }
+
+    #[test]
+    fn a_state_in_a_directory_reads_back_as_it_was_written() {
+        let root = std::env::temp_dir().join(format!("sekai-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = DirectoryFiles::new(&root);
+        let written = state(500);
+        written.write(&files, "jp", None, 2).unwrap();
+        let (read, _) = RegionState::read(&files, "jp", 2).unwrap().unwrap();
+        assert_eq!(read, written);
+        assert_eq!(files.read("regions/tw.json").unwrap(), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

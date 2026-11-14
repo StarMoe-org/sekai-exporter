@@ -27,8 +27,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::io;
 
-use sekai_catalog::UnitRecords;
 use sekai_catalog::store::parse_hex;
+use sekai_catalog::{Key, UnitRecords};
 use sekai_convert::Converter;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -412,6 +412,21 @@ struct RecordedAsset {
     path_id: i64,
 }
 
+impl RecordedAsset {
+    /// The asset document. Fails when the record names an invalid one.
+    fn document(&self) -> io::Result<Key> {
+        self.document.parse().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "the record of {} names the document {}",
+                    self.name, self.document
+                ),
+            )
+        })
+    }
+}
+
 impl Record {
     /// The record in `bytes`, or `None` when they hold none, so that the unit is evaluated again.
     pub fn read(bytes: &[u8]) -> Option<Self> {
@@ -426,6 +441,19 @@ impl Record {
     /// The [`identity`] of each converter the unit has roots of.
     pub fn forms(&self) -> &BTreeSet<String> {
         &self.forms
+    }
+
+    /// The asset document of each asset of the unit. Fails when the record names an invalid one.
+    pub fn documents(&self) -> io::Result<Vec<Key>> {
+        let documents = self.assets.iter().map(RecordedAsset::document);
+        documents.collect()
+    }
+
+    /// The asset document of the asset of the unit that claims `name`, when the unit has one.
+    /// Fails when the record names no valid document for it.
+    pub fn document(&self, name: &str) -> io::Result<Option<Key>> {
+        let asset = self.assets.iter().find(|asset| asset.name == name);
+        asset.map(RecordedAsset::document).transpose()
     }
 
     /// The record of each unit that gave something in `gathered`, by unit name, with the
@@ -479,10 +507,7 @@ impl Record {
                 .map(|converter| converter.name())
                 .find(|&form| form == asset.form)
                 .ok_or_else(|| invalid(format!("names the unknown form {}", asset.form)))?;
-            let document = asset
-                .document
-                .parse()
-                .map_err(|_| invalid(format!("names the document {}", asset.document)))?;
+            let document = asset.document()?;
             let output = Output {
                 name: asset.name.clone(),
                 bundle: unit.to_owned(),

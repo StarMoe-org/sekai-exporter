@@ -31,12 +31,19 @@ pub struct TableStage<'a> {
     pub threads: usize,
 }
 
-/// The assets of the version, as the converters read them.
+/// The assets of the version that the table converters read.
+pub struct VersionAssets<'a> {
+    /// The assets that were produced, by the bundle of their root object, in name order.
+    pub by_bundle: BTreeMap<String, Vec<AssetEntry>>,
+    /// The asset document of a produced asset, by name.
+    pub document: &'a (dyn Fn(&str) -> io::Result<Option<Key>> + Sync),
+}
+
+/// The assets of the version and the tables, as the converters read them.
 struct Assets<'a> {
     read: &'a (dyn Fn(&str) -> io::Result<Vec<u8>> + Sync),
     store: &'a dyn Store,
-    by_bundle: BTreeMap<&'a str, Vec<AssetEntry>>,
-    documents: HashMap<&'a str, &'a Key>,
+    version: &'a VersionAssets<'a>,
 }
 
 fn store_failed(e: impl std::fmt::Display) -> ConvertError {
@@ -49,19 +56,21 @@ impl TableContext for Assets<'_> {
     }
 
     fn bundles(&self) -> Vec<&str> {
-        self.by_bundle.keys().copied().collect()
+        self.version.by_bundle.keys().map(String::as_str).collect()
     }
 
     fn assets(&self, bundle: &str) -> &[AssetEntry] {
-        self.by_bundle.get(bundle).map_or(&[], Vec::as_slice)
+        self.version
+            .by_bundle
+            .get(bundle)
+            .map_or(&[], Vec::as_slice)
     }
 
     fn document(&self, name: &str) -> Result<AssetDocument, ConvertError> {
-        let key = self
-            .documents
-            .get(name)
+        let key = (self.version.document)(name)
+            .map_err(store_failed)?
             .ok_or_else(|| ConvertError::new("missing_asset", format!("no asset {name}")))?;
-        let bytes = self.store.read(key).map_err(store_failed)?;
+        let bytes = self.store.read(&key).map_err(store_failed)?;
         AssetDocument::from_bytes(&bytes).map_err(store_failed)
     }
 
@@ -137,7 +146,8 @@ fn store_members(
     Ok(Ok(files))
 }
 
-fn build(
+/// Builds the asset at `index` of `plan`, a plan of `converter`.
+fn build_asset(
     stage: &TableStage<'_>,
     converter: &dyn TableConverter,
     plan: &dyn TablePlan,
@@ -178,45 +188,32 @@ fn build(
     })
 }
 
-/// Builds the assets of the table converters and adds them to `evaluation`.
+/// Builds the assets of the table converters and adds them to `evaluation`, whose produced
+/// assets the converters read. Fails if a built asset has the name of another asset.
 ///
 /// A table that cannot be read or parsed and a failure of the store fail the run. An asset that
 /// cannot be built is an asset error.
 pub fn evaluate(stage: &TableStage<'_>, evaluation: &mut Evaluation) -> io::Result<()> {
-    let mut by_bundle: BTreeMap<&str, Vec<AssetEntry>> = BTreeMap::new();
-    let mut documents = HashMap::with_capacity(evaluation.outputs.len());
-    for output in evaluation.outputs.iter().filter(|o| o.error.is_none()) {
-        documents.insert(output.name.as_str(), &output.document);
+    let produced = || evaluation.outputs.iter().filter(|o| o.error.is_none());
+    let mut by_bundle: BTreeMap<String, Vec<AssetEntry>> = BTreeMap::new();
+    for output in produced() {
         by_bundle
-            .entry(output.bundle.as_str())
+            .entry(output.bundle.clone())
             .or_default()
             .push(AssetEntry {
                 name: output.name.clone(),
                 form: output.form,
             });
     }
-    let assets = Assets {
-        read: stage.read,
-        store: stage.store,
+    let documents: HashMap<&str, &Key> = produced()
+        .map(|output| (output.name.as_str(), &output.document))
+        .collect();
+    let document = |name: &str| Ok(documents.get(name).map(|key| (*key).clone()));
+    let version = VersionAssets {
         by_bundle,
-        documents,
+        document: &document,
     };
-    let mut built = Vec::new();
-    for converter in stage.converters {
-        let form = converter.name();
-        let plan = {
-            let _span = stage.recorder.span("plan", form, "");
-            converter
-                .plan(&assets)
-                .map_err(|e| io::Error::other(format!("{form}: {e}")))?
-        };
-        let results = parallel(plan.names().len(), stage.threads, |i| {
-            build(stage, converter.as_ref(), plan.as_ref(), i)
-        });
-        for result in results {
-            built.push(result?);
-        }
-    }
+    let built = build(stage, &version)?;
     evaluation.converted += built.len();
     evaluation.outputs.extend(built);
     evaluation.outputs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -231,4 +228,35 @@ pub fn evaluate(stage: &TableStage<'_>, evaluation: &mut Evaluation) -> io::Resu
         ))),
         None => Ok(()),
     }
+}
+
+/// Builds the assets of the table converters from the tables and the assets of `version`, and
+/// returns them in name order.
+///
+/// A table that cannot be read or parsed and a failure of the store fail the run. An asset that
+/// cannot be built is an asset error.
+pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<Vec<Output>> {
+    let assets = Assets {
+        read: stage.read,
+        store: stage.store,
+        version,
+    };
+    let mut built = Vec::new();
+    for converter in stage.converters {
+        let form = converter.name();
+        let plan = {
+            let _span = stage.recorder.span("plan", form, "");
+            converter
+                .plan(&assets)
+                .map_err(|e| io::Error::other(format!("{form}: {e}")))?
+        };
+        let results = parallel(plan.names().len(), stage.threads, |i| {
+            build_asset(stage, converter.as_ref(), plan.as_ref(), i)
+        });
+        for result in results {
+            built.push(result?);
+        }
+    }
+    built.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(built)
 }

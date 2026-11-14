@@ -1409,6 +1409,7 @@ dependencies = [
 name = "sekai-pipeline"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "sekai-catalog",
  "sekai-convert",
  "sekai-encode",

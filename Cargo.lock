@@ -1316,10 +1316,12 @@ dependencies = [
 name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
+ "aes",
+ "cbc",
  "cpu-time",
- "flate2",
  "lexopt",
  "mimalloc",
+ "rmp-serde",
  "sekai-catalog",
  "sekai-codec",
  "sekai-convert",

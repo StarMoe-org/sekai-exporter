@@ -3,6 +3,7 @@
 //! The streaming evaluator runs the pipeline bundle by bundle from a manifest, each bundle with the bundles it depends on; the lazy evaluator computes the derivations of one bundle on request, from the same units. They share one scheduler, which manages CPU slots and a memory budget.
 
 mod canonical;
+pub mod claims;
 pub mod eval;
 mod index_record;
 pub mod isolate;

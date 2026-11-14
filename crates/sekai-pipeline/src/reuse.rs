@@ -18,8 +18,10 @@
 //! same name are told apart, since that depends on the other units; it happens once all of them are
 //! gathered. Records are shared only by runs that name roots in the same way.
 //!
-//! An evaluation gives the result of every unit, also of those that cannot be recorded, so that
-//! the state of a region holds what each unit of its last version gave.
+//! A unit whose key and converters are those of the last run of its region keeps what that run
+//! gave: the run neither evaluates it nor reads its record, and the state of the region holds its
+//! assets. An evaluation gives the result of every other unit, also of those that cannot be
+//! recorded, so that the state of the region can be advanced by them.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
@@ -31,6 +33,7 @@ use sekai_convert::Converter;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
+use crate::claims::Claimant;
 use crate::eval::{self, Evaluation, Output};
 use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Units};
 
@@ -64,15 +67,36 @@ impl<'de> Deserialize<'de> for UnitKey {
     }
 }
 
-/// Where a run finds the results that earlier runs recorded.
+/// What a run finds for a unit under its key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Found {
+    /// The last run of the region gave the unit under the same key, with converters of these
+    /// [`identity`]s; the state of the region holds what it gave.
+    Kept(BTreeSet<String>),
+    /// A result recorded by any run.
+    Recorded(Record),
+}
+
+impl Found {
+    /// The [`identity`] of each converter the unit has roots of.
+    fn forms(&self) -> &BTreeSet<String> {
+        match self {
+            Found::Kept(forms) => forms,
+            Found::Recorded(record) => &record.forms,
+        }
+    }
+}
+
+/// Where a run finds what earlier runs gave.
 pub trait Recorded: Sync {
-    /// The result recorded for `unit` under `key`, if there is one.
-    fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Record>>;
+    /// What earlier runs gave `unit` under `key`, if they gave it.
+    fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Found>>;
 }
 
 impl<T: UnitRecords + ?Sized> Recorded for T {
-    fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Record>> {
-        Ok(self.get(&key.0)?.and_then(|bytes| Record::read(&bytes)))
+    fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
+        let record = self.get(&key.0)?.and_then(|bytes| Record::read(&bytes));
+        Ok(record.map(Found::Recorded))
     }
 }
 
@@ -95,10 +119,25 @@ impl UnitResult {
     pub fn reusable_key(&self) -> Option<&UnitKey> {
         self.key.as_ref().filter(|_| self.reusable)
     }
+
+    /// The name that each asset of the unit claims, with the asset as its claimant.
+    pub fn claims(&self) -> impl Iterator<Item = (String, Claimant)> + '_ {
+        self.record.assets.iter().map(|asset| {
+            let claimant = Claimant {
+                unit: self.unit.clone(),
+                form: asset.form.clone(),
+                failed: asset.error.is_some(),
+            };
+            (asset.name.clone(), claimant)
+        })
+    }
 }
 
-/// A manifest split into the units that take a recorded result and the entries the others need.
+/// A manifest split into the units that keep what the last run gave them, those that take a
+/// recorded result, and the entries the others need.
 pub struct Reuse<'m> {
+    /// The units that keep what the last run of their region gave them.
+    kept: Vec<String>,
     /// The units that take a recorded result.
     recorded: Vec<UnitResult>,
     /// The units to evaluate.
@@ -118,7 +157,7 @@ struct Pending<'m> {
 }
 
 impl<'m> Reuse<'m> {
-    /// Splits `manifest` into the units that `recorded` holds a result for, as an evaluation
+    /// Splits `manifest` into the units that `recorded` finds a result for, as an evaluation
     /// with `stream` would give it, and the entries the other units need. A unit that is in the
     /// window of another unit to evaluate is evaluated too.
     pub fn new(
@@ -134,11 +173,11 @@ impl<'m> Reuse<'m> {
         Self::split(manifest, stream, |_, _| Ok(None))
     }
 
-    /// Splits `manifest` with the recorded result that `lookup` finds for each unit and key.
+    /// Splits `manifest` with what `lookup` finds for each unit and key.
     fn split(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
-        lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Record>>,
+        lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Found>>,
     ) -> io::Result<Self> {
         let units = Units::new(manifest);
         let context = context(stream);
@@ -148,11 +187,14 @@ impl<'m> Reuse<'m> {
         let found = (0..units.entries.len())
             .map(|unit| {
                 let key = key(&context, &units, unit);
-                let record = match &key {
+                let found = match &key {
                     Some(key) => lookup(name(unit), key)?,
                     None => None,
                 };
-                Ok((key, record.filter(|record| record.holds_with(&current))))
+                Ok((
+                    key,
+                    found.filter(|found| holds_with(found.forms(), &current)),
+                ))
             })
             .collect::<io::Result<Vec<_>>>()?;
         let needed: BTreeSet<usize> = found
@@ -162,16 +204,22 @@ impl<'m> Reuse<'m> {
             .flat_map(|(unit, _)| units.windows[unit].iter().copied())
             .collect();
 
+        let mut kept = Vec::new();
         let mut recorded = Vec::new();
         let mut pending = Vec::new();
-        for (unit, (key, record)) in found.into_iter().enumerate() {
-            match record {
-                Some(record) if !needed.contains(&unit) => recorded.push(UnitResult {
-                    unit: name(unit).to_owned(),
-                    key,
-                    reusable: true,
-                    record,
-                }),
+        for (unit, (key, found)) in found.into_iter().enumerate() {
+            match found {
+                Some(Found::Kept(_)) if !needed.contains(&unit) => {
+                    kept.push(name(unit).to_owned());
+                }
+                Some(Found::Recorded(record)) if !needed.contains(&unit) => {
+                    recorded.push(UnitResult {
+                        unit: name(unit).to_owned(),
+                        key,
+                        reusable: true,
+                        record,
+                    });
+                }
                 _ => pending.push(Pending {
                     unit: name(unit),
                     key,
@@ -183,6 +231,7 @@ impl<'m> Reuse<'m> {
             }
         }
         Ok(Self {
+            kept,
             recorded,
             pending,
             rest: entries_to_evaluate(manifest, &units, &needed),
@@ -195,19 +244,14 @@ impl<'m> Reuse<'m> {
         &self.rest
     }
 
-    /// How many units take a recorded result.
+    /// How many units keep what the last run gave them or take a recorded result.
     pub fn reused(&self) -> usize {
-        self.recorded.len()
+        self.kept.len() + self.recorded.len()
     }
 
     /// Evaluates the entries of [`Reuse::rest`], whose bytes come from `inputs`, as
-    /// [`stream::evaluate`] does, and adds the recorded results of the other units. Returns the
-    /// evaluation and the result of every unit, in name order.
-    pub fn evaluate(
-        self,
-        inputs: &dyn Inputs,
-        stream: &Stream<'_>,
-    ) -> io::Result<(Streamed, Vec<UnitResult>)> {
+    /// [`stream::evaluate`] does, and adds the recorded results of the units that take one.
+    pub fn evaluate(self, inputs: &dyn Inputs, stream: &Stream<'_>) -> io::Result<Outcome> {
         let mut gathered = stream::gather(&self.rest, inputs, stream, &mut || Ok(()))?;
         let mut results = self.results(&gathered);
         for result in self.recorded {
@@ -215,7 +259,11 @@ impl<'m> Reuse<'m> {
             results.push(result);
         }
         results.sort_by(|a, b| a.unit.cmp(&b.unit));
-        Ok((stream::finish(gathered), results))
+        Ok(Outcome {
+            streamed: stream::finish(gathered),
+            results,
+            kept: self.kept,
+        })
     }
 
     /// The result of each evaluated unit in `gathered`. One whose window had an error, or one of
@@ -241,6 +289,19 @@ impl<'m> Reuse<'m> {
             })
             .collect()
     }
+}
+
+/// What a run of a manifest gave.
+#[derive(Debug)]
+pub struct Outcome {
+    /// The evaluation of the units that do not keep what the last run gave them. Of the names
+    /// that several of its assets received, none is given; the names of kept units are not
+    /// looked at.
+    pub streamed: Streamed,
+    /// The result of each of those units, in name order.
+    pub results: Vec<UnitResult>,
+    /// The units that keep what the last run of their region gave them, in manifest order.
+    pub kept: Vec<String>,
 }
 
 /// The evaluation that `results` give together, as [`Reuse::evaluate`] gives it from them: their
@@ -309,6 +370,12 @@ fn identity(converter: &dyn Converter) -> String {
     )
 }
 
+/// Whether a result whose unit has roots of converters with the identities `forms` holds for an
+/// evaluation whose converters have the identities `current`.
+fn holds_with(forms: &BTreeSet<String>, current: &BTreeSet<&str>) -> bool {
+    forms.iter().all(|form| current.contains(form.as_str()))
+}
+
 /// The key of `unit`, when the content of every bundle of its window is identified.
 fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
     let mut text = format!("{context}unit {}\n", units.entries[unit].name);
@@ -356,12 +423,9 @@ impl Record {
         serde_json::to_vec(self).map_err(io::Error::other)
     }
 
-    /// Whether the record holds for an evaluation whose converters have the identities `current`:
-    /// whether each converter the unit has roots of is among them.
-    fn holds_with(&self, current: &BTreeSet<&str>) -> bool {
-        self.forms
-            .iter()
-            .all(|form| current.contains(form.as_str()))
+    /// The [`identity`] of each converter the unit has roots of.
+    pub fn forms(&self) -> &BTreeSet<String> {
+        &self.forms
     }
 
     /// The record of each unit that gave something in `gathered`, by unit name, with the

@@ -626,7 +626,9 @@ fn fetch_and_evaluate(
             fetcher.fetch_all(entries, concurrency, &arriving)
         });
         let evaluate = || match evaluating {
-            Evaluating::Listed(reuse) => reuse.evaluate(&arriving, stream),
+            Evaluating::Listed(reuse) => reuse
+                .evaluate(&arriving, stream)
+                .map(|outcome| (outcome.streamed, outcome.results)),
             Evaluating::Read { mut manifest, only } => {
                 let _span = stream.recorder.span("manifest", "dependencies", "");
                 let threads = stream.options.threads;

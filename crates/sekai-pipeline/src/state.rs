@@ -1,13 +1,15 @@
-//! The state of a region between runs: what each bundle of its last version holds and names, what
-//! each unit gave, and the assets built from tables. A run reads it at its start and writes what
-//! changed at its end.
+//! The state of a region between runs: what each bundle of its last version holds and names, the
+//! key of each unit whose result a later run may keep, the names that the assets of every unit
+//! claim, and the assets built from tables. A run reads it at its start and writes what changed
+//! at its end. What a unit gave is not part of it: that is the record of the unit (see
+//! [`crate::records`]), which a run reads only for a unit it needs.
 //!
 //! Each table of the state is a sequence of rows in name order, cut into chunks whose ends depend
 //! only on the rows ([`sekai_format::chunks`]). A chunk is a state file of gzipped JSON named by
 //! its SHA-256, and the root of the region names the chunks of every table. A run therefore
 //! writes only the chunks that hold a changed row, and the root.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Read, Write};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -20,8 +22,9 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::claims::{self, Claims, Ruling};
 use crate::eval::{Output, hex, parallel};
-use crate::reuse::UnitResult;
+use crate::reuse::{UnitKey, UnitResult};
 use crate::version::BundleFiles;
 
 /// The format version of the root of a region.
@@ -74,6 +77,28 @@ pub struct BundleState {
     pub content: String,
     /// Each serialized file of the bundle and the external files it names.
     pub files: BundleFiles,
+}
+
+/// A unit whose result a later run of the region may keep.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitState {
+    /// The name of the unit.
+    pub unit: String,
+    /// The key of the unit.
+    pub key: UnitKey,
+    /// The identity of each converter the unit has roots of.
+    pub forms: BTreeSet<String>,
+}
+
+impl UnitState {
+    /// The state of the unit of `result`, when a later run may keep the result.
+    pub fn of(result: &UnitResult) -> Option<Self> {
+        Some(Self {
+            unit: result.unit.clone(),
+            key: *result.reusable_key()?,
+            forms: result.record.forms().clone(),
+        })
+    }
 }
 
 /// An asset built from tables.
@@ -136,8 +161,10 @@ pub struct RegionState {
     pub published: BTreeMap<String, String>,
     /// The bundles of the version, in name order.
     pub bundles: Vec<BundleState>,
-    /// The result of each unit, in name order.
-    pub units: Vec<UnitResult>,
+    /// The units whose results a later run may keep, in name order.
+    pub units: Vec<UnitState>,
+    /// The names that the assets of every unit claim, in name order.
+    pub claims: Vec<Claims>,
     /// The assets built from tables, in name order.
     pub tables: Vec<TableOutput>,
 }
@@ -151,6 +178,7 @@ pub struct Root {
     published: BTreeMap<String, String>,
     bundles: Vec<ChunkReference>,
     units: Vec<ChunkReference>,
+    claims: Vec<ChunkReference>,
     tables: Vec<ChunkReference>,
 }
 
@@ -168,7 +196,7 @@ struct ChunkReference {
 impl Root {
     /// The SHA-256 of every chunk the root names.
     fn chunks(&self) -> HashSet<&str> {
-        let tables = [&self.bundles, &self.units, &self.tables];
+        let tables = [&self.bundles, &self.units, &self.claims, &self.tables];
         let chunks = tables.into_iter().flatten();
         chunks.map(|chunk| chunk.sha256.as_str()).collect()
     }
@@ -195,46 +223,41 @@ fn invalid(message: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-impl Row for BundleState {
-    type Key = String;
-    const MOST: usize = 4 * AVERAGE as usize;
+/// Makes each table row a [`Row`] keyed by its name field.
+macro_rules! state_rows {
+    ($($row:ty => $key:ident),* $(,)?) => {$(
+        impl Row for $row {
+            type Key = String;
+            const MOST: usize = 4 * AVERAGE as usize;
 
-    fn key(&self) -> &String {
-        &self.name
-    }
+            fn key(&self) -> &String {
+                &self.$key
+            }
 
-    fn ends_chunk(&self) -> bool {
-        chunks::ends_after(self.name.as_bytes(), AVERAGE)
-    }
+            fn ends_chunk(&self) -> bool {
+                chunks::ends_after(self.$key.as_bytes(), AVERAGE)
+            }
+        }
+    )*};
 }
 
-impl Row for UnitResult {
-    type Key = String;
-    const MOST: usize = 4 * AVERAGE as usize;
-
-    fn key(&self) -> &String {
-        &self.unit
-    }
-
-    fn ends_chunk(&self) -> bool {
-        chunks::ends_after(self.unit.as_bytes(), AVERAGE)
-    }
-}
-
-impl Row for TableOutput {
-    type Key = String;
-    const MOST: usize = 4 * AVERAGE as usize;
-
-    fn key(&self) -> &String {
-        &self.name
-    }
-
-    fn ends_chunk(&self) -> bool {
-        chunks::ends_after(self.name.as_bytes(), AVERAGE)
-    }
-}
+state_rows!(BundleState => name, UnitState => unit, Claims => name, TableOutput => name);
 
 impl RegionState {
+    /// Advances the units and claims of the state by a run that kept what the units `kept` gave
+    /// last time and gave `results` for every other unit. Returns a ruling for each name the
+    /// owner of which may have changed.
+    pub fn advance(&mut self, kept: &[String], results: &[UnitResult]) -> Vec<Ruling> {
+        let kept: BTreeSet<&str> = kept.iter().map(String::as_str).collect();
+        self.units.retain(|unit| kept.contains(unit.unit.as_str()));
+        self.units.extend(results.iter().filter_map(UnitState::of));
+        self.units.sort_by(|a, b| a.unit.cmp(&b.unit));
+        let new = results.iter().flat_map(UnitResult::claims);
+        let (claims, rulings) = claims::advance(std::mem::take(&mut self.claims), &kept, new);
+        self.claims = claims;
+        rulings
+    }
+
     /// The state of `region` that `files` keep, and its root, or `None` when they keep none.
     /// The chunks are read on up to `threads` threads.
     pub fn read(
@@ -258,6 +281,7 @@ impl RegionState {
             published: root.published.clone(),
             bundles: read_table(files, &root.bundles, threads)?,
             units: read_table(files, &root.units, threads)?,
+            claims: read_table(files, &root.claims, threads)?,
             tables: read_table(files, &root.tables, threads)?,
         };
         Ok(Some((state, root)))
@@ -281,6 +305,7 @@ impl RegionState {
             published: self.published.clone(),
             bundles: write_table(files, &self.bundles, &kept, threads, &mut written)?,
             units: write_table(files, &self.units, &kept, threads, &mut written)?,
+            claims: write_table(files, &self.claims, &kept, threads, &mut written)?,
             tables: write_table(files, &self.tables, &kept, threads, &mut written)?,
         };
         let bytes = serde_json::to_vec(&root).map_err(io::Error::other)?;
@@ -382,14 +407,26 @@ fn encode<R: Serialize>(rows: &[R]) -> io::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reuse::{Record, UnitKey};
+    use crate::claims::Claimant;
+    use crate::reuse::Record;
 
-    fn unit(name: String, reusable: bool) -> UnitResult {
-        UnitResult {
-            key: Some(UnitKey(Sha256::digest(name.as_bytes()).into())),
+    fn key(name: &str) -> UnitKey {
+        UnitKey(Sha256::digest(name.as_bytes()).into())
+    }
+
+    fn unit(name: String) -> UnitState {
+        UnitState {
+            key: key(&name),
             unit: name,
-            reusable,
-            record: Record::default(),
+            forms: BTreeSet::from(["texture 1".to_owned()]),
+        }
+    }
+
+    fn claimant(unit: &str) -> Claimant {
+        Claimant {
+            unit: unit.to_owned(),
+            form: "texture".to_owned(),
+            failed: false,
         }
     }
 
@@ -405,7 +442,13 @@ mod tests {
                     files: vec![(format!("CAB-{i}"), vec!["CAB-0".to_owned()])],
                 })
                 .collect(),
-            units: (0..units).map(|i| unit(name(i), i % 7 != 0)).collect(),
+            units: (0..units).map(|i| unit(name(i))).collect(),
+            claims: (0..units)
+                .map(|i| Claims {
+                    name: format!("{}/asset", name(i)),
+                    claimants: vec![claimant(&name(i))],
+                })
+                .collect(),
             tables: vec![TableOutput {
                 name: "table/a".to_owned(),
                 form: "costume".to_owned(),
@@ -432,7 +475,7 @@ mod tests {
         let all = first.write(&files, "jp", None, 4).unwrap();
         let (mut second, root) = RegionState::read(&files, "jp", 4).unwrap().unwrap();
         second.version = "1.1".to_owned();
-        second.units[12_345].reusable = !second.units[12_345].reusable;
+        second.units[12_345].key = key("another");
         second.bundles.remove(777);
 
         let changed = second.write(&files, "jp", Some(&root), 4).unwrap();
@@ -441,6 +484,76 @@ mod tests {
         assert!(changed.bytes * 10 < all.bytes, "{changed:?} {all:?}");
         let (read, _) = RegionState::read(&files, "jp", 4).unwrap().unwrap();
         assert_eq!(read, second);
+    }
+
+    fn unit_of(claimant: &Option<Claimant>) -> Option<&str> {
+        claimant.as_ref().map(|c| c.unit.as_str())
+    }
+
+    /// The result of `unit`, which gave an asset of each of `names`.
+    fn result(unit: &str, names: &[&str]) -> UnitResult {
+        let assets: Vec<serde_json::Value> = names
+            .iter()
+            .map(|name| {
+                serde_json::json!({
+                    "name": name, "form": "texture", "document": "", "error": null,
+                    "logical": "", "path_id": 0,
+                })
+            })
+            .collect();
+        let record = serde_json::json!({
+            "forms": ["texture 1"], "assets": assets, "unnamed": [], "outside": [],
+        });
+        UnitResult {
+            unit: unit.to_owned(),
+            key: Some(key(unit)),
+            reusable: true,
+            record: Record::read(&serde_json::to_vec(&record).unwrap()).unwrap(),
+        }
+    }
+
+    #[test]
+    fn advancing_keeps_the_units_kept_and_takes_the_results_of_the_others() {
+        let mut state = RegionState::default();
+        let first = [
+            result("a", &["x"]),
+            result("b", &["y"]),
+            result("c", &["z"]),
+        ];
+        state.advance(&[], &first);
+        let owners = |state: &RegionState| -> Vec<(String, Option<String>)> {
+            let owner = |c: &Claims| c.owner().map(|o| o.unit.clone());
+            state
+                .claims
+                .iter()
+                .map(|c| (c.name.clone(), owner(c)))
+                .collect()
+        };
+        assert_eq!(owners(&state).len(), 3);
+
+        // b now gives x as well, c is gone, and a is kept.
+        let rulings = state.advance(&["a".to_owned()], &[result("b", &["x", "y"])]);
+        let units: Vec<&str> = state.units.iter().map(|u| u.unit.as_str()).collect();
+        assert_eq!(units, ["a", "b"]);
+        assert_eq!(
+            owners(&state),
+            [
+                ("x".to_owned(), None),
+                ("y".to_owned(), Some("b".to_owned()))
+            ]
+        );
+        let ruled: Vec<(&str, Option<&str>, Option<&str>)> = rulings
+            .iter()
+            .map(|r| (r.name.as_str(), unit_of(&r.before), unit_of(&r.after)))
+            .collect();
+        assert_eq!(
+            ruled,
+            [
+                ("x", Some("a"), None),
+                ("y", Some("b"), Some("b")),
+                ("z", Some("c"), None)
+            ]
+        );
     }
 
     #[test]

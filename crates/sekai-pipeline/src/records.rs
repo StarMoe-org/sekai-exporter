@@ -13,8 +13,8 @@ use sekai_catalog::{Derivations, Derived, Holdings, Key, MemoryHoldings, Store};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{hex, parallel};
-use crate::reuse::{Record, Recorded, UnitKey, UnitResult};
-use crate::state::StateFiles;
+use crate::reuse::{Found, Record, Recorded, UnitKey, UnitResult};
+use crate::state::{StateFiles, UnitState};
 
 fn unit_file(key: &UnitKey) -> String {
     let key = key.to_string();
@@ -154,43 +154,36 @@ impl Derivations for Records<'_> {
 }
 
 impl Recorded for Records<'_> {
-    fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Record>> {
+    fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
         let bytes = self.files.read(&unit_file(key))?;
-        Ok(bytes.and_then(|bytes| Record::read(&bytes)))
+        let record = bytes.and_then(|bytes| Record::read(&bytes));
+        Ok(record.map(Found::Recorded))
     }
 }
 
-/// The results a run of a region takes: those of the last run of the region, and else the
-/// records of every run.
+/// What a run of a region finds of earlier runs: the units that the last run of the region left
+/// under the same key, which keep what they gave, and else the records of every run.
 pub struct Earlier<'a> {
-    /// The result of each unit of the last version of the region, by name.
-    units: HashMap<&'a str, &'a UnitResult>,
+    /// The units of the last version of the region whose results a later run may keep, by name.
+    units: HashMap<&'a str, &'a UnitState>,
     records: &'a dyn Recorded,
 }
 
 impl<'a> Earlier<'a> {
-    /// The results of `units`, the last run of the region, and of `records`.
-    pub fn new(units: &'a [UnitResult], records: &'a dyn Recorded) -> Self {
+    /// The units `units` that the last run of the region left, and the records `records`.
+    pub fn new(units: &'a [UnitState], records: &'a dyn Recorded) -> Self {
         let units = units
             .iter()
             .map(|unit| (unit.unit.as_str(), unit))
             .collect();
         Self { units, records }
     }
-
-    /// Whether the last run of the region gave the result of `unit`, under the same key.
-    pub fn gave(&self, unit: &UnitResult) -> bool {
-        let earlier = self.units.get(unit.unit.as_str());
-        earlier.is_some_and(|earlier| earlier.reusable_key() == unit.reusable_key())
-    }
 }
 
 impl Recorded for Earlier<'_> {
-    fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Record>> {
+    fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
         match self.units.get(unit) {
-            Some(earlier) if earlier.reusable_key() == Some(key) => {
-                Ok(Some(earlier.record.clone()))
-            }
+            Some(earlier) if earlier.key == *key => Ok(Some(Found::Kept(earlier.forms.clone()))),
             _ => self.records.record(unit, key),
         }
     }
@@ -252,7 +245,7 @@ mod tests {
         let key = |unit: &UnitResult| unit.key.unwrap();
         assert_eq!(
             records.record("a", &key(&kept)).unwrap(),
-            Some(Record::default())
+            Some(Found::Recorded(Record::default()))
         );
         assert_eq!(records.record("b", &key(&broken)).unwrap(), None);
     }
@@ -266,20 +259,22 @@ mod tests {
         let elsewhere = unit("shared", 3, true);
         records.write(&[&elsewhere], 1).unwrap();
 
-        let last = [unit("a", 1, true), unit("b", 2, false)];
+        let last: Vec<UnitState> = [unit("a", 1, true), unit("b", 2, false)]
+            .iter()
+            .filter_map(UnitState::of)
+            .collect();
         let earlier = Earlier::new(&last, &records);
-        assert!(earlier.record("a", &UnitKey([1; 32])).unwrap().is_some());
+        assert_eq!(
+            earlier.record("a", &UnitKey([1; 32])).unwrap(),
+            Some(Found::Kept(Default::default()))
+        );
         // A result that may not be taken, or one under another key, is not.
         assert!(earlier.record("b", &UnitKey([2; 32])).unwrap().is_none());
         assert!(earlier.record("a", &UnitKey([9; 32])).unwrap().is_none());
         // Another region recorded this one.
-        assert!(
-            earlier
-                .record("shared", &UnitKey([3; 32]))
-                .unwrap()
-                .is_some()
+        assert_eq!(
+            earlier.record("shared", &UnitKey([3; 32])).unwrap(),
+            Some(Found::Recorded(Record::default()))
         );
-        assert!(earlier.gave(&last[0]));
-        assert!(!earlier.gave(&unit("a", 9, true)));
     }
 }

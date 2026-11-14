@@ -17,7 +17,9 @@ use sekai_convert::{
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
+use sekai_pipeline::records::Earlier;
 use sekai_pipeline::reuse::{self, Reuse, UnitResult};
+use sekai_pipeline::state::RegionState;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
 use sekai_unity::{NoBlockCache, NoClasses};
@@ -262,9 +264,9 @@ fn streamed_reusing_with(
     let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
     let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
     let reused = reuse.reused();
-    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
-    records.put(&reusable(&results)).unwrap();
-    (evaluated, reused, streamed)
+    let outcome = reuse.evaluate(run.inputs, &stream).unwrap();
+    records.put(&reusable(&outcome.results)).unwrap();
+    (evaluated, reused, outcome.streamed)
 }
 
 /// The records of the `results` that a later run may take, by key.
@@ -328,6 +330,53 @@ fn recorded_units_give_the_result_of_evaluating_them() {
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
     assert_eq!(content(&third), content(&whole));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
+    let root = scratch("kept");
+    let store = LocalStore::open(&root).unwrap();
+    let derivations = MemoryDerivations::default();
+    let converters = converters();
+    let records = MemoryUnitRecords::default();
+    let first = Run {
+        manifest: identified_manifest("d1", "s1"),
+        ..Run::default()
+    };
+    let stream = stream_of(&first, &store, &converters, &derivations);
+    let reuse = Reuse::new(&first.manifest, &stream, &records).unwrap();
+    let outcome = reuse.evaluate(first.inputs, &stream).unwrap();
+    let mut state = RegionState::default();
+    state.advance(&outcome.kept, &outcome.results);
+
+    // fixture_data has new content. No record is written, so what fixture_scene gave comes from
+    // the state alone.
+    let inputs = Fixtures::default();
+    let second = Run {
+        manifest: identified_manifest("d2", "s1"),
+        inputs: &inputs,
+        ..Run::default()
+    };
+    let stream = stream_of(&second, &store, &converters, &derivations);
+    let earlier = Earlier::new(&state.units, &records);
+    let reuse = Reuse::new(&second.manifest, &stream, &earlier).unwrap();
+    let outcome = reuse.evaluate(second.inputs, &stream).unwrap();
+    assert_eq!(outcome.kept, ["fixture_scene"]);
+    let units: Vec<&str> = outcome.results.iter().map(|r| r.unit.as_str()).collect();
+    assert_eq!(units, ["fixture_data"]);
+    assert_eq!(
+        *inputs.0.lock().unwrap(),
+        BTreeMap::from([("fixture_data".to_owned(), 1)])
+    );
+
+    // The claims are those of the first run, and fixture_data has its new key.
+    let mut again = state.clone();
+    again.advance(&outcome.kept, &outcome.results);
+    assert_eq!(again.claims, state.claims);
+    let keys = |state: &RegionState| state.units.iter().map(|u| u.key).collect::<Vec<_>>();
+    assert_eq!(keys(&again)[1], keys(&state)[1]);
+    assert_ne!(keys(&again)[0], keys(&state)[0]);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -426,7 +475,9 @@ fn every_unit_has_a_result_and_only_recordable_ones_are_reusable() {
     };
     let stream = stream_of(&run, &store, &converters, &derivations);
     let reuse = Reuse::new(&run.manifest, &stream, &MemoryUnitRecords::default()).unwrap();
-    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
+    let reuse::Outcome {
+        streamed, results, ..
+    } = reuse.evaluate(run.inputs, &stream).unwrap();
 
     let units: Vec<(&str, bool, bool)> = results
         .iter()

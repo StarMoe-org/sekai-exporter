@@ -396,11 +396,12 @@ fn export_version(
         Some(unit_records) => Records::listed(files, &held, unit_records),
         None => Records::new(files, &held),
     };
+    let requests = site.requests(options.threads);
     let backed = Backed {
         records: &records,
         catalog: &opened.catalog,
+        requests,
     };
-    let requests = site.requests(options.threads);
     let baseline = Baseline::read(files, site, region_name, &objects, requests)?;
     let Baseline {
         mut state,
@@ -568,7 +569,7 @@ impl Opened {
             let reuse = if options.force {
                 Reuse::refresh(&manifest, &stream)
             } else {
-                Reuse::new(&manifest, &stream, &earlier, &known)
+                Reuse::new(&manifest, &stream, &earlier, backed.requests, &known)
             };
             let reuse = reuse.map_err(|e| e.to_string())?;
             println!("units {} reused {}", manifest.len(), reuse.reused());

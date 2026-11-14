@@ -319,7 +319,7 @@ fn streamed_reusing_with(
     let store = LocalStore::open(root).unwrap();
     let derivations = MemoryDerivations::default();
     let stream = stream_of(run, &store, converters, &derivations);
-    let reuse = Reuse::new(&run.manifest, &stream, records, run.indexes).unwrap();
+    let reuse = Reuse::new(&run.manifest, &stream, records, 2, run.indexes).unwrap();
     let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
     let reused = reuse.reused();
     let outcome = reuse.evaluate(run.inputs, &stream).unwrap();
@@ -406,7 +406,7 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
         ..Run::default()
     };
     let stream = stream_of(&first, &store, &converters, &derivations);
-    let reuse = Reuse::new(&first.manifest, &stream, &records, first.indexes).unwrap();
+    let reuse = Reuse::new(&first.manifest, &stream, &records, 2, first.indexes).unwrap();
     let outcome = reuse.evaluate(first.inputs, &stream).unwrap();
     let mut state = RegionState::default();
     state.advance(Vec::new(), &outcome);
@@ -421,7 +421,7 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
     };
     let stream = stream_of(&second, &store, &converters, &derivations);
     let earlier = Earlier::new(&state, &records);
-    let reuse = Reuse::new(&second.manifest, &stream, &earlier, second.indexes).unwrap();
+    let reuse = Reuse::new(&second.manifest, &stream, &earlier, 2, second.indexes).unwrap();
     let outcome = reuse.evaluate(second.inputs, &stream).unwrap();
     assert_eq!(outcome.kept, ["fixture_scene"]);
     let units: Vec<&str> = outcome.results.iter().map(|r| r.unit.as_str()).collect();
@@ -580,7 +580,7 @@ fn every_unit_has_a_result_and_only_recordable_ones_are_reusable() {
     };
     let stream = stream_of(&run, &store, &converters, &derivations);
     let records = MemoryUnitRecords::default();
-    let reuse = Reuse::new(&run.manifest, &stream, &records, run.indexes).unwrap();
+    let reuse = Reuse::new(&run.manifest, &stream, &records, 2, run.indexes).unwrap();
     let reuse::Outcome {
         streamed, results, ..
     } = reuse.evaluate(run.inputs, &stream).unwrap();

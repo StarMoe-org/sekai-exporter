@@ -17,6 +17,8 @@ use sekai_pipeline::reuse::{Found, Recorded, UnitKey};
 pub(super) struct Backed<'a> {
     pub(super) records: &'a Records<'a>,
     pub(super) catalog: &'a CatalogDerivations,
+    /// How many records are read at once.
+    pub(super) requests: usize,
 }
 
 impl Derivations for Backed<'_> {

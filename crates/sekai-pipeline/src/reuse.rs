@@ -217,30 +217,35 @@ impl<'m> Reuse<'m> {
     /// Splits `manifest` into the units that `recorded` finds a result for, as an evaluation
     /// with `stream` would give it, and the entries the other units need. Whether a unit has roots
     /// of a form its result was not looked for in is read from the bundle indexes of `indexes`. A
-    /// unit that is in the window of another unit to evaluate is evaluated too.
+    /// unit that is in the window of another unit to evaluate is evaluated too. Up to `lookups`
+    /// units are looked up in `recorded` at once.
     pub fn new(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
         recorded: &dyn Recorded,
+        lookups: usize,
         indexes: &dyn EntryIndexes,
     ) -> io::Result<Self> {
-        Self::split(manifest, stream, indexes, |unit, key| {
+        Self::split(manifest, stream, indexes, lookups, |unit, key| {
             recorded.record(unit, key)
         })
     }
 
     /// Evaluates every unit of `manifest`.
     pub fn refresh(manifest: &'m [Entry], stream: &Stream<'_>) -> io::Result<Self> {
-        Self::split(manifest, stream, &NoEntryIndexes, |_, _| Ok(None))
+        let threads = stream.options.threads;
+        Self::split(manifest, stream, &NoEntryIndexes, threads, |_, _| Ok(None))
     }
 
-    /// Splits `manifest` with what `lookup` finds for each unit and key.
+    /// Splits `manifest` with what `lookup` finds for each unit and key, `lookups` units at once.
     fn split(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
         indexes: &dyn EntryIndexes,
+        lookups: usize,
         lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Found>> + Sync,
     ) -> io::Result<Self> {
+        let _span = stream.recorder.span("plan", "reuse", "");
         let units = Units::new(manifest);
         let context = context(stream);
         let identities = identities(stream);
@@ -260,8 +265,7 @@ impl<'m> Reuse<'m> {
             };
             Ok((key, found.map(|found| found.scanned_for(&scanned))))
         };
-        // A lookup may wait on a request, so the units are looked up on the threads of the run.
-        let found = eval::parallel(units.entries.len(), stream.options.threads, found_for);
+        let found = eval::parallel(units.entries.len(), lookups, found_for);
         let found = found.into_iter().collect::<io::Result<Vec<_>>>()?;
         let needed: BTreeSet<usize> = found
             .iter()

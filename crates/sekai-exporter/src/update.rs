@@ -402,7 +402,10 @@ fn export_version(
         catalog: &opened.catalog,
         requests,
     };
-    let baseline = Baseline::read(files, site, region_name, &objects, requests)?;
+    let baseline = {
+        let _span = monitor.span("plan", "baseline", region_name);
+        Baseline::read(files, site, region_name, &objects, requests)?
+    };
     let Baseline {
         mut state,
         root,

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use sekai_catalog::{LocalStore, MemoryUnitRecords};
+use sekai_catalog::{LocalStore, MemoryUnitRecords, UnitRecords};
 use sekai_convert::image::Texture;
 use sekai_convert::{
     Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex,
@@ -17,7 +17,7 @@ use sekai_convert::{
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::naming::Candidate;
-use sekai_pipeline::reuse::Reuse;
+use sekai_pipeline::reuse::{self, Reuse, UnitResult};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options};
 use sekai_unity::{NoBlockCache, NoClasses};
@@ -239,7 +239,8 @@ fn stream_of<'a>(
 }
 
 /// What an evaluation of `run` that takes the results `records` hold gives: the names of the
-/// entries it evaluated, how many units took a recorded result, and the result.
+/// entries it evaluated, how many units took a recorded result, and the result. The results a
+/// later run may take are recorded in `records`.
 fn streamed_reusing(
     root: &Path,
     run: &Run<'_>,
@@ -261,8 +262,18 @@ fn streamed_reusing_with(
     let reuse = Reuse::new(&run.manifest, &stream, records).unwrap();
     let evaluated = reuse.rest().iter().map(|e| e.name.clone()).collect();
     let reused = reuse.reused();
-    let streamed = reuse.evaluate(run.inputs, &stream).unwrap();
+    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
+    records.put(&reusable(&results)).unwrap();
     (evaluated, reused, streamed)
+}
+
+/// The records of the `results` that a later run may take, by key.
+fn reusable(results: &[UnitResult]) -> Vec<([u8; 32], Vec<u8>)> {
+    let reusable = results.iter().filter_map(|result| {
+        let key = result.reusable_key()?;
+        Some((key.0, result.record.bytes().unwrap()))
+    });
+    reusable.collect()
 }
 
 /// `streamed` without the counts of derivations, which follow from what earlier runs recorded.
@@ -400,6 +411,38 @@ fn a_unit_without_identified_contents_or_with_errors_is_not_recorded() {
     assert!(streamed.errors.iter().any(|e| e.name == "absent"));
     // fixture_data and absent read the missing bundle; fixture_scene alone is recorded.
     assert_eq!(records.len(), 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_unit_has_a_result_and_only_recordable_ones_are_reusable() {
+    let root = scratch("results");
+    let store = LocalStore::open(&root).unwrap();
+    let derivations = MemoryDerivations::default();
+    let converters = converters();
+    let run = Run {
+        manifest: identified_manifest("", "s1"),
+        ..Run::default()
+    };
+    let stream = stream_of(&run, &store, &converters, &derivations);
+    let reuse = Reuse::new(&run.manifest, &stream, &MemoryUnitRecords::default()).unwrap();
+    let (streamed, results) = reuse.evaluate(run.inputs, &stream).unwrap();
+
+    let units: Vec<(&str, bool, bool)> = results
+        .iter()
+        .map(|r| (r.unit.as_str(), r.key.is_some(), r.reusable))
+        .collect();
+    assert_eq!(
+        units,
+        [
+            ("fixture_data", false, false),
+            ("fixture_scene", true, true)
+        ]
+    );
+    // The results give back the assets of the evaluation.
+    let given = reuse::evaluation(&results, &stream).unwrap();
+    assert_eq!(given.outputs, streamed.evaluation.outputs);
+    assert_eq!(given.unnamed, streamed.evaluation.unnamed);
     std::fs::remove_dir_all(root).unwrap();
 }
 

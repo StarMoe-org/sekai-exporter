@@ -17,16 +17,21 @@
 //! A record holds the assets of its unit before the assets of different bundles that are given the
 //! same name are told apart, since that depends on the other units; it happens once all of them are
 //! gathered. Records are shared only by runs that name roots in the same way.
+//!
+//! An evaluation gives the result of every unit, also of those that cannot be recorded, so that
+//! the state of a region holds what each unit of its last version gave.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
 use std::io;
 
 use sekai_catalog::UnitRecords;
+use sekai_catalog::store::parse_hex;
 use sekai_convert::Converter;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
-use crate::eval::{self, Output};
+use crate::eval::{self, Evaluation, Output};
 use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Units};
 
 /// The revision of how units are evaluated and recorded, which is part of every unit key. It also
@@ -34,66 +39,119 @@ use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Un
 /// converter does not cover its rule.
 const REVISION: &str = "unit 2";
 
+/// The key of a unit: the SHA-256 of what its result follows from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct UnitKey(pub [u8; 32]);
+
+impl fmt::Display for UnitKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&eval::hex(&self.0))
+    }
+}
+
+impl Serialize for UnitKey {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for UnitKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse_hex(&text)
+            .map(Self)
+            .ok_or_else(|| serde::de::Error::custom("a unit key is 64 hexadecimal digits"))
+    }
+}
+
+/// Where a run finds the results that earlier runs recorded.
+pub trait Recorded: Sync {
+    /// The result recorded for `unit` under `key`, if there is one.
+    fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Record>>;
+}
+
+impl<T: UnitRecords + ?Sized> Recorded for T {
+    fn record(&self, _unit: &str, key: &UnitKey) -> io::Result<Option<Record>> {
+        Ok(self.get(&key.0)?.and_then(|bytes| Record::read(&bytes)))
+    }
+}
+
+/// What a unit gave in a run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitResult {
+    /// The name of the unit.
+    pub unit: String,
+    /// The key of the unit, when the content of every bundle of its window is identified.
+    pub key: Option<UnitKey>,
+    /// Whether a later run may take the result: the unit has a key, no bundle of its window had
+    /// an error and none of its assets failed to convert.
+    pub reusable: bool,
+    /// What the unit gave.
+    pub record: Record,
+}
+
+impl UnitResult {
+    /// The key under which a later run may take the result, if it may.
+    pub fn reusable_key(&self) -> Option<&UnitKey> {
+        self.key.as_ref().filter(|_| self.reusable)
+    }
+}
+
 /// A manifest split into the units that take a recorded result and the entries the others need.
 pub struct Reuse<'m> {
-    /// The recorded result of each unit that takes one, by unit name.
-    recorded: Vec<(&'m str, Record)>,
-    /// The units to evaluate whose results can be recorded.
-    keyed: Vec<Keyed<'m>>,
+    /// The units that take a recorded result.
+    recorded: Vec<UnitResult>,
+    /// The units to evaluate.
+    pending: Vec<Pending<'m>>,
     /// The entries to evaluate: the windows of the units without a recorded result, and the
     /// entries that are no unit, such as those that share a name, so their errors are reported.
     rest: Vec<Entry>,
     /// The [`identity`] of each converter, by form.
     identities: BTreeMap<&'static str, String>,
-    records: &'m dyn UnitRecords,
 }
 
 /// A unit to evaluate, with its key and the names of the bundles of its window.
-struct Keyed<'m> {
+struct Pending<'m> {
     unit: &'m str,
-    key: [u8; 32],
+    key: Option<UnitKey>,
     window: Vec<&'m str>,
 }
 
 impl<'m> Reuse<'m> {
-    /// Splits `manifest` into the units that `records` hold a result for, as an evaluation with
-    /// `stream` would give it, and the entries the other units need. A unit that is in the window
-    /// of another unit to evaluate is evaluated too.
+    /// Splits `manifest` into the units that `recorded` holds a result for, as an evaluation
+    /// with `stream` would give it, and the entries the other units need. A unit that is in the
+    /// window of another unit to evaluate is evaluated too.
     pub fn new(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
-        records: &'m dyn UnitRecords,
+        recorded: &dyn Recorded,
     ) -> io::Result<Self> {
-        Self::split(manifest, stream, records, |key| {
-            Ok(records.get(key)?.and_then(|bytes| Record::read(&bytes)))
-        })
+        Self::split(manifest, stream, |unit, key| recorded.record(unit, key))
     }
 
-    /// Evaluates every unit of `manifest` and records the results in `records` again, replacing
-    /// what they held.
-    pub fn refresh(
-        manifest: &'m [Entry],
-        stream: &Stream<'_>,
-        records: &'m dyn UnitRecords,
-    ) -> io::Result<Self> {
-        Self::split(manifest, stream, records, |_| Ok(None))
+    /// Evaluates every unit of `manifest`.
+    pub fn refresh(manifest: &'m [Entry], stream: &Stream<'_>) -> io::Result<Self> {
+        Self::split(manifest, stream, |_, _| Ok(None))
     }
 
-    /// Splits `manifest` with the recorded result that `lookup` finds for each unit key.
+    /// Splits `manifest` with the recorded result that `lookup` finds for each unit and key.
     fn split(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
-        records: &'m dyn UnitRecords,
-        lookup: impl Fn(&[u8; 32]) -> io::Result<Option<Record>>,
+        lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Record>>,
     ) -> io::Result<Self> {
         let units = Units::new(manifest);
         let context = context(stream);
         let identities = identities(stream);
         let current: BTreeSet<&str> = identities.values().map(String::as_str).collect();
+        let name = |entry: usize| units.entries[entry].name.as_str();
         let found = (0..units.entries.len())
             .map(|unit| {
                 let key = key(&context, &units, unit);
-                let record = key.as_ref().map(&lookup).transpose()?.flatten();
+                let record = match &key {
+                    Some(key) => lookup(name(unit), key)?,
+                    None => None,
+                };
                 Ok((key, record.filter(|record| record.holds_with(&current))))
             })
             .collect::<io::Result<Vec<_>>>()?;
@@ -104,30 +162,31 @@ impl<'m> Reuse<'m> {
             .flat_map(|(unit, _)| units.windows[unit].iter().copied())
             .collect();
 
-        let name = |entry: usize| units.entries[entry].name.as_str();
         let mut recorded = Vec::new();
-        let mut keyed = Vec::new();
+        let mut pending = Vec::new();
         for (unit, (key, record)) in found.into_iter().enumerate() {
             match record {
-                Some(record) if !needed.contains(&unit) => recorded.push((name(unit), record)),
-                _ => keyed.extend(key.map(|key| {
-                    Keyed {
-                        unit: name(unit),
-                        key,
-                        window: units.windows[unit]
-                            .iter()
-                            .map(|&entry| name(entry))
-                            .collect(),
-                    }
-                })),
+                Some(record) if !needed.contains(&unit) => recorded.push(UnitResult {
+                    unit: name(unit).to_owned(),
+                    key,
+                    reusable: true,
+                    record,
+                }),
+                _ => pending.push(Pending {
+                    unit: name(unit),
+                    key,
+                    window: units.windows[unit]
+                        .iter()
+                        .map(|&entry| name(entry))
+                        .collect(),
+                }),
             }
         }
         Ok(Self {
             recorded,
-            keyed,
+            pending,
             rest: entries_to_evaluate(manifest, &units, &needed),
             identities,
-            records,
         })
     }
 
@@ -142,38 +201,56 @@ impl<'m> Reuse<'m> {
     }
 
     /// Evaluates the entries of [`Reuse::rest`], whose bytes come from `inputs`, as
-    /// [`stream::evaluate`] does, records the result of each unit whose window had no error, and
-    /// adds the recorded results of the other units.
-    pub fn evaluate(self, inputs: &dyn Inputs, stream: &Stream<'_>) -> io::Result<Streamed> {
+    /// [`stream::evaluate`] does, and adds the recorded results of the other units. Returns the
+    /// evaluation and the result of every unit, in name order.
+    pub fn evaluate(
+        self,
+        inputs: &dyn Inputs,
+        stream: &Stream<'_>,
+    ) -> io::Result<(Streamed, Vec<UnitResult>)> {
         let mut gathered = stream::gather(&self.rest, inputs, stream, &mut || Ok(()))?;
-        self.record(&gathered)?;
-        for (unit, record) in self.recorded {
-            record.add_to(unit, stream, &mut gathered)?;
+        let mut results = self.results(&gathered);
+        for result in self.recorded {
+            result.record.add_to(&result.unit, stream, &mut gathered)?;
+            results.push(result);
         }
-        Ok(stream::finish(gathered))
+        results.sort_by(|a, b| a.unit.cmp(&b.unit));
+        Ok((stream::finish(gathered), results))
     }
 
-    /// Records the result of each keyed unit in `gathered` whose window had no error and none of
-    /// whose assets failed to convert.
-    fn record(&self, gathered: &Gathered) -> io::Result<()> {
+    /// The result of each evaluated unit in `gathered`. One whose window had an error, or one of
+    /// whose assets failed to convert, is not reusable.
+    fn results(&self, gathered: &Gathered) -> Vec<UnitResult> {
         let broken: HashSet<&str> = gathered
             .errors
             .keys()
             .map(|(name, _)| name.as_str())
             .collect();
         let mut records = Record::of_each(gathered, &self.identities);
-        let mut results = Vec::new();
-        for keyed in &self.keyed {
-            if gathered.failed.contains(keyed.unit)
-                || keyed.window.iter().any(|bundle| broken.contains(bundle))
-            {
-                continue;
-            }
-            let record = records.remove(keyed.unit).unwrap_or_default();
-            results.push((keyed.key, record.bytes()?));
-        }
-        self.records.put(&results)
+        self.pending
+            .iter()
+            .map(|pending| {
+                let failed = gathered.failed.contains(pending.unit)
+                    || pending.window.iter().any(|bundle| broken.contains(bundle));
+                UnitResult {
+                    unit: pending.unit.to_owned(),
+                    key: pending.key,
+                    reusable: pending.key.is_some() && !failed,
+                    record: records.remove(pending.unit).unwrap_or_default(),
+                }
+            })
+            .collect()
     }
+}
+
+/// The evaluation that `results` give together, as [`Reuse::evaluate`] gives it from them: their
+/// assets in name order, with the names that more than one asset received left out.
+pub fn evaluation(results: &[UnitResult], stream: &Stream<'_>) -> io::Result<Evaluation> {
+    let mut gathered = Gathered::default();
+    for result in results {
+        result.record.add_to(&result.unit, stream, &mut gathered)?;
+    }
+    Ok(stream::finish(gathered).evaluation)
 }
 
 /// The entries of `manifest` to evaluate: those of the units in `needed`, and those that are no
@@ -233,7 +310,7 @@ fn identity(converter: &dyn Converter) -> String {
 }
 
 /// The key of `unit`, when the content of every bundle of its window is identified.
-fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<[u8; 32]> {
+fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
     let mut text = format!("{context}unit {}\n", units.entries[unit].name);
     for &entry in &units.windows[unit] {
         let entry = units.entries[entry];
@@ -242,13 +319,13 @@ fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<[u8; 32]> {
         }
         text.push_str(&format!("bundle {} {}\n", entry.name, entry.content));
     }
-    Some(Sha256::digest(text.as_bytes()).into())
+    Some(UnitKey(Sha256::digest(text.as_bytes()).into()))
 }
 
 /// What a unit gave: its assets, the roots it left unnamed and the references that leave its
 /// window, with the converters that gave them.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct Record {
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Record {
     /// The [`identity`] of each converter the unit has roots of.
     forms: BTreeSet<String>,
     assets: Vec<RecordedAsset>,
@@ -258,7 +335,7 @@ struct Record {
 }
 
 /// An asset of a unit, with the logical path and path ID of its root.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RecordedAsset {
     name: String,
     form: String,
@@ -270,11 +347,12 @@ struct RecordedAsset {
 
 impl Record {
     /// The record in `bytes`, or `None` when they hold none, so that the unit is evaluated again.
-    fn read(bytes: &[u8]) -> Option<Self> {
+    pub fn read(bytes: &[u8]) -> Option<Self> {
         serde_json::from_slice(bytes).ok()
     }
 
-    fn bytes(&self) -> io::Result<Vec<u8>> {
+    /// The record as bytes, which [`Record::read`] reads back.
+    pub fn bytes(&self) -> io::Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(io::Error::other)
     }
 
@@ -323,14 +401,14 @@ impl Record {
     }
 
     /// Adds the record to `gathered` as what `unit` gave in an evaluation with `stream`.
-    fn add_to(self, unit: &str, stream: &Stream<'_>, gathered: &mut Gathered) -> io::Result<()> {
+    fn add_to(&self, unit: &str, stream: &Stream<'_>, gathered: &mut Gathered) -> io::Result<()> {
         let invalid = |what: String| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("the record of unit {unit} {what}"),
             )
         };
-        for asset in self.assets {
+        for asset in &self.assets {
             let form = stream
                 .converters
                 .iter()
@@ -342,20 +420,20 @@ impl Record {
                 .parse()
                 .map_err(|_| invalid(format!("names the document {}", asset.document)))?;
             let output = Output {
-                name: asset.name,
+                name: asset.name.clone(),
                 bundle: unit.to_owned(),
                 form,
                 document,
-                error: asset.error,
+                error: asset.error.clone(),
             };
-            gathered
-                .outputs
-                .push((output, asset.logical, asset.path_id));
+            let logical = asset.logical.clone();
+            gathered.outputs.push((output, logical, asset.path_id));
         }
-        let unnamed = self.unnamed.into_iter();
-        let unnamed = unnamed.map(|(logical, path_id)| (unit.to_owned(), logical, path_id));
+        let unnamed = self.unnamed.iter();
+        let unnamed =
+            unnamed.map(|(logical, path_id)| (unit.to_owned(), logical.clone(), *path_id));
         gathered.unnamed.extend(unnamed);
-        gathered.outside.extend(self.outside);
+        gathered.outside.extend(self.outside.iter().cloned());
         Ok(())
     }
 }

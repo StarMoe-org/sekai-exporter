@@ -9,14 +9,14 @@ use std::thread;
 
 use sekai_catalog::db::{BundleRow, Catalog, CostRow, IndexCache, PublicationRow};
 use sekai_catalog::store::{ObjectWriter, parse_hex};
-use sekai_catalog::{Key, LocalStore, Objects};
+use sekai_catalog::{Key, LocalStore, Objects, UnitRecords};
 use sekai_convert::tables::TableConverter;
 use sekai_format::identity::VersionIdentity;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_game::obfuscation::Deobfuscating;
 use sekai_game::sink::Sink;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
-use sekai_pipeline::reuse::Reuse;
+use sekai_pipeline::reuse::{Reuse, UnitResult};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, parallel};
 use sekai_publish::Layout;
@@ -601,16 +601,24 @@ impl Evaluating<'_> {
     }
 }
 
+/// What a run evaluated.
+struct Evaluated {
+    streamed: Streamed,
+    /// The result of each unit of a listed manifest, in name order.
+    units: Vec<UnitResult>,
+    /// How many bundles could not be fetched.
+    failed: usize,
+}
+
 /// Fetches `entries` while `evaluating` runs, so the first segments convert while later bundles
-/// are still on their way. Returns the evaluation and how many bundles could not be fetched.
-/// Fails if the store, the records or the catalog do.
+/// are still on their way. Fails if the store, the records or the catalog do.
 fn fetch_and_evaluate(
     fetcher: &Fetcher<'_>,
     entries: &[BundleEntry],
     concurrency: usize,
     evaluating: Evaluating<'_>,
     stream: &Stream<'_>,
-) -> Result<(Streamed, usize), String> {
+) -> Result<Evaluated, String> {
     let arriving = Arriving::new(fetcher.inputs);
     thread::scope(|scope| {
         let fetching = scope.spawn(|| {
@@ -629,14 +637,20 @@ fn fetch_and_evaluate(
                     stream.indexes,
                     threads,
                 )?;
-                stream::evaluate(&select(manifest, only), &arriving, stream)
+                let streamed = stream::evaluate(&select(manifest, only), &arriving, stream)?;
+                Ok((streamed, Vec::new()))
             }
         };
-        let streamed = evaluate().map_err(|e| e.to_string());
+        let evaluated = evaluate().map_err(|e| e.to_string());
         let failed = fetching
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-        Ok((streamed?, failed))
+        let (streamed, units) = evaluated?;
+        Ok(Evaluated {
+            streamed,
+            units,
+            failed,
+        })
     })
 }
 
@@ -921,7 +935,7 @@ fn export_version(
     };
     let evaluating = if listed {
         let reuse = if options.force {
-            Reuse::refresh(&manifest, &stream, catalog)
+            Reuse::refresh(&manifest, &stream)
         } else {
             Reuse::new(&manifest, &stream, catalog)
         };
@@ -935,8 +949,12 @@ fn export_version(
         }
     };
     let entries = in_opening_order(&all, evaluating.entries());
-    let (mut streamed, failed) =
-        fetch_and_evaluate(&fetcher, &entries, concurrency, evaluating, &stream)?;
+    let Evaluated {
+        mut streamed,
+        units,
+        failed,
+    } = fetch_and_evaluate(&fetcher, &entries, concurrency, evaluating, &stream)?;
+    record_units(catalog, &units)?;
     if failed > 0 || report(&streamed) > 0 {
         return Ok(Outcome::Incomplete);
     }
@@ -1038,6 +1056,18 @@ fn export_version(
         evaluation.reused
     );
     Ok(Outcome::Updated(identity))
+}
+
+/// Records in `catalog` the result of each of `units` that a later run may take.
+fn record_units(catalog: &Catalog, units: &[UnitResult]) -> Result<(), String> {
+    let reusable = units.iter().filter_map(|unit| {
+        let key = unit.reusable_key()?;
+        Some(unit.record.bytes().map(|bytes| (key.0, bytes)))
+    });
+    let reusable = reusable.collect::<io::Result<Vec<_>>>();
+    reusable
+        .and_then(|reusable| catalog.put(&reusable))
+        .map_err(|e| format!("catalog: {e}"))
 }
 
 /// The converters that build assets from game data tables.

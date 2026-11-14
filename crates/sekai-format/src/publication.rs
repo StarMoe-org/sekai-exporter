@@ -164,9 +164,6 @@ pub struct Pointer {
     /// none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
-    /// The SHA-256 of the SQLite index (`store/<aa>/<sha256>.sqlite`), as lowercase hexadecimal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sqlite: Option<String>,
     /// The SHA-256 of the root of the path index (`store/<aa>/<sha256>.json`), as lowercase
     /// hexadecimal.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -293,167 +293,6 @@ fn publishing_again_changes_nothing() {
 }
 
 #[test]
-fn sqlite_index_is_deterministic_and_valid() {
-    use sekai_format::asset::SourceObject;
-
-    let s = Scratch::new("sqlite");
-    let store = s.store();
-    let root = s.0.join("published");
-
-    let mut bindings = Vec::new();
-    // An asset of several members.
-    let l2d_members: Vec<MemberFile> = [
-        (
-            "model",
-            "json",
-            "application/json",
-            br#"{"version":3}"#.as_slice(),
-        ),
-        (
-            "moc3",
-            "moc3",
-            "application/octet-stream",
-            b"MOC3_BINARY_DATA".as_slice(),
-        ),
-        (
-            "textures/00",
-            "webp",
-            "image/webp",
-            b"RIFF_WEBP_00".as_slice(),
-        ),
-    ]
-    .into_iter()
-    .map(|(role, ext, mime, data)| {
-        let key = store.put(data, ext).unwrap();
-        MemberFile {
-            role: role.to_owned(),
-            sha256: hex(&key),
-            size: data.len() as u64,
-            extension: ext.to_owned(),
-            media_type: mime.to_owned(),
-        }
-    })
-    .collect();
-    let l2d_doc = AssetDocument {
-        format: FORMAT.to_owned(),
-        version: VERSION,
-        name: "chara/model_a".to_owned(),
-        form: "live2d-model".to_owned(),
-        form_version: 2,
-        fingerprint: "11".repeat(32),
-        sources: vec![SourceObject {
-            bundle: "chara_bundle".to_owned(),
-            path_id: 10,
-            class: "MonoBehaviour".to_owned(),
-        }],
-        members: l2d_members,
-        resources: Vec::new(),
-        references: Vec::new(),
-        error: None,
-    };
-    bindings.push(Binding {
-        name: "chara/model_a".to_owned(),
-        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
-    });
-
-    // Enough standalone textures + an overflow-sized source list to exercise multi-page B-trees
-    // and SQLite payload overflow chains.
-    for idx in 0..220u32 {
-        let name = format!("tex/group_{:02}/img_{idx:03}", idx % 7);
-        let payload = format!("webp-bytes-{idx}").into_bytes();
-        let mkey = store.put(&payload, "webp").unwrap();
-        let sources = if idx == 0 {
-            (0..120)
-                .map(|sidx| SourceObject {
-                    bundle: format!("tex_bundle_long_identifier_{sidx:03}"),
-                    path_id: i64::from(sidx + 1),
-                    class: "Texture2D".to_owned(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let doc = AssetDocument {
-            format: FORMAT.to_owned(),
-            version: VERSION,
-            name: name.clone(),
-            form: "texture".to_owned(),
-            form_version: 1,
-            fingerprint: "44".repeat(32),
-            sources,
-            members: vec![MemberFile {
-                role: "image".to_owned(),
-                sha256: hex(&mkey),
-                size: payload.len() as u64,
-                extension: "webp".to_owned(),
-                media_type: "image/webp".to_owned(),
-            }],
-            resources: Vec::new(),
-            references: Vec::new(),
-            error: None,
-        };
-        bindings.push(Binding {
-            name,
-            document: store.put(&doc.to_bytes().unwrap(), "json").unwrap(),
-        });
-    }
-    bindings.push(failed(&store, "broken/item"));
-
-    let forward = plan("v1", &bindings, &store, 2).unwrap();
-    let mut rev_bindings = bindings;
-    rev_bindings.reverse();
-    let backward = plan("v1", &rev_bindings, &store, 2).unwrap();
-
-    let sqlite_of = |plan: &Plan| {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
-        publication.pointer.sqlite.unwrap()
-    };
-    let sqlite = sqlite_of(&forward);
-    assert_eq!(sqlite, sqlite_of(&backward));
-    let pointer = publish(
-        &Objects::local(&store),
-        &root,
-        "jp/canonical",
-        &forward,
-        Layout::Sqlite,
-        2,
-    )
-    .unwrap();
-    assert_eq!(pointer.sqlite.as_deref(), Some(sqlite.as_str()));
-
-    // SQLite itself checks the database, through the `sqlite3` module of Python.
-    let python = ["python3", "python"]
-        .into_iter()
-        .find(|python| {
-            std::process::Command::new(python)
-                .args(["-c", "import sqlite3"])
-                .status()
-                .is_ok_and(|s| s.success())
-        })
-        .expect("the integrity check needs Python with its sqlite3 module");
-    let db_path = store.path(&Key {
-        sha256: sekai_catalog::store::parse_hex(&sqlite).unwrap(),
-        extension: "sqlite".to_owned(),
-    });
-    let output = std::process::Command::new(python)
-        .args([
-            "-c",
-            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); \
-             assert c.execute('PRAGMA integrity_check').fetchall() == [('ok',)]; \
-             assert c.execute('SELECT COUNT(*) FROM assets').fetchone() == (222,); \
-             assert c.execute('SELECT COUNT(*) FROM files').fetchone() == (223,)",
-        ])
-        .arg(&db_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "sqlite3 integrity check failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn a_plan_reads_the_documents_that_only_the_destination_holds() {
     let s = Scratch::new("read-back");
     let earlier = LocalStore::open(s.0.join("earlier")).unwrap();
@@ -552,8 +391,10 @@ fn a_publication_gives_back_the_documents_of_the_assets_it_names() {
         .chain(["missing/one"]);
     let mut expected: Vec<Binding> = wanted.into_iter().cloned().collect();
     expected.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(previous.bindings(&store, names).unwrap(), expected);
-    let nothing = Previous::default().bindings(&store, ["group_00/item_00000"]);
+    assert_eq!(previous.lookup(&store).bindings(names).unwrap(), expected);
+    let nothing = Previous::default()
+        .lookup(&store)
+        .bindings(["group_00/item_00000"]);
     assert!(nothing.unwrap().is_empty());
 }
 
@@ -590,7 +431,8 @@ fn a_directory_is_replaced_file_by_file() {
     );
     let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
 
-    let directory = previous.directory(&store, "group_03").unwrap();
+    let lookup = previous.lookup(&store);
+    let directory = lookup.directory("group_03").unwrap();
     let paths: Vec<&str> = directory.iter().map(|f| f.path.as_str()).collect();
     let expected: Vec<&str> = assets
         .files
@@ -600,7 +442,7 @@ fn a_directory_is_replaced_file_by_file() {
         .collect();
     assert!(expected.len() > 100);
     assert_eq!(paths, expected);
-    assert!(previous.directory(&store, "group_3").unwrap().is_empty());
+    assert!(lookup.directory("group_3").unwrap().is_empty());
 
     // The directory now holds its files but the first, and a new one.
     let added = File {

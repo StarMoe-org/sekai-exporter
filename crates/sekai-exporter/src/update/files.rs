@@ -4,8 +4,9 @@
 //! among the bundles it has loaded, and it loads some bundles, such as shared shaders, that no
 //! manifest entry lists as a dependency. A bundle therefore also depends on each bundle that holds
 //! a file its serialized files name as an external file. Which files a bundle holds and names
-//! follows from its bytes, so the catalog keeps them by their SHA-256, and a later run finds them
-//! there without fetching the bundle.
+//! follows from its content, so the state of the region keeps them under the content each bundle
+//! had, and the catalog keeps them by the SHA-256 of its bytes. A later run finds them there
+//! without fetching the bundle.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -13,6 +14,7 @@ use std::sync::PoisonError;
 
 use sekai_catalog::store::parse_hex;
 use sekai_game::cdn::BundleEntry;
+use sekai_pipeline::state::BundleState;
 use sekai_pipeline::stream::{self, Entry};
 use sekai_pipeline::version::{BundleFiles, bundle_files, indexed_files};
 use sekai_pipeline::{BundleIndexes, parallel};
@@ -20,21 +22,21 @@ use sekai_unity::BlockCache;
 
 use super::{Fetcher, declared_content, open_input};
 
-/// The serialized files of a bundle, under the SHA-256 of its bytes.
+/// The serialized files of a bundle.
 struct Files {
-    sha256: [u8; 32],
     files: BundleFiles,
-    /// Whether the catalog already records them.
-    recorded: bool,
+    /// The SHA-256 of the bundle, when the catalog does not record its files yet.
+    unrecorded: Option<[u8; 32]>,
 }
 
 impl Fetcher<'_> {
     /// Adds to the dependencies of each entry of `manifest` the bundles that hold the external
     /// files it names and that it does not list. Which files a bundle holds and names is read from
-    /// the catalog, from `indexes`, or else from the bundle, which is fetched from the entries of
-    /// `all`, `concurrency` at a time, when `fetchable` accepts its name. A bundle whose files stay
-    /// unknown neither gains dependencies nor holds files for others. What the run reads is
-    /// recorded in the catalog.
+    /// the state of the region, from the catalog, from `indexes`, or else from the bundle, which
+    /// is fetched from the entries of `all`, `concurrency` at a time, when `fetchable` accepts its
+    /// name. A bundle whose files stay unknown neither gains dependencies nor holds files for
+    /// others. What the run reads is recorded in the catalog. Returns the files of each entry
+    /// whose content is identified, for the state of the region, in name order.
     pub(super) fn add_file_dependencies(
         &self,
         all: &[BundleEntry],
@@ -43,7 +45,7 @@ impl Fetcher<'_> {
         cache: &dyn BlockCache,
         indexes: &dyn BundleIndexes,
         concurrency: usize,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<BundleState>, String> {
         let mut known = self.known_files(manifest, indexes, concurrency)?;
         let unknown: HashSet<&str> = manifest
             .iter()
@@ -62,7 +64,20 @@ impl Fetcher<'_> {
                 *files = read.remove(&entry.name);
             }
         }
-        self.record_files(known.iter().flatten().filter(|files| !files.recorded))?;
+        self.record_files(known.iter().flatten())?;
+        let mut stated: Vec<BundleState> = manifest
+            .iter()
+            .zip(&known)
+            .filter(|(entry, _)| !entry.content.is_empty())
+            .filter_map(|(entry, files)| {
+                Some(BundleState {
+                    name: entry.name.clone(),
+                    content: entry.content.clone(),
+                    files: files.as_ref()?.files.clone(),
+                })
+            })
+            .collect();
+        stated.sort_by(|a, b| a.name.cmp(&b.name));
 
         let none = BundleFiles::new();
         let bundles: Vec<(&str, &BundleFiles)> = manifest
@@ -89,10 +104,10 @@ impl Fetcher<'_> {
             known.iter().flatten().count(),
             entries.len(),
         );
-        Ok(())
+        Ok(stated)
     }
 
-    /// The files of each entry of `manifest` that the catalog or `indexes` know, read
+    /// The files of each entry of `manifest` that the state, the catalog or `indexes` know, read
     /// `concurrency` at a time.
     fn known_files(
         &self,
@@ -109,25 +124,41 @@ impl Fetcher<'_> {
             .map_err(|e| format!("catalog: {e}"))
     }
 
-    /// The files of the bundle of `entry`, when the catalog or `indexes` know its bytes.
+    /// The files of the bundle of `entry`: as the state of the region has them under the content
+    /// of the entry, or as the catalog or `indexes` know them by its bytes.
     fn known(&self, entry: &Entry, indexes: &dyn BundleIndexes) -> io::Result<Option<Files>> {
+        if let Some(files) = self.stated_files(entry) {
+            return Ok(Some(Files {
+                files: files.clone(),
+                unrecorded: None,
+            }));
+        }
         let Some(sha256) = self.known_sha256(entry)? else {
             return Ok(None);
         };
         let recorded = self.catalog.bundle_files(&sha256)?;
         if let Some(files) = recorded.and_then(|bytes| serde_json::from_slice(&bytes).ok()) {
             return Ok(Some(Files {
-                sha256,
                 files,
-                recorded: true,
+                unrecorded: None,
             }));
         }
         let indexed = indexed_files(&sha256, indexes)?;
         Ok(indexed.map(|files| Files {
-            sha256,
             files,
-            recorded: false,
+            unrecorded: Some(sha256),
         }))
+    }
+
+    /// The files of the bundle of `entry` that the state of the region has under its content.
+    fn stated_files(&self, entry: &Entry) -> Option<&BundleFiles> {
+        if entry.content.is_empty() {
+            return None;
+        }
+        let bundles = self.bundles;
+        let found = bundles.binary_search_by(|bundle| bundle.name.as_str().cmp(&entry.name));
+        let bundle = &bundles[found.ok()?];
+        (bundle.content == entry.content).then_some(&bundle.files)
     }
 
     /// The SHA-256 of the bundle of `entry`: as this run fetched it, or as the catalog records it
@@ -160,9 +191,8 @@ impl Fetcher<'_> {
             let input = open_input(self.inputs, name, key)?;
             let files = bundle_files(&input, cache, indexes)?.ok();
             Ok(files.map(|files| Files {
-                sha256: key.sha256,
                 files,
-                recorded: false,
+                unrecorded: Some(key.sha256),
             }))
         });
         let mut files = HashMap::new();
@@ -174,13 +204,16 @@ impl Fetcher<'_> {
         Ok(files)
     }
 
-    /// Records `files` in the catalog.
+    /// Records in the catalog those of `files` that it does not record yet.
     fn record_files<'f>(&self, files: impl Iterator<Item = &'f Files>) -> Result<(), String> {
         let write = || -> io::Result<()> {
             let mut batch = self.catalog.write()?;
             for files in files {
+                let Some(sha256) = &files.unrecorded else {
+                    continue;
+                };
                 let bytes = serde_json::to_vec(&files.files).map_err(io::Error::other)?;
-                batch.put_bundle_files(&files.sha256, &bytes)?;
+                batch.put_bundle_files(sha256, &bytes)?;
             }
             batch.commit()
         };

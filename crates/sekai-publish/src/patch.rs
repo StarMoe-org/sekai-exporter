@@ -6,9 +6,8 @@
 //! kept. A publication from nothing is a change from an empty previous one, so both are written by
 //! the same code and give the same documents.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use sekai_catalog::{Key, LocalStore, Store};
 use sekai_format::chunks::{self, Patched, Row};
@@ -22,9 +21,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::layout::{Layout, Object, Publication};
-use crate::plan::{
-    Binding, Contribution, DOCUMENT_SUFFIX, File, Plan, PublishError, document_path, hex,
-};
+use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path, hex};
 
 const JSON: &str = "application/json";
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
@@ -171,29 +168,56 @@ impl Previous {
         Ok(Self { index, paths })
     }
 
-    /// The file published at each of `paths` that the publication has, in path order, read from
-    /// the chunks of its path index in `store` that hold them.
-    pub fn files<'p>(
+    /// The files of the publication, looked up in the chunks of its path index, which are read
+    /// from `store` as the lookups need them and kept.
+    pub fn lookup<'s>(&self, store: &'s dyn Store) -> Lookup<'s> {
+        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
+        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        Lookup(Table::new(store, firsts, read_paths))
+    }
+}
+
+/// The files of a previous publication, by path. Each chunk of its path index is read once, when
+/// a lookup first needs it, and lookups may run on several threads at once.
+pub struct Lookup<'a>(Table<'a, PathFile>);
+
+impl Lookup<'_> {
+    /// The file at `path`, if the publication has one.
+    pub fn file(&self, path: &str) -> Result<Option<PathFile>, PublishError> {
+        self.0.get(path)
+    }
+
+    /// The asset document of the asset `name`, if the publication has the asset.
+    pub fn document(&self, name: &str) -> Result<Option<Key>, PublishError> {
+        let file = self.file(&document_path(name))?;
+        Ok(file.map(|file| Key {
+            sha256: file.sha256,
+            extension: file.extension,
+        }))
+    }
+
+    /// The asset document of each asset of `names` that the publication has, in name order.
+    pub fn bindings<'n>(
         &self,
-        store: &dyn Store,
-        paths: impl IntoIterator<Item = &'p str>,
-    ) -> Result<Vec<PathFile>, PublishError> {
-        let table = self.path_table(store);
-        let mut paths: Vec<&str> = paths.into_iter().collect();
-        paths.sort_unstable();
-        paths.dedup();
-        let files = paths.into_iter().map(|path| table.get(path));
-        files.filter_map(Result::transpose).collect()
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Vec<Binding>, PublishError> {
+        let mut names: Vec<&str> = names.into_iter().collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut bindings = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(document) = self.document(name)? {
+                let name = name.to_owned();
+                bindings.push(Binding { name, document });
+            }
+        }
+        Ok(bindings)
     }
 
     /// The files directly in `directory`, in path order: those at `<directory>/<file>`, where the
-    /// file has no `/`. Only the chunks of the path index that hold such paths are read.
-    pub fn directory(
-        &self,
-        store: &dyn Store,
-        directory: &str,
-    ) -> Result<Vec<PathFile>, PublishError> {
-        let table = self.path_table(store);
+    /// file has no `/`. Only the chunks that hold such paths are read.
+    pub fn directory(&self, directory: &str) -> Result<Vec<PathFile>, PublishError> {
+        let table = &self.0;
         let prefix = format!("{directory}/");
         // Every path in the directory sorts before this, since `0` follows `/`.
         let after = format!("{directory}0");
@@ -211,41 +235,6 @@ impl Previous {
             files.extend(inside.cloned());
         }
         Ok(files)
-    }
-
-    /// The path index, whose chunks are read from `store` as they are needed.
-    fn path_table<'s>(&self, store: &'s dyn Store) -> Table<'s, PathFile> {
-        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
-        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
-        Table::new(store, firsts, read_paths)
-    }
-
-    /// The asset document of each asset of `names` that the publication has, in name order.
-    pub fn bindings<'n>(
-        &self,
-        store: &dyn Store,
-        names: impl IntoIterator<Item = &'n str>,
-    ) -> Result<Vec<Binding>, PublishError> {
-        let paths: Vec<String> = names.into_iter().map(document_path).collect();
-        let files = self.files(store, paths.iter().map(String::as_str))?;
-        let mut bindings: Vec<Binding> = files
-            .into_iter()
-            .map(|file| {
-                let name = file
-                    .path
-                    .strip_suffix(DOCUMENT_SUFFIX)
-                    .unwrap_or(&file.path);
-                Binding {
-                    name: name.to_owned(),
-                    document: Key {
-                        sha256: file.sha256,
-                        extension: file.extension,
-                    },
-                }
-            })
-            .collect();
-        bindings.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(bindings)
     }
 }
 
@@ -300,7 +289,7 @@ struct Table<'a, R> {
     /// The first key and the object of each chunk.
     chunks: Vec<(String, String)>,
     read: ReadChunk<R>,
-    loaded: RefCell<HashMap<usize, Rc<Vec<R>>>>,
+    loaded: Mutex<HashMap<usize, Arc<Vec<R>>>>,
 }
 
 impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
@@ -313,16 +302,19 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
             store,
             chunks: chunks.collect(),
             read,
-            loaded: RefCell::default(),
+            loaded: Mutex::default(),
         }
     }
 
-    fn rows(&self, position: usize) -> Result<Rc<Vec<R>>, PublishError> {
-        if let Some(rows) = self.loaded.borrow().get(&position) {
-            return Ok(Rc::clone(rows));
+    /// The rows of the chunk at `position`, read once. Two threads that ask at once may both read
+    /// it, and keep the same rows.
+    fn rows(&self, position: usize) -> Result<Arc<Vec<R>>, PublishError> {
+        let loaded = || self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(rows) = loaded().get(&position) {
+            return Ok(Arc::clone(rows));
         }
-        let rows = Rc::new((self.read)(self.store, &self.chunks[position].1)?);
-        self.loaded.borrow_mut().insert(position, Rc::clone(&rows));
+        let rows = Arc::new((self.read)(self.store, &self.chunks[position].1)?);
+        loaded().insert(position, Arc::clone(&rows));
         Ok(rows)
     }
 
@@ -348,7 +340,7 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
     /// The chunks of the table after `edits`.
     fn patch(&self, edits: BTreeMap<String, Option<R>>) -> Result<Vec<Patched<R>>, PublishError> {
         let firsts: Vec<String> = self.chunks.iter().map(|(first, _)| first.clone()).collect();
-        let load = |position| self.rows(position).map(Rc::unwrap_or_clone);
+        let load = |position| self.rows(position).map(Arc::unwrap_or_clone);
         chunks::patch(&firsts, load, edits)
     }
 }
@@ -430,7 +422,6 @@ pub fn apply(
             published_version: version.to_owned(),
             revision,
             root,
-            sqlite: None,
             paths: Some(paths),
         },
         objects,

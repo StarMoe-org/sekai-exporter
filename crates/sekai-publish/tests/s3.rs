@@ -1,6 +1,6 @@
 //! Publishing to an S3-compatible bucket, against a local server that checks signatures.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use sekai_catalog::{Holdings, Key, LocalStore, MemoryHoldings, NoRemote, Objects, Remote};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, MemberFile};
-use sekai_publish::s3::{Bucket, Credentials, S3, publish, publish_with};
-use sekai_publish::{Binding, Layout, Plan, documents, plan};
+use sekai_publish::s3::{Bucket, Credentials, S3, publish};
+use sekai_publish::{Binding, Plan, plan};
 use sha2::{Digest, Sha256};
 
 const ACCESS_KEY: &str = "TESTACCESSKEY";
@@ -561,8 +561,8 @@ fn a_wrong_key_is_refused_and_writes_no_pointer() {
     let server = Server::start();
     let plan = sample(&store, "v1", b"mask");
     let e = publish(&objects, &server.client("wrong"), "jp/canonical", &plan).unwrap_err();
-    // Reading the live pointer is the first signed request, and its refusal stops the publication.
-    assert_eq!(e.stage, "pointer");
+    // The first upload is refused, which stops the publication before any pointer.
+    assert_eq!(e.stage, "files");
     assert!(server.object(POINTER).is_none());
     assert_eq!(server.state.puts.load(Ordering::SeqCst), 0);
 }
@@ -804,27 +804,8 @@ fn an_object_larger_than_ten_megabytes_is_read_back() {
 
 #[test]
 fn the_bucket_keeps_state_files_outside_its_publications() {
-    let s = Scratch::new("state");
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
-    let local = s.0.join("catalog.redb");
-    std::fs::write(&local, b"local catalog").unwrap();
-
-    // A bucket that keeps no state leaves the local file alone.
-    assert!(!s3.fetch_state("catalog.redb", &local).unwrap());
-    assert_eq!(std::fs::read(&local).unwrap(), b"local catalog");
-
-    s3.store_state("catalog.redb", &local).unwrap();
-    let name = "out/state/catalog.redb";
-    assert_eq!(server.object(name).as_deref(), Some(&b"local catalog"[..]));
-    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
-    assert_eq!(cache_control, "private, no-store");
-
-    let pulled = s.0.join("pulled.redb");
-    assert!(s3.fetch_state("catalog.redb", &pulled).unwrap());
-    assert_eq!(std::fs::read(&pulled).unwrap(), b"local catalog");
-
-    // Small state files are read and written as bytes.
     let read_to_end = |body: &mut dyn std::io::Read| {
         let mut bytes = Vec::new();
         body.read_to_end(&mut bytes).map(|_| bytes)
@@ -838,6 +819,8 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
     let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
     assert_eq!(read.as_deref(), Some(&b"{}"[..]));
+    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    assert_eq!(cache_control, "private, no-store");
 }
 
 /// Bytes of 33 MiB and a few more, which make three parts.
@@ -847,126 +830,26 @@ fn large_state() -> Vec<u8> {
 
 #[test]
 fn a_large_state_file_is_written_in_parts() {
-    let s = Scratch::new("parts");
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
     let bytes = large_state();
-    let local = s.0.join("catalog.redb");
-    std::fs::write(&local, &bytes).unwrap();
 
-    s3.store_state("catalog.redb", &local).unwrap();
-    s3.write_state("documents/jp.pack.gz", &bytes).unwrap();
-    for name in ["out/state/catalog.redb", "out/state/documents/jp.pack.gz"] {
-        assert!(server.object(name) == Some(bytes.clone()), "{name}");
-        let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
-        assert_eq!(cache_control, "private, no-store");
-    }
-    assert_eq!(server.state.parts.load(Ordering::SeqCst), 6);
+    s3.write_state("regions/jp.json", &bytes).unwrap();
+    let name = "out/state/regions/jp.json";
+    assert!(server.object(name) == Some(bytes), "{name}");
+    let cache_control = server.state.cache_controls.lock().unwrap()[name].clone();
+    assert_eq!(cache_control, "private, no-store");
+    assert_eq!(server.state.parts.load(Ordering::SeqCst), 3);
     assert!(server.state.uploads.lock().unwrap().is_empty());
 }
 
 #[test]
 fn a_failed_upload_in_parts_is_aborted() {
-    let s = Scratch::new("aborted");
     let server = Server::start();
     let s3 = server.client(SECRET_KEY);
-    let local = s.0.join("catalog.redb");
-    std::fs::write(&local, large_state()).unwrap();
     server.refuse_after(Some(1));
 
-    assert!(s3.store_state("catalog.redb", &local).is_err());
-    assert_eq!(server.object("out/state/catalog.redb"), None);
+    assert!(s3.write_state("regions/jp.json", &large_state()).is_err());
+    assert_eq!(server.object("out/state/regions/jp.json"), None);
     assert!(server.state.uploads.lock().unwrap().is_empty());
-}
-
-#[test]
-fn sqlite_layout_sets_cache_control_and_uploads_only_new_objects() {
-    let s = Scratch::new("sqlite-s3");
-    let store = s.store();
-    let held = MemoryHoldings::default();
-    let objects = Objects {
-        local: &store,
-        held: &held,
-        remote: &NoRemote,
-    };
-    let server = Server::start();
-    let s3 = server.client(SECRET_KEY);
-
-    let l2d_members: Vec<MemberFile> = [
-        (
-            "model",
-            "json",
-            "application/json",
-            br#"{"v":3}"#.as_slice(),
-        ),
-        (
-            "moc3",
-            "moc3",
-            "application/octet-stream",
-            b"MOC3".as_slice(),
-        ),
-    ]
-    .into_iter()
-    .map(|(role, ext, mime, bytes)| {
-        let key = store.put(bytes, ext).unwrap();
-        MemberFile {
-            role: role.to_owned(),
-            sha256: hex(&key.sha256),
-            size: bytes.len() as u64,
-            extension: ext.to_owned(),
-            media_type: mime.to_owned(),
-        }
-    })
-    .collect();
-    let l2d_doc = AssetDocument {
-        format: FORMAT.to_owned(),
-        version: VERSION,
-        name: "chara/miku".to_owned(),
-        form: "live2d-model".to_owned(),
-        form_version: 2,
-        fingerprint: "aa".to_owned(),
-        sources: Vec::new(),
-        members: l2d_members,
-        resources: Vec::new(),
-        references: Vec::new(),
-        error: None,
-    };
-    let l2d_binding = Binding {
-        name: "chara/miku".to_owned(),
-        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
-    };
-    let tex_binding = asset(&store, "tex/bg", &[("image", b"bg-webp")]);
-
-    let referred = |plan: &Plan| -> BTreeSet<Key> {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
-        publication.objects.into_iter().map(|o| o.key).collect()
-    };
-    let v1 = plan("v1", &[l2d_binding.clone(), tex_binding.clone()], &store, 2).unwrap();
-    let (pointer, report) =
-        publish_with(&objects, &s3, "jp/canonical", &v1, Layout::Sqlite).unwrap();
-    assert_eq!((report.uploaded, report.present), (referred(&v1).len(), 0));
-    assert!(pointer.sqlite.is_some() && pointer.paths.is_some());
-
-    let sqlite_key = Key {
-        sha256: sekai_catalog::store::parse_hex(pointer.sqlite.as_deref().unwrap()).unwrap(),
-        extension: "sqlite".to_owned(),
-    };
-    let sqlite_name = object_name(&sqlite_key);
-    assert!(server.object(&sqlite_name).is_some());
-    let ccs = server.state.cache_controls.lock().unwrap().clone();
-    assert_eq!(
-        ccs.get(&sqlite_name).map(String::as_str),
-        Some("public, max-age=31536000, immutable")
-    );
-    assert_eq!(ccs.get(POINTER).map(String::as_str), Some("no-cache"));
-
-    // A second version uploads only the objects the first did not have.
-    server.state.heads.store(0, Ordering::SeqCst);
-    let extra = asset(&store, "tex/fg", &[("image", b"fg-webp")]);
-    let v2 = plan("v2", &[l2d_binding, tex_binding, extra], &store, 2).unwrap();
-    let (_, report) = publish_with(&objects, &s3, "jp/canonical", &v2, Layout::Sqlite).unwrap();
-    let all = referred(&v2);
-    let new = all.difference(&referred(&v1)).count();
-    assert_eq!((report.uploaded, report.present), (new, all.len() - new));
-    assert_eq!(server.state.heads.load(Ordering::SeqCst), 0);
 }

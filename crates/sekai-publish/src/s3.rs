@@ -4,22 +4,21 @@
 //! `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer of a target at
 //! `<prefix>published/<target>/current.json`. Requests are signed with AWS Signature Version 4.
 //!
-//! What the bucket holds is recorded in [`Holdings`] as each upload is accepted, and a publication
+//! What the bucket holds is recorded in [`Holdings`](sekai_catalog::Holdings) as each upload is accepted, and a publication
 //! uploads only the local objects that are not recorded, without asking the bucket about them.
 //! Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket
 //! rejects bytes that do not match. The pointer is written last, and only when it changes. When the
 //! record cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
 //!
 //! The bucket also keeps the state of the runs that publish to it, as files under
-//! `<prefix>state/` that no publication refers to: [`S3::fetch_state`] and [`S3::store_state`].
+//! `<prefix>state/` that no publication refers to: [`S3::read_state`] and [`S3::write_state`].
 //! A state file larger than 16 MiB is written as a multipart upload, so that each request stays
 //! short.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
+use std::io::{self, Read};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,7 +29,7 @@ use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
-use crate::layout::{Layout, Publication, check_version, documents, version_pointer};
+use crate::layout::{Layout, Object, Publication, check_version, documents, version_pointer};
 use crate::plan::{Plan, PublishError, hex};
 
 /// The SHA-256 of no bytes.
@@ -183,28 +182,21 @@ impl S3 {
         format!("{}published/{target}/current.json", self.bucket.prefix)
     }
 
+    /// The current pointer of `target`, or `None` when the bucket has none.
+    pub fn current(&self, target: &str) -> Result<Option<Pointer>, PublishError> {
+        let bytes = self
+            .get(&self.pointer(target))
+            .map_err(|e| PublishError::new("pointer", e))?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|e| PublishError::new("pointer", e))
+    }
+
     /// The name of the state file `file` in the bucket, under `state/`, which no publication
     /// refers to.
     fn state(&self, file: &str) -> String {
         format!("{}state/{file}", self.bucket.prefix)
-    }
-
-    /// Copies the state file `file` of the bucket to `path`, and returns whether the bucket keeps
-    /// one. The bytes go to a file beside `path` first, which replaces it once it is complete.
-    pub fn fetch_state(&self, file: &str, path: &Path) -> Result<bool, PublishError> {
-        let mut partial = path.as_os_str().to_owned();
-        partial.push(".part");
-        let fetched = self
-            .get_with(&self.state(file), |body| {
-                let mut out = File::create(&partial)?;
-                io::copy(body, &mut out)?;
-                out.sync_all()
-            })
-            .map_err(|e| PublishError::new("state", e))?;
-        if fetched.is_some() {
-            std::fs::rename(&partial, path).map_err(PublishError::wrap("state"))?;
-        }
-        Ok(fetched.is_some())
     }
 
     /// What `read` makes of the state file `file` of the bucket, or `None` when it keeps none.
@@ -218,7 +210,7 @@ impl S3 {
     }
 
     /// Writes `bytes` to the bucket as its state file `file`, in parts when there are more than
-    /// [`PART`].
+    /// 16 MiB.
     pub fn write_state(&self, file: &str, bytes: &[u8]) -> Result<(), PublishError> {
         let name = self.state(file);
         let written = if bytes.len() as u64 > PART {
@@ -231,31 +223,6 @@ impl S3 {
                 STATE_MEDIA_TYPE,
                 STATE_CACHE_CONTROL,
                 || Ok(bytes),
-            )
-        };
-        written.map_err(|e| PublishError::new("state", e))
-    }
-
-    /// Writes the file at `path` to the bucket as its state file `file`, in parts when it has
-    /// more than [`PART`] bytes.
-    pub fn store_state(&self, file: &str, path: &Path) -> Result<(), PublishError> {
-        let name = self.state(file);
-        let open = || File::open(path).map_err(|e| format!("{}: {e}", path.display()));
-        let size = std::fs::metadata(path)
-            .map_err(PublishError::wrap("state"))?
-            .len();
-        let written = if size > PART {
-            open().and_then(|file| {
-                self.put_in_parts(&name, STATE_MEDIA_TYPE, STATE_CACHE_CONTROL, file)
-            })
-        } else {
-            let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;
-            self.put(
-                &name,
-                &hex(&digest),
-                STATE_MEDIA_TYPE,
-                STATE_CACHE_CONTROL,
-                open,
             )
         };
         written.map_err(|e| PublishError::new("state", e))
@@ -616,15 +583,7 @@ pub fn publish_with(
 }
 
 /// Uploads `publication`, whose documents are in the local store of `objects`, as `target` to the
-/// bucket of `s3`: the objects first, then the pointer of its version, then the current pointer of
-/// `target`.
-///
-/// The holdings of `objects` record what the bucket holds. Every object of the publication that
-/// they do not record and that the local store has is uploaded, and recorded once the bucket
-/// accepts it, also when the publication fails later. An object the local store does not have was
-/// named by an earlier publication or record, and those are written only once their objects are
-/// in the bucket. A failed stage leaves the previous pointer in place, and running the
-/// publication again uploads only what is still unrecorded.
+/// bucket of `s3`: the objects with [`store_objects`], then the pointers with [`make_current`].
 pub fn upload(
     objects: &Objects<'_>,
     s3: &S3,
@@ -636,18 +595,44 @@ pub fn upload(
         objects: referred,
     } = publication;
     check_version(&pointer.published_version)?;
+    let Stored { uploaded, present } = store_objects(objects, s3, referred)?;
+    let pointer_written = make_current(s3, target, &pointer)?;
+    Ok((
+        pointer,
+        S3Report {
+            uploaded,
+            present,
+            pointer_written,
+        },
+    ))
+}
+
+/// What [`store_objects`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stored {
+    /// The objects uploaded.
+    pub uploaded: usize,
+    /// The objects taken to be in the bucket already, which were not uploaded.
+    pub present: usize,
+}
+
+/// Uploads the objects of `referred` to the bucket of `s3`.
+///
+/// The holdings of `objects` record what the bucket holds. Every object that they do not record
+/// and that the local store of `objects` has is uploaded, and recorded once the bucket accepts it,
+/// also when a later upload fails. An object the local store does not have was named by an
+/// earlier publication or record, and those are written only once their objects are in the
+/// bucket. Running the upload again sends only what is still unrecorded.
+pub fn store_objects(
+    objects: &Objects<'_>,
+    s3: &S3,
+    referred: Vec<Object>,
+) -> Result<Stored, PublishError> {
     let referred: BTreeMap<Key, (u64, String)> = referred
         .into_iter()
         .map(|object| (object.key, (object.size, object.media_type)))
         .collect();
     let referred: Vec<_> = referred.into_iter().collect();
-    let pointer_bytes =
-        serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let pointer_name = s3.pointer(target);
-    let remote_pointer = s3
-        .get(&pointer_name)
-        .map_err(|e| PublishError::new("pointer", e))?;
-
     let unrecorded = unrecorded(objects, &referred)?;
     let confirmed = Mutex::new(Vec::with_capacity(unrecorded.len()));
     let uploading = put_objects(objects.local, s3, &unrecorded, &confirmed);
@@ -657,36 +642,44 @@ pub fn upload(
         .hold(&confirmed)
         .map_err(PublishError::wrap("holdings"))?;
     uploading?;
-    let uploaded = unrecorded.len();
+    Ok(Stored {
+        uploaded: unrecorded.len(),
+        present: referred.len() - unrecorded.len(),
+    })
+}
 
-    let pointer_written = remote_pointer.as_deref() != Some(pointer_bytes.as_slice());
-    if pointer_written {
-        let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
-        let sha256 = hex(&digest);
-        let version_name = format!(
-            "{}published/{}",
-            s3.bucket.prefix,
-            version_pointer(target, &pointer.published_version)
-        );
-        for name in [&version_name, &pointer_name] {
-            s3.put(
-                name,
-                &sha256,
-                "application/json",
-                POINTER_CACHE_CONTROL,
-                || Ok(pointer_bytes.as_slice()),
-            )
-            .map_err(|e| PublishError::new("pointer", e))?;
-        }
+/// Makes `pointer` the current publication of `target` in the bucket of `s3`: writes the pointer
+/// of its version, then the current pointer of `target`, unless that is `pointer` already. Call it
+/// once every object of the publication is in the bucket. Returns whether the pointers were
+/// written.
+pub fn make_current(s3: &S3, target: &str, pointer: &Pointer) -> Result<bool, PublishError> {
+    check_version(&pointer.published_version)?;
+    let bytes = serde_json::to_vec(pointer).map_err(|e| PublishError::new("pointer", e))?;
+    let current = s3.pointer(target);
+    let remote = s3
+        .get(&current)
+        .map_err(|e| PublishError::new("pointer", e))?;
+    if remote.as_deref() == Some(bytes.as_slice()) {
+        return Ok(false);
     }
-    Ok((
-        pointer,
-        S3Report {
-            uploaded,
-            present: referred.len() - uploaded,
-            pointer_written,
-        },
-    ))
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let sha256 = hex(&digest);
+    let version = format!(
+        "{}published/{}",
+        s3.bucket.prefix,
+        version_pointer(target, &pointer.published_version)
+    );
+    for name in [&version, &current] {
+        s3.put(
+            name,
+            &sha256,
+            "application/json",
+            POINTER_CACHE_CONTROL,
+            || Ok(bytes.as_slice()),
+        )
+        .map_err(|e| PublishError::new("pointer", e))?;
+    }
+    Ok(true)
 }
 
 /// An object a publication refers to: its key, its size and its media type.
@@ -783,21 +776,6 @@ fn each(
     match failures.into_iter().min_by_key(|(i, _)| *i) {
         Some((_, e)) => Err(e),
         None => Ok(()),
-    }
-}
-
-/// The SHA-256 of the bytes of the file at `path`.
-fn file_sha256(path: &Path) -> io::Result<[u8; 32]> {
-    let mut file = BufReader::with_capacity(1 << 20, File::open(path)?);
-    let mut hasher = Sha256::new();
-    loop {
-        let chunk = file.fill_buf()?;
-        if chunk.is_empty() {
-            return Ok(hasher.finalize().into());
-        }
-        hasher.update(chunk);
-        let read = chunk.len();
-        file.consume(read);
     }
 }
 

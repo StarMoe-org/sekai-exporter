@@ -102,7 +102,6 @@ impl Published {
             published_version: version.to_owned(),
             revision: "0".repeat(8),
             root: None,
-            sqlite: None,
             paths,
         };
         let bytes = serde_json::to_vec(&pointer).unwrap();

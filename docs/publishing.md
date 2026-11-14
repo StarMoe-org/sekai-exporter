@@ -27,16 +27,17 @@ The documents of a publication are specified in [Publication documents](spec/pub
 |---|---|---|---|
 | `paths` | The store itself, plus a [path index](spec/path-index.md) per region and view: chunks of paths in byte order with the hash, size and type of each file | None | Through a resolver, such as `sekai-exporter serve` ([Serving](serving.md)), that maps a path to its object |
 | `index` | The `paths` layout, plus small JSON shards by directory, mapping each name to its hash, size, type, owning asset and role, and an index root whose directories, listings and failures are tables cut into chunks | None | Look up the index, then fetch the object. A small TypeScript resolver with caching is provided outside the Rust workspace |
-| `sqlite` | The `index` layout, plus an `index.sqlite` database of the directories, assets and files | None | Query the database with HTTP range requests, then fetch the object |
 | `tree` | A path tree per region and view | Bytes that appear in several regions are stored once per tree, unless the backend supports links | Fetch by path |
 
-The `paths`, `index` and `sqlite` layouts reference the store directly and copy nothing. A `tree` layout uses hard links on a local file system and on backends that support them; on plain S3 it uses server-side copies.
+The `paths` and `index` layouts reference the store directly and copy nothing. A `tree` layout uses hard links on a local file system and on backends that support them; on plain S3 it uses server-side copies.
 
 For each asset form there is also a **listing**: logical path, asset form, fingerprint and size of every asset of that form in a region and version. Consumers use it instead of indexes built for one viewer.
 
 ## The storage view
 
-The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. Assets that share a logical path use the names defined in the [architecture](architecture.md). It is published like the canonical view, with a path index and a pointer at `<region>/storage`, so a [resolver](serving.md) serves it at fixed paths and switches every path to a new version at once. `update --storage <dir>` also materializes it as a `tree`, which cannot be switched atomically. A tree is therefore written in this order:
+The `storage` view reproduces the path tree served by the asset storage that the Moesekai site and other readers use, with the same paths, file names and encoding parameters. Assets that share a logical path use the names defined in the [architecture](architecture.md). It is published like the canonical view, with a path index and a pointer at `<region>/storage`, so a [resolver](serving.md) serves it at fixed paths and switches every path to a new version at once.
+
+A `tree`, such as the one `export --tree` writes, cannot be switched atomically. A tree is therefore written in this order:
 
 1. every new file is written;
 2. the listing of the new version is written;
@@ -66,7 +67,7 @@ With the `s3` feature, `sekai-exporter update` also publishes to an S3-compatibl
       "endpoint": "https://s3.example.invalid/bucket",
       "region": "us-east-1",
       "prefix": "sekai/",
-      "layout": "sqlite",
+      "layout": "index",
       "connections": 8,
       "secrets": { "access_key_id": "SEKAI_S3_ACCESS_KEY_ID", "secret_access_key": "SEKAI_S3_SECRET_ACCESS_KEY" }
     }
@@ -79,19 +80,33 @@ With the `s3` feature, `sekai-exporter update` also publishes to an S3-compatibl
 | `endpoint` | The address of the bucket, path-style (`https://<host>/<bucket>`) or virtual-hosted (`https://<bucket>.<host>`) |
 | `region` | The region the requests are signed for |
 | `prefix` | Optional. Prepended to every object name; empty or ending in `/` |
-| `layout` | Optional. The [layout](#layouts) of the canonical view: `"sqlite"`, the default, or `"index"`. The storage view is always uploaded in the `paths` layout |
+| `layout` | Optional. The [layout](#layouts) of the canonical view: `"index"`, the default. The storage view is always uploaded in the `paths` layout |
 | `connections` | Optional, 8 by default. Requests in flight at once |
 | `secrets` | The names of the secrets that hold the access key ID and the secret access key. Each value is read from the environment variable of that name, or from the file of that name in the `--secrets` directory |
 
 The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointers of the canonical and the storage view at `<prefix>published/<region>/<view>/current.json` and `<prefix>published/<region>/<view>/versions/<published version>.json`. Immutable objects under `store/` are written with `Cache-Control: public, max-age=31536000, immutable` and pointers with `Cache-Control: no-cache`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.
 
-A publication first reads the bucket's live `current.json` pointer. If it already names the publication, no object requests are sent. Otherwise the objects of the live publication that the local store describes are taken as present, and each other object is looked up with a `HEAD` request, or, when that would take more requests, in a listing of the store's 256 directories (`ListObjectsV2`, one directory per connection). `update --verify` trusts neither the pointer nor the local store: it lists the whole store, uploads every object the bucket lacks or holds with another size, and runs even when the version is unchanged. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
+A run knows which objects the bucket holds from the records it reads and the uploads the bucket accepts; it does not ask the bucket object by object. It uploads each object of the version that is in the local store and not known to be held. An object that is neither in the local store nor known to be held is taken to be in the bucket, since every object is put there before any record or pointer that names it. `update --verify` first lists the whole store (`ListObjectsV2`, one of the store's 256 directories per connection), uploads every object of the version the bucket lacks, stops with the stage `verify` when the bucket holds an object of the version with another size, and runs even when the version is unchanged. Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket stores no bytes that do not match. The pointer is written after every object is in the bucket, and only when it changes. A failure stops the publication with the name of its stage and leaves the previous pointer in place; running it again uploads only what is still missing.
+
+## The state of a region
+
+`update` keeps the state of each region at its site: under `<prefix>state/` in the bucket, or under `<output>/state` without one. A run reads only this state and the pointers of the views, so a machine with an empty `<output>` continues where the last run stopped.
+
+| File | Content |
+|---|---|
+| `versions/<region>.json` | The identity of the last version, which `update --check` compares with |
+| `regions/<region>.json` | The root of the state of the region, which names its chunks |
+| `chunks/<aa>/<sha256>.json.gz` | The chunks of the states of every region: the bundles of the last version with their content and the files they hold, its units with their keys, the names its assets claim and which unit owns each, the assets built from tables, and the revision of each view's publication |
+| `records/units/<aa>/<key>.json` | What a unit gave, under the key of its bundles' content and the converters, for any region whose unit has the same key |
+| `records/derivations/<aa>/<fingerprint>.json` | The object a derivation made, with its size |
+
+The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. A run writes, in this order, every new object, the records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
 
 ## Evaluation and publishing together
 
 | Deployment | Evaluation | Place | Layout |
 |---|---|---|---|
-| Full static mirror | Eager | Batch run | `sqlite`, with a [resolver](serving.md) for paths |
+| Full static mirror | Eager | Batch run | `index`, with a [resolver](serving.md) for paths |
 | Self-hosted with limited storage | Bindings eager, conversions lazy | Server: a program using the crates as a library, since `serve` resolves published files only | `index`, with the store as an evictable cache |
 | Serverless | Bindings eager, conversions lazy | A function running the WebAssembly core: look up the binding, fetch the bundle, convert, cache, return | `index` |
 | A user with their own files | Lazy | Browser: the WebAssembly core unpacks and converts a dropped bundle locally, without a server | None |

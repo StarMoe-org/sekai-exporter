@@ -409,7 +409,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
-            layout: Layout::Sqlite,
+            layout: Layout::Index,
         },
         &Objects::local(&store),
         options.threads,

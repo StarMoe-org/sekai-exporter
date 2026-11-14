@@ -111,12 +111,9 @@ pub struct Plan {
     pub failures: Vec<AssetFailure>,
 }
 
-/// What the path of the asset document of an asset ends with, after the name of the asset.
-pub(crate) const DOCUMENT_SUFFIX: &str = ".asset.json";
-
 /// The path of the asset document of the asset `name`.
 pub(crate) fn document_path(name: &str) -> String {
-    format!("{name}{DOCUMENT_SUFFIX}")
+    format!("{name}.asset.json")
 }
 
 pub(crate) fn hex(bytes: &[u8]) -> String {

@@ -8,8 +8,7 @@ mod layout;
 mod parallel;
 pub mod patch;
 pub mod plan;
-mod sqlite;
 pub mod tree;
 
-pub use layout::{Layout, Object, Publication, documents, publish};
+pub use layout::{Layout, Object, Publication, current, documents, make_current, publish};
 pub use plan::{Binding, File, Plan, PublishError, PublishedAsset, plan};

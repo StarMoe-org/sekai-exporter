@@ -107,7 +107,6 @@ impl Output {
             published_version: version.to_owned(),
             revision: "0".repeat(8),
             root: None,
-            sqlite: None,
             paths: Some(hex(&root)),
         };
         let pointer = serde_json::to_vec(&pointer).unwrap();

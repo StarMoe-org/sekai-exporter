@@ -534,6 +534,30 @@ fn a_change_gives_the_publication_of_the_new_assets() {
 }
 
 #[test]
+fn a_publication_gives_back_the_documents_of_the_assets_it_names() {
+    let s = Scratch::new("bindings");
+    let store = s.store();
+    let assets = many(&store, 6000, "x");
+    let published = documents(
+        &store,
+        "jp/canonical",
+        &plan("v1", &assets, &store, 2).unwrap(),
+        Layout::Paths,
+    );
+    let previous = Previous::read(&store, &published.unwrap().pointer).unwrap();
+    let wanted = [&assets[5000], &assets[3], &assets[4999]];
+    let names = wanted
+        .iter()
+        .map(|b| b.name.as_str())
+        .chain(["missing/one"]);
+    let mut expected: Vec<Binding> = wanted.into_iter().cloned().collect();
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(previous.bindings(&store, names).unwrap(), expected);
+    let nothing = Previous::default().bindings(&store, ["group_00/item_00000"]);
+    assert!(nothing.unwrap().is_empty());
+}
+
+#[test]
 fn a_change_that_changes_nothing_keeps_every_document() {
     let s = Scratch::new("unchanged");
     let store = s.store();

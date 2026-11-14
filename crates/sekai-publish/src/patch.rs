@@ -22,7 +22,9 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::layout::{Layout, Object, Publication};
-use crate::plan::{Contribution, File, Plan, PublishError, hex};
+use crate::plan::{
+    Binding, Contribution, DOCUMENT_SUFFIX, File, Plan, PublishError, document_path, hex,
+};
 
 const JSON: &str = "application/json";
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
@@ -145,6 +147,51 @@ impl Previous {
             })
             .transpose()?;
         Ok(Self { index, paths })
+    }
+
+    /// The file published at each of `paths` that the publication has, in path order, read from
+    /// the chunks of its path index in `store` that hold them.
+    pub fn files<'p>(
+        &self,
+        store: &dyn Store,
+        paths: impl IntoIterator<Item = &'p str>,
+    ) -> Result<Vec<PathFile>, PublishError> {
+        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
+        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        let table = Table::new(store, firsts, read_paths);
+        let mut paths: Vec<&str> = paths.into_iter().collect();
+        paths.sort_unstable();
+        paths.dedup();
+        let files = paths.into_iter().map(|path| table.get(path));
+        files.filter_map(Result::transpose).collect()
+    }
+
+    /// The asset document of each asset of `names` that the publication has, in name order.
+    pub fn bindings<'n>(
+        &self,
+        store: &dyn Store,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Vec<Binding>, PublishError> {
+        let paths: Vec<String> = names.into_iter().map(document_path).collect();
+        let files = self.files(store, paths.iter().map(String::as_str))?;
+        let mut bindings: Vec<Binding> = files
+            .into_iter()
+            .map(|file| {
+                let name = file
+                    .path
+                    .strip_suffix(DOCUMENT_SUFFIX)
+                    .unwrap_or(&file.path);
+                Binding {
+                    name: name.to_owned(),
+                    document: Key {
+                        sha256: file.sha256,
+                        extension: file.extension,
+                    },
+                }
+            })
+            .collect();
+        bindings.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(bindings)
     }
 }
 

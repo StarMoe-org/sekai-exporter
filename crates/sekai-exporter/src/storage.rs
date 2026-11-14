@@ -243,7 +243,7 @@ pub(crate) fn change(
     monitor: &Monitor,
 ) -> Result<Option<Change>, String> {
     let _span = monitor.span("publish", "storage", "");
-    let mut files = files(assets, objects, derivations, threads, monitor)?;
+    let files = files(assets, objects, derivations, threads, monitor)?;
     let outside = files.values().find(|file| {
         let directory = file.path.rsplit_once('/').map(|(directory, _)| directory);
         !directory.is_some_and(|directory| units.contains(directory))
@@ -254,18 +254,11 @@ pub(crate) fn change(
             file.path, file.asset
         ));
     }
+    // Every file of the directories is replaced; a file that stays the same gives the same row.
     let mut change = Change::default();
     for unit in units {
         for old in previous.directory(unit).map_err(|e| e.to_string())? {
-            match files.remove(&old.path) {
-                Some(file)
-                    if file.key.sha256 == old.sha256 && file.key.extension == old.extension => {}
-                Some(file) => {
-                    change.remove_file(&old.path);
-                    change.add_file(file).map_err(|e| e.to_string())?;
-                }
-                None => change.remove_file(&old.path),
-            }
+            change.remove_file(&old.path);
         }
     }
     for file in files.into_values() {

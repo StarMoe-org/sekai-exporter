@@ -2,17 +2,11 @@
 //! boundaries depend only on the paths, so an unchanged range keeps its chunks.
 
 use sekai_catalog::{Key, LocalStore};
+use sekai_format::chunks;
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex, VERSION};
-use sha2::{Digest, Sha256};
 
 use crate::layout::Object;
 use crate::plan::{File, Plan, PublishError, hex};
-
-/// A chunk ends after a path whose hash is a multiple of this, so chunks hold this many paths on
-/// average.
-const AVERAGE: u32 = 2048;
-/// A chunk ends after this many paths in any case.
-const MOST: usize = 8192;
 
 /// The media type of a chunk object.
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
@@ -23,29 +17,6 @@ pub(crate) struct Written {
     pub(crate) root: Key,
     /// The chunks and the root, in the order they were written.
     pub(crate) objects: Vec<Object>,
-}
-
-/// Whether a chunk ends after `path`.
-fn ends_chunk(path: &str) -> bool {
-    let digest = Sha256::digest(path.as_bytes());
-    let head = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
-    head.is_multiple_of(AVERAGE)
-}
-
-/// The files of `files`, in path order, cut into chunks.
-fn chunks(files: &[File]) -> Vec<&[File]> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    for (at, file) in files.iter().enumerate() {
-        if ends_chunk(&file.path) || at + 1 - start == MOST {
-            chunks.push(&files[start..=at]);
-            start = at + 1;
-        }
-    }
-    if start < files.len() {
-        chunks.push(&files[start..]);
-    }
-    chunks
 }
 
 fn path_file(file: &File) -> PathFile {
@@ -78,8 +49,7 @@ fn put(
 pub(crate) fn write(store: &LocalStore, view: &str, plan: &Plan) -> Result<Written, PublishError> {
     let mut objects = Vec::new();
     let mut references = Vec::new();
-    for chunk in chunks(&plan.files) {
-        let files: Vec<PathFile> = chunk.iter().map(path_file).collect();
+    for files in chunks::cut(plan.files.iter().map(path_file).collect()) {
         let object = put(store, &Chunk::encode(&files), "paths", CHUNK_MEDIA_TYPE)?;
         references.push(ChunkReference {
             first: files[0].path.clone(),

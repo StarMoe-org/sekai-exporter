@@ -6,8 +6,14 @@ use std::mem::size_of;
 
 use serde::{Deserialize, Serialize};
 
+use crate::chunks;
+
 /// The version of the path index format.
 pub const VERSION: u32 = 1;
+
+/// A chunk ends after a path whose hash is a multiple of this, so chunks hold this many paths on
+/// average.
+const AVERAGE: u32 = 2048;
 
 const MAGIC: &[u8; 4] = b"SKPI";
 const CHUNK_VERSION: u8 = 1;
@@ -25,6 +31,20 @@ pub struct PathFile {
     pub size: u64,
     /// The media type.
     pub media_type: String,
+}
+
+impl chunks::Row for PathFile {
+    type Key = String;
+
+    const MOST: usize = 8192;
+
+    fn key(&self) -> &String {
+        &self.path
+    }
+
+    fn ends_chunk(&self) -> bool {
+        chunks::ends_after(self.path.as_bytes(), AVERAGE)
+    }
 }
 
 /// A chunk, as the root lists it.

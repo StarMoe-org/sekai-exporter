@@ -7,6 +7,8 @@ pub mod episode;
 pub mod roots;
 #[cfg(feature = "scenario")]
 pub mod scenario;
+#[cfg(feature = "episode")]
+pub mod scenario_prefab;
 #[cfg(feature = "storage-view")]
 pub mod storage_view;
 #[cfg(feature = "episode")]

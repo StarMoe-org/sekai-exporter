@@ -1382,6 +1382,7 @@ dependencies = [
 name = "sekai-moesekai"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "png",
  "sekai-codec",
  "sekai-convert",
@@ -1389,6 +1390,7 @@ dependencies = [
  "sekai-format",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

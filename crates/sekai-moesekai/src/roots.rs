@@ -35,6 +35,22 @@ pub fn scenario_background(object: &ObjectIndex, script: Option<&str>, _paths: &
     object.class_id == MONO_BEHAVIOUR && script == Some(SCENARIO_BACKGROUND_DATA)
 }
 
+/// The directory of the effect bundles of stories, `scenario/effect/<name>`, in container paths.
+const EFFECT_DIRECTORY: &str = "/scenario/effect/";
+
+/// The roots of the `scenario-prefab` form: what the game loads to show a prefab background (its
+/// build data) or an effect (a prefab of an effect bundle, which an episode names by bundle and
+/// name).
+pub fn scenario_prefab(object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+    scenario_background(object, script, paths)
+        || (object.class_id == GAME_OBJECT && paths.iter().any(|path| is_effect_prefab(path)))
+}
+
+fn is_effect_prefab(path: &str) -> bool {
+    let path = path.to_ascii_lowercase();
+    path.contains(EFFECT_DIRECTORY) && path.ends_with(".prefab")
+}
+
 /// The directories of the character models of the 3D screens.
 const CHARACTER_MODELS: &[&str] = &["/live_pv/model/character/", "/live_pv/model/characterv2/"];
 /// Each part of a costume: its directory below a character model directory, and its file name.

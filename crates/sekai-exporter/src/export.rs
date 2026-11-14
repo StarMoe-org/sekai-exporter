@@ -150,17 +150,23 @@ fn virtual_live() -> Vec<Box<dyn Converter>> {
 
 #[cfg(feature = "episode")]
 fn story_data() -> Vec<Box<dyn Converter>> {
+    use sekai_moesekai::scenario_prefab::ScenarioPrefab;
     use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
-    vec![Box::new(ActionSetForm), Box::new(ScenarioBackgroundForm)]
+    vec![
+        Box::new(ActionSetForm),
+        Box::new(ScenarioBackgroundForm),
+        Box::new(ScenarioPrefab),
+    ]
 }
 
 #[cfg(not(feature = "episode"))]
 fn story_data() -> Vec<Box<dyn Converter>> {
     use sekai_convert::roots::Absent;
-    use sekai_moesekai::roots::{action_set, scenario_background};
+    use sekai_moesekai::roots::{action_set, scenario_background, scenario_prefab};
     vec![
         Absent::boxed("action-set", action_set),
         Absent::boxed("scenario-background", scenario_background),
+        Absent::boxed("scenario-prefab", scenario_prefab),
     ]
 }
 

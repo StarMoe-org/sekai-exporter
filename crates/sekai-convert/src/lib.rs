@@ -11,7 +11,7 @@
 use std::fmt;
 
 pub use sekai_codec::{DecodeError, HdrSurface, Movie, Pcm, Sound, Surface};
-pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr};
+pub use sekai_unity::index::{ObjectId, ObjectIndex, PPtr, script_name};
 pub use sekai_unity::{Chunk, Value};
 
 #[cfg(feature = "animation")]

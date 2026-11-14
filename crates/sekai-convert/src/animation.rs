@@ -197,22 +197,18 @@ fn transform_width(attribute: u32) -> Result<u8, ConvertError> {
     }
 }
 
-/// `"<assembly>/<namespace>.<class>"` of a `MonoScript`.
+/// The full name of a `MonoScript`, as [`crate::script_name`] writes it.
 fn script_name(script: &Value) -> Result<String, ConvertError> {
     let text = |name: &str| {
         field(script, name)?
             .as_str()
             .ok_or_else(|| malformed(format!("{name} is not a string")))
     };
-    let class = text("m_ClassName")?;
-    let namespace = text("m_Namespace")?;
-    let assembly = text("m_AssemblyName")?;
-    let assembly = assembly.strip_suffix(".dll").unwrap_or(assembly);
-    Ok(if namespace.is_empty() {
-        format!("{assembly}/{class}")
-    } else {
-        format!("{assembly}/{namespace}.{class}")
-    })
+    Ok(crate::script_name(
+        text("m_AssemblyName")?,
+        text("m_Namespace")?,
+        text("m_ClassName")?,
+    ))
 }
 
 /// The streamed curves of `m_StreamedClip`, in curve order.

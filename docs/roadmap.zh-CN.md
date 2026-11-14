@@ -77,6 +77,7 @@
 |---|---|---|
 | `scenario` | 已完成 | [剧本](spec/scenario.zh-CN.md) |
 | `scenario-background` | 已完成 | [剧本背景](spec/scenario-background.zh-CN.md) |
+| `scenario-prefab` | 已完成 | [剧本预制体](spec/scenario-prefab.zh-CN.md) |
 | `action-set` | 已完成 | [动作集](spec/action-set.zh-CN.md) |
 | `episode` | 已完成 | [话](spec/episode.zh-CN.md) |
 | `virtual-live-script` | 已完成 | [虚拟演唱会剧本](spec/virtual-live-script.zh-CN.md) |

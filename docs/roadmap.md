@@ -77,6 +77,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 |---|---|---|
 | `scenario` | Done | [Scenario](spec/scenario.md) |
 | `scenario-background` | Done | [Scenario background](spec/scenario-background.md) |
+| `scenario-prefab` | Done | [Scenario prefab](spec/scenario-prefab.md) |
 | `action-set` | Done | [Action set](spec/action-set.md) |
 | `episode` | Done | [Episode](spec/episode.md) |
 | `virtual-live-script` | Done | [Virtual live script](spec/virtual-live-script.md) |

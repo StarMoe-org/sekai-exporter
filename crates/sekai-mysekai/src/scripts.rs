@@ -115,9 +115,19 @@ impl<'a> Scripts<'a> {
     /// The syntax tree of the script `name`, given without its extension.
     pub(crate) fn parse(&self, name: &str) -> Result<Block, ConvertError> {
         let asset = self.asset(name);
-        let bytes = self.cx.member(&asset, TEXT_MEMBER)?;
-        let source = String::from_utf8(bytes).map_err(|e| malformed(format!("{asset}: {e}")))?;
-        lua::parse(&source).map_err(|e| malformed(format!("{asset}: {e}")))
+        parse_source(&asset, self.cx.member(&asset, TEXT_MEMBER)?)
+    }
+
+    /// The syntax trees of the scripts `names`, given without their extension and read at once,
+    /// in that order.
+    pub(crate) fn parse_all(&self, names: &[&str]) -> Vec<Result<Block, ConvertError>> {
+        let assets: Vec<String> = names.iter().map(|name| self.asset(name)).collect();
+        let wanted: Vec<&str> = assets.iter().map(String::as_str).collect();
+        let sources = self.cx.members(&wanted, TEXT_MEMBER);
+        let parsed = assets.iter().zip(sources);
+        parsed
+            .map(|(asset, source)| parse_source(asset, source?))
+            .collect()
     }
 
     /// The constants of the package.
@@ -129,6 +139,12 @@ impl<'a> Scripts<'a> {
     pub(crate) fn library(&self) -> Result<Constants, ConvertError> {
         Ok(Constants::read(&self.parse(LIBRARY)?))
     }
+}
+
+/// The syntax tree of the script `asset`, whose source is `bytes`.
+fn parse_source(asset: &str, bytes: Vec<u8>) -> Result<Block, ConvertError> {
+    let source = String::from_utf8(bytes).map_err(|e| malformed(format!("{asset}: {e}")))?;
+    lua::parse(&source).map_err(|e| malformed(format!("{asset}: {e}")))
 }
 
 /// A plan of one asset, or of none when the version holds no sources for it.

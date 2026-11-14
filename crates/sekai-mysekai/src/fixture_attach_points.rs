@@ -60,10 +60,11 @@ struct Joined<'c> {
 }
 
 fn build(cx: &dyn TableContext) -> Result<sekai_convert::Asset, ConvertError> {
+    let models: Vec<(&str, &str)> = models(cx).collect();
+    let assets: Vec<&str> = models.iter().map(|(_, asset)| *asset).collect();
     let mut packages = BTreeMap::new();
-    for (package, asset) in models(cx) {
-        let text = String::from_utf8(cx.member(asset, MEMBER)?)
-            .map_err(|e| malformed(format!("{asset}: {e}")))?;
+    for ((package, asset), bytes) in models.into_iter().zip(cx.members(&assets, MEMBER)) {
+        let text = String::from_utf8(bytes?).map_err(|e| malformed(format!("{asset}: {e}")))?;
         let points = RawValue::from_string(text).map_err(|e| malformed(format!("{asset}: {e}")))?;
         packages.insert(package, points);
     }

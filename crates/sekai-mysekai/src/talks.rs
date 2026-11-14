@@ -399,6 +399,10 @@ fn names_any(conditions: &[&Condition], kinds: &[&str]) -> bool {
 }
 
 fn build(reader: &mut TalkReader<'_>, tables: &Tables) -> Result<Asset, ConvertError> {
+    let talks = tables.talks.iter().map(|row| row.lua.as_str());
+    let birthday = tables.birthday.iter().map(|row| row.lua.as_str());
+    let tutorial = tables.tutorial.iter().map(|row| row.lua.as_str());
+    reader.load(talks.chain(birthday).chain(tutorial));
     let mut units: BTreeMap<String, UnitTalks<'_>> = BTreeMap::new();
     let mut shared = Vec::new();
     for row in &tables.talks {
@@ -448,6 +452,7 @@ fn build_fixture_talks(
     tables: &Tables,
     no_talk: &BTreeSet<(i64, i64)>,
 ) -> Result<Asset, ConvertError> {
+    reader.load(tables.talks.iter().map(|row| row.lua.as_str()));
     let mut talks = Vec::new();
     for row in &tables.talks {
         let conditions = tables.conditions_of(row.condition_group_id)?;

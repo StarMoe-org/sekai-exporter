@@ -44,6 +44,8 @@ struct Assets<'a> {
     read: &'a (dyn Fn(&str) -> io::Result<Vec<u8>> + Sync),
     store: &'a dyn Store,
     version: &'a VersionAssets<'a>,
+    /// How many members [`TableContext::members`] reads at once.
+    threads: usize,
 }
 
 fn store_failed(e: impl std::fmt::Display) -> ConvertError {
@@ -87,6 +89,10 @@ impl TableContext for Assets<'_> {
             extension: member.extension.clone(),
         };
         self.store.read(&key).map_err(store_failed)
+    }
+
+    fn members(&self, names: &[&str], role: &str) -> Vec<Result<Vec<u8>, ConvertError>> {
+        parallel(names.len(), self.threads, |i| self.member(names[i], role))
     }
 }
 
@@ -240,23 +246,56 @@ pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<
         read: stage.read,
         store: stage.store,
         version,
+        threads: stage.threads,
     };
-    let mut built = Vec::new();
-    for converter in stage.converters {
+    let plans = stage.converters.iter().map(|converter| {
         let form = converter.name();
-        let plan = {
-            let _span = stage.recorder.span("plan", form, "");
-            converter
-                .plan(&assets)
-                .map_err(|e| io::Error::other(format!("{form}: {e}")))?
-        };
-        let results = parallel(plan.names().len(), stage.threads, |i| {
-            build_asset(stage, converter.as_ref(), plan.as_ref(), i)
-        });
-        for result in results {
-            built.push(result?);
-        }
-    }
+        let _span = stage.recorder.span("plan", form, "");
+        let plan = converter.plan(&assets);
+        plan.map_err(|e| io::Error::other(format!("{form}: {e}")))
+    });
+    let plans = plans.collect::<io::Result<Vec<_>>>()?;
+    let jobs = jobs(stage.converters, &plans);
+    let built = parallel(jobs.len(), stage.threads, |i| {
+        let Job {
+            converter,
+            plan,
+            index,
+        } = jobs[i];
+        build_asset(stage, converter, plan, index)
+    });
+    let mut built = built.into_iter().collect::<io::Result<Vec<_>>>()?;
     built.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(built)
+}
+
+/// The asset at `index` of the plan of a converter.
+#[derive(Clone, Copy)]
+struct Job<'p> {
+    converter: &'p dyn TableConverter,
+    plan: &'p dyn TablePlan,
+    index: usize,
+}
+
+/// Every asset of `plans`, the plans of `converters`, to be built on one pool of threads. The
+/// assets of a plan with fewer assets come first: each of them is built from more of the
+/// version, and starting them first keeps them from holding up the end of the stage.
+fn jobs<'p>(
+    converters: &'p [Box<dyn TableConverter>],
+    plans: &'p [Box<dyn TablePlan + '_>],
+) -> Vec<Job<'p>> {
+    let mut planned: Vec<(&dyn TableConverter, &dyn TablePlan)> = converters
+        .iter()
+        .map(Box::as_ref)
+        .zip(plans.iter().map(Box::as_ref))
+        .collect();
+    planned.sort_by_key(|(_, plan)| plan.names().len());
+    let jobs = planned.into_iter().flat_map(|(converter, plan)| {
+        (0..plan.names().len()).map(move |index| Job {
+            converter,
+            plan,
+            index,
+        })
+    });
+    jobs.collect()
 }

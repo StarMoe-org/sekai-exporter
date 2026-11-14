@@ -105,10 +105,12 @@ fn meta_assets<'c>(cx: &'c dyn TableContext) -> impl Iterator<Item = (&'c str, &
 }
 
 fn build(cx: &dyn TableContext) -> Result<Asset, ConvertError> {
+    let metas: Vec<(&str, &str)> = meta_assets(cx).collect();
+    let assets: Vec<&str> = metas.iter().map(|(_, asset)| *asset).collect();
     let mut packages = Map::new();
-    for (package, asset) in meta_assets(cx) {
-        let meta: Json = serde_json::from_slice(&cx.member(asset, DOCUMENT)?)
-            .map_err(|e| malformed(format!("{asset}: {e}")))?;
+    for ((package, asset), bytes) in metas.into_iter().zip(cx.members(&assets, DOCUMENT)) {
+        let meta: Json =
+            serde_json::from_slice(&bytes?).map_err(|e| malformed(format!("{asset}: {e}")))?;
         packages.insert(package.to_owned(), meta);
     }
     document(&json!({ "packages": packages }))

@@ -1,14 +1,14 @@
 //! The scripts of the MySekai talks, read as steps. The forms built from the talk package share
 //! this reader, so that a call means the same step in every one of them.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use sekai_convert::ConvertError;
 use sekai_convert::tables::TableContext;
 use serde::Serialize;
 
 use crate::constants::{Argument, ConstantError, Constants, Literal};
-use crate::lua::{Expr, Stat};
+use crate::lua::{Block, Expr, Stat};
 use crate::scripts::{Scripts, malformed};
 
 const TALK_BUNDLE: &str = "mysekai/talk/scenario/talk";
@@ -148,7 +148,7 @@ const OPERATIONS: &[(&str, Layout)] = &[
 ];
 
 /// One call of a talk script.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct TalkStep {
     op: &'static str,
     #[serde(flatten)]
@@ -192,7 +192,7 @@ fn alias(argument: &Argument) -> Literal {
 }
 
 /// The voice cues and the steps of one script.
-#[derive(Debug, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct TalkScript {
     voices: Vec<String>,
     steps: Vec<TalkStep>,
@@ -202,6 +202,8 @@ pub(crate) struct TalkScript {
 pub(crate) struct TalkReader<'a> {
     scripts: Scripts<'a>,
     constants: Constants,
+    /// What reading each script held by the package gave, by name.
+    loaded: HashMap<String, Result<TalkScript, ConvertError>>,
     missing: BTreeSet<String>,
 }
 
@@ -226,12 +228,28 @@ impl<'a> TalkPackages<'a> {
         Ok(TalkReader {
             scripts: self.scripts,
             constants: self.library.defines()?,
+            loaded: HashMap::new(),
             missing: BTreeSet::new(),
         })
     }
 }
 
 impl TalkReader<'_> {
+    /// Reads at once the scripts among `names`, given without their extension, that the package
+    /// holds and that were not read yet, so that [`TalkReader::read`] gives them without reading.
+    pub(crate) fn load<'n>(&mut self, names: impl IntoIterator<Item = &'n str>) {
+        let mut wanted: Vec<&str> = names
+            .into_iter()
+            .filter(|lua| self.scripts.holds(lua) && !self.loaded.contains_key(*lua))
+            .collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        for (lua, block) in wanted.iter().zip(self.scripts.parse_all(&wanted)) {
+            let talk = block.and_then(|block| script(&self.constants, lua, &block));
+            self.loaded.insert((*lua).to_owned(), talk);
+        }
+    }
+
     /// The script `lua`, given without its extension, or `None` when the version does not ship
     /// it. The reader then counts it as missing.
     pub(crate) fn read(&mut self, lua: &str) -> Result<Option<TalkScript>, ConvertError> {
@@ -239,23 +257,27 @@ impl TalkReader<'_> {
             self.missing.insert(lua.to_owned());
             return Ok(None);
         }
-        let steps = self
-            .scripts
-            .parse(lua)?
-            .iter()
-            .map(|statement| step(&self.constants, statement))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| malformed(format!("{lua}: {e}")))?;
-        Ok(Some(TalkScript {
-            voices: steps.iter().filter_map(TalkStep::cue).collect(),
-            steps,
-        }))
+        self.load([lua]);
+        self.loaded[lua].clone().map(Some)
     }
 
     /// The scripts asked for that the version does not ship, in name order.
     pub(crate) fn missing(&self) -> &BTreeSet<String> {
         &self.missing
     }
+}
+
+/// The script `lua`, whose syntax tree is `block`, with the constants of the library.
+fn script(constants: &Constants, lua: &str, block: &Block) -> Result<TalkScript, ConvertError> {
+    let steps = block
+        .iter()
+        .map(|statement| step(constants, statement))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| malformed(format!("{lua}: {e}")))?;
+    Ok(TalkScript {
+        voices: steps.iter().filter_map(TalkStep::cue).collect(),
+        steps,
+    })
 }
 
 /// The step of a statement that calls an operation.

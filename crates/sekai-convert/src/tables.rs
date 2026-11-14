@@ -36,6 +36,12 @@ pub trait TableContext: Sync {
 
     /// The bytes of the member `role` of the asset `name`.
     fn member(&self, name: &str, role: &str) -> Result<Vec<u8>, ConvertError>;
+
+    /// The bytes of the member `role` of each asset of `names`, in that order. A context may read
+    /// them at once; this one reads one after another.
+    fn members(&self, names: &[&str], role: &str) -> Vec<Result<Vec<u8>, ConvertError>> {
+        names.iter().map(|name| self.member(name, role)).collect()
+    }
 }
 
 /// An asset built from tables.

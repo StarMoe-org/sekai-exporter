@@ -131,12 +131,13 @@ fn item_assets<'c>(cx: &'c dyn TableContext) -> impl Iterator<Item = (&'c str, &
 }
 
 fn build(cx: &dyn TableContext) -> Result<Asset, ConvertError> {
+    let found: Vec<(&str, &str)> = item_assets(cx).collect();
+    let assets: Vec<&str> = found.iter().map(|(_, asset)| *asset).collect();
     let mut items = Map::new();
     let mut unsupported = Vec::new();
-    for (item, asset) in item_assets(cx) {
-        let bytes = cx.member(asset, DOCUMENT)?;
+    for ((item, asset), bytes) in found.into_iter().zip(cx.members(&assets, DOCUMENT)) {
         let document: Json =
-            serde_json::from_slice(&bytes).map_err(|e| malformed(format!("{asset}: {e}")))?;
+            serde_json::from_slice(&bytes?).map_err(|e| malformed(format!("{asset}: {e}")))?;
         if let Some(gaps) = document["unsupported"].as_array() {
             unsupported.extend(gaps.iter().cloned());
         }

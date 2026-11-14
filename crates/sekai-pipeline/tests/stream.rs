@@ -128,6 +128,31 @@ impl Converter for Next {
     }
 }
 
+/// The converter of the same form and version at its next revision.
+struct Revised(Box<dyn Converter>);
+
+impl Converter for Revised {
+    fn name(&self) -> &'static str {
+        self.0.name()
+    }
+
+    fn version(&self) -> u32 {
+        self.0.version()
+    }
+
+    fn revision(&self) -> u32 {
+        self.0.revision() + 1
+    }
+
+    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+        self.0.is_root(object, script, paths)
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        self.0.convert(root, cx)
+    }
+}
+
 /// The converter of the same form and version in a build that cannot read its roots yet.
 struct Unready(Box<dyn Converter>);
 
@@ -404,7 +429,7 @@ fn a_new_version_evaluates_again_only_the_units_with_roots_of_its_form() {
 }
 
 #[test]
-fn an_asset_that_failed_to_convert_is_converted_again_by_the_next_run() {
+fn an_asset_that_failed_is_converted_again_once_its_converter_has_a_new_revision() {
     let root = scratch("retried");
     let records = MemoryUnitRecords::default();
     let run = Run {
@@ -423,16 +448,22 @@ fn an_asset_that_failed_to_convert_is_converted_again_by_the_next_run() {
             .any(|o| o.error.as_deref() == Some("unsupported"))
     };
     assert!(failed(&first));
-    // The textures are in fixture_data, which is not recorded.
-    assert_eq!(records.len(), 1);
+    assert_eq!(records.len(), 2);
 
-    // The same version, now able to read them, converts them.
-    let (evaluated, reused, second) = streamed_reusing(&root, &run, &records);
+    // A build of the same revision takes the result with the failed textures.
+    let (evaluated, reused, again) = streamed_reusing(&root, &run, &records);
+    assert!(evaluated.is_empty());
+    assert_eq!(reused, 2);
+    assert!(failed(&again));
+
+    // The next revision, able to read them, converts them; fixture_scene has no textures.
+    let revised: Vec<Box<dyn Converter>> =
+        vec![Box::new(Revised(Box::new(Texture))), Box::new(Data)];
+    let (evaluated, reused, second) = streamed_reusing_with(&root, &run, &records, &revised);
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
     assert!(!failed(&second));
     assert_eq!(content(&second), content(&whole));
-    assert_eq!(records.len(), 2);
     std::fs::remove_dir_all(root).unwrap();
 }
 

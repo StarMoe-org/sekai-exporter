@@ -44,9 +44,16 @@ pub trait Converter: Send + Sync {
     fn name(&self) -> &'static str;
 
     /// The converter version. It changes only when the output of an asset the converter produces
-    /// changes. An asset that fails is converted again by every run, so reading inputs it used to
-    /// refuse needs no new version.
+    /// changes. Reading inputs it used to refuse needs a new [`revision`](Converter::revision),
+    /// not a new version.
     fn version(&self) -> u32;
+
+    /// The converter revision. It changes when an asset the converter failed to produce may now
+    /// be produced, without a change to any asset it produced. A result with an asset of the form
+    /// that failed is taken again only while the revision is the same.
+    fn revision(&self) -> u32 {
+        0
+    }
 
     /// Which canonical media encoders this converter's members may use.
     ///

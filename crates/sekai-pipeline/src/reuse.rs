@@ -10,9 +10,11 @@
 //! are the same, and fetches and evaluates only the windows of the other units. A new version of
 //! a converter therefore evaluates again only the units that have roots of its form.
 //!
-//! A unit is recorded only when no bundle of its window had an error and no asset of it failed to
-//! convert. Such an asset is converted again by the next run, as its derivation is, so a converter
-//! that learns to read it needs no new version: the assets it already produced stay as they are.
+//! A unit is recorded only when no bundle of its window had an error. When an asset of a form
+//! failed to convert, the record also holds the revision of the converter of that form, and a later
+//! run takes it only while the revision is the same. A converter that learns to read such assets
+//! needs a new revision, not a new version: the units with failed assets of its form are evaluated
+//! again, and the assets it already produced stay as they are.
 //!
 //! A record holds the assets of its unit before the assets of different bundles that are given the
 //! same name are told apart, since that depends on the other units; it happens once all of them are
@@ -145,8 +147,8 @@ pub struct Reuse<'m> {
     /// The entries to evaluate: the windows of the units without a recorded result, and the
     /// entries that are no unit, such as those that share a name, so their errors are reported.
     rest: Vec<Entry>,
-    /// The [`identity`] of each converter, by form.
-    identities: BTreeMap<&'static str, String>,
+    /// The identities of each converter, by form.
+    identities: BTreeMap<&'static str, Identities>,
 }
 
 /// A unit to evaluate, with its key and the names of the bundles of its window.
@@ -182,7 +184,7 @@ impl<'m> Reuse<'m> {
         let units = Units::new(manifest);
         let context = context(stream);
         let identities = identities(stream);
-        let current: BTreeSet<&str> = identities.values().map(String::as_str).collect();
+        let current: BTreeSet<&str> = identities.values().flat_map(Identities::both).collect();
         let name = |entry: usize| units.entries[entry].name.as_str();
         let found = (0..units.entries.len())
             .map(|unit| {
@@ -266,8 +268,8 @@ impl<'m> Reuse<'m> {
         })
     }
 
-    /// The result of each evaluated unit in `gathered`. One whose window had an error, or one of
-    /// whose assets failed to convert, is not reusable.
+    /// The result of each evaluated unit in `gathered`. One whose window had an error is not
+    /// reusable.
     fn results(&self, gathered: &Gathered) -> Vec<UnitResult> {
         let broken: HashSet<&str> = gathered
             .errors
@@ -278,12 +280,11 @@ impl<'m> Reuse<'m> {
         self.pending
             .iter()
             .map(|pending| {
-                let failed = gathered.failed.contains(pending.unit)
-                    || pending.window.iter().any(|bundle| broken.contains(bundle));
+                let broken = pending.window.iter().any(|bundle| broken.contains(bundle));
                 UnitResult {
                     unit: pending.unit.to_owned(),
                     key: pending.key,
-                    reusable: pending.key.is_some() && !failed,
+                    reusable: pending.key.is_some() && !broken,
                     record: records.remove(pending.unit).unwrap_or_default(),
                 }
             })
@@ -350,24 +351,39 @@ fn context(stream: &Stream<'_>) -> String {
     text
 }
 
-/// The identity of each converter of `stream`, by form.
-fn identities(stream: &Stream<'_>) -> BTreeMap<&'static str, String> {
+/// What the results of a unit with roots of a form follow from of its converter.
+struct Identities {
+    /// When every asset of the form converted: the form, the version and the encoder of its
+    /// files that lose information.
+    converted: String,
+    /// When an asset of the form failed: also the revision, which changes when it may convert.
+    failing: String,
+}
+
+impl Identities {
+    fn of(converter: &dyn Converter) -> Self {
+        let converted = format!(
+            "form {} {}\n{}",
+            converter.name(),
+            converter.version(),
+            eval::lossy_encoder(converter)
+        );
+        let failing = format!("{converted}revision {}\n", converter.revision());
+        Self { converted, failing }
+    }
+
+    fn both(&self) -> [&str; 2] {
+        [&self.converted, &self.failing]
+    }
+}
+
+/// The identities of each converter of `stream`, by form.
+fn identities(stream: &Stream<'_>) -> BTreeMap<&'static str, Identities> {
     stream
         .converters
         .iter()
-        .map(|converter| (converter.name(), identity(converter.as_ref())))
+        .map(|converter| (converter.name(), Identities::of(converter.as_ref())))
         .collect()
-}
-
-/// What the assets of a form depend on of its converter: the form, the version and the encoder
-/// of its files that lose information.
-fn identity(converter: &dyn Converter) -> String {
-    format!(
-        "form {} {}\n{}",
-        converter.name(),
-        converter.version(),
-        eval::lossy_encoder(converter)
-    )
 }
 
 /// Whether a result whose unit has roots of converters with the identities `forms` holds for an
@@ -460,12 +476,24 @@ impl Record {
     /// `identities` of the converters by form.
     fn of_each<'g>(
         gathered: &'g Gathered,
-        identities: &BTreeMap<&str, String>,
+        identities: &BTreeMap<&str, Identities>,
     ) -> BTreeMap<&'g str, Record> {
+        let failing: BTreeSet<(&str, &str)> = gathered
+            .outputs
+            .iter()
+            .filter(|(output, ..)| output.error.is_some())
+            .map(|(output, ..)| (output.bundle.as_str(), output.form))
+            .collect();
         let mut records: BTreeMap<&str, Record> = BTreeMap::new();
         for (unit, forms) in &gathered.forms {
-            records.entry(unit).or_default().forms =
-                forms.iter().map(|form| identities[form].clone()).collect();
+            let identity = |form: &&str| {
+                let identities = &identities[form];
+                match failing.contains(&(unit.as_str(), *form)) {
+                    true => identities.failing.clone(),
+                    false => identities.converted.clone(),
+                }
+            };
+            records.entry(unit).or_default().forms = forms.iter().map(identity).collect();
         }
         for (output, logical, path_id) in &gathered.outputs {
             records

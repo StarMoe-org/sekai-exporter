@@ -430,8 +430,6 @@ pub(crate) struct Gathered {
     pub(crate) unnamed: Vec<(String, String, i64)>,
     /// The forms of the named roots of each unit that has any, by unit name.
     pub(crate) forms: BTreeMap<String, BTreeSet<&'static str>>,
-    /// The units with an asset whose conversion failed.
-    pub(crate) failed: BTreeSet<String>,
     converted: usize,
     reused: usize,
     pub(crate) errors: BTreeMap<(String, &'static str), BundleError>,
@@ -667,7 +665,6 @@ impl Gathered {
             outputs,
             unnamed,
             forms,
-            failed,
             converted,
             reused,
             errors,
@@ -678,7 +675,6 @@ impl Gathered {
         self.outputs.extend(outputs);
         self.unnamed.extend(unnamed);
         self.forms.extend(forms);
-        self.failed.extend(failed);
         self.converted += converted;
         self.reused += reused;
         for error in errors.into_values() {
@@ -817,9 +813,6 @@ fn run_segment(
         let Some(Produced { output, .. }) = produced else {
             continue;
         };
-        if output.error.is_some() {
-            gathered.failed.insert(output.bundle.clone());
-        }
         gathered.outputs.push((output, logical, path_id));
     }
     Ok(gathered)
@@ -1088,7 +1081,6 @@ pub(crate) fn finish(gathered: Gathered) -> Streamed {
         mut outputs,
         unnamed: roots,
         forms: _,
-        failed: _,
         converted,
         reused,
         errors,

@@ -136,9 +136,12 @@ impl S3 {
             return Err(invalid("there are no connections"));
         }
         let path = path.trim_end_matches('/');
-        // A listing of a large store can take minutes before the service sends anything.
+        // A listing of a large store can take minutes before the service sends anything. Every
+        // connection in flight stays open for the next request, so that none is opened again.
         let agent = Agent::config_builder()
             .http_status_as_error(false)
+            .max_idle_connections(bucket.connections)
+            .max_idle_connections_per_host(bucket.connections)
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(300)))
             .timeout_per_read(Some(Duration::from_secs(300)))

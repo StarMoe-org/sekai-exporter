@@ -81,7 +81,7 @@
 | `region` | 请求签名所用的区域 |
 | `prefix` | 可选。加在每个对象名前面；为空或以 `/` 结尾 |
 | `layout` | 可选。canonical 视图的[布局](#布局)：`"index"`，即默认值。storage 视图总是以 `paths` 布局上传 |
-| `connections` | 可选，默认 8。同时进行的请求数 |
+| `connections` | 可选，默认 8。同时进行的请求数，也是请求之间保持打开的连接数 |
 | `secrets` | 存放访问密钥 ID 和私有访问密钥的密钥名。每个值从同名环境变量读取，或从 `--secrets` 目录中的同名文件读取 |
 
 存储桶的结构与本地输出相同：store 的每个对象位于 `<prefix>store/<aa>/<sha256>.<extension>`，canonical 与 storage 视图的指针位于 `<prefix>published/<区服>/<视图>/current.json` 和 `<prefix>published/<区服>/<视图>/versions/<发布版本>.json`。`store/` 下的不可变对象附带 `Cache-Control: public, max-age=31536000, immutable`，指针附带 `Cache-Control: no-cache`。请求用 AWS Signature Version 4 签名，密钥需要在该前缀下读、列出和写对象的权限。

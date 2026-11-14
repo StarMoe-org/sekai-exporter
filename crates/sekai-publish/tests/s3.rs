@@ -624,7 +624,7 @@ fn a_failed_publication_keeps_the_previous_pointer() {
 }
 
 #[test]
-fn an_object_missing_from_the_store_stops_before_the_pointer() {
+fn an_object_the_store_does_not_have_is_taken_to_be_in_the_bucket() {
     let s = Scratch::new("missing");
     let store = s.store();
     let held = MemoryHoldings::default();
@@ -641,6 +641,25 @@ fn an_object_missing_from_the_store_stops_before_the_pointer() {
         .find(|f| f.path == "a/two/mask.webp")
         .unwrap();
     std::fs::remove_file(store.path(&file.key)).unwrap();
+    let (_, report) = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap();
+    assert!(report.pointer_written);
+    assert!(server.object(&object_name(&file.key)).is_none());
+    assert_eq!(held.size(&file.key).unwrap(), None);
+}
+
+#[test]
+fn a_local_object_of_another_size_stops_before_the_pointer() {
+    let s = Scratch::new("resized");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let plan = sample(&store, "v1", b"mask");
+    std::fs::write(store.path(&plan.files[0].key), b"other bytes").unwrap();
     let e = publish(&objects, &server.client(SECRET_KEY), "jp/canonical", &plan).unwrap_err();
     assert_eq!(e.stage, "verify");
     assert!(server.object(POINTER).is_none());

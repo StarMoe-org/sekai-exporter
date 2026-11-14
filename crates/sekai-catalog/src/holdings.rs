@@ -119,12 +119,10 @@ impl<'a> Objects<'a> {
         }
     }
 
-    /// Reads `key` from the destination into the local store, when the destination is recorded
-    /// to hold it. Bytes that do not match the key are refused.
+    /// Reads `key` from the destination into the local store. An object named by a document or a
+    /// record that is not local is there, also when it is not recorded as held. Bytes that do not
+    /// match the key are refused.
     fn read_back(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
-        if self.held.size(key)?.is_none() {
-            return Ok(None);
-        }
         let Some(bytes) = self.remote.fetch(key)? else {
             return Ok(None);
         };

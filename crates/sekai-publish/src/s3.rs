@@ -5,10 +5,10 @@
 //! `<prefix>published/<target>/current.json`. Requests are signed with AWS Signature Version 4.
 //!
 //! What the bucket holds is recorded in [`Holdings`] as each upload is accepted, and a publication
-//! uploads only the objects that are not recorded, without asking the bucket about them. Each
-//! upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects
-//! bytes that do not match. The pointer is written last, and only when it changes. When the record
-//! cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
+//! uploads only the local objects that are not recorded, without asking the bucket about them.
+//! Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket
+//! rejects bytes that do not match. The pointer is written last, and only when it changes. When the
+//! record cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
 //!
 //! The bucket also keeps the state of the runs that publish to it, as files under
 //! `<prefix>state/` that no publication refers to: [`S3::fetch_state`] and [`S3::store_state`].
@@ -24,7 +24,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sekai_catalog::{Holdings, Key, LocalStore, Objects, Remote};
+use sekai_catalog::{Key, LocalStore, Objects, Remote, Store};
 use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
@@ -601,12 +601,8 @@ pub fn publish(
     publish_with(objects, s3, target, plan, Layout::Index)
 }
 
-/// Publishes `plan` as `target` in `layout` to the bucket of `s3`: the objects first, then the
-/// pointer of its version, then the current pointer of `target`. The documents are written to the
-/// local store of `objects`, whose holdings record what the bucket holds. Every object they do not
-/// record is uploaded from the local store, and recorded once the bucket accepts it, also when the
-/// publication fails later. A failed stage leaves the previous pointer in place, and running the
-/// publication again uploads only what is still unrecorded.
+/// Publishes `plan` as `target` in `layout` to the bucket of `s3`, writing its documents to the
+/// local store of `objects` first. See [`upload`].
 pub fn publish_with(
     objects: &Objects<'_>,
     s3: &S3,
@@ -615,10 +611,31 @@ pub fn publish_with(
     layout: Layout,
 ) -> Result<(Pointer, S3Report), PublishError> {
     check_version(&plan.version)?;
+    let publication = documents(objects.local, target, plan, layout)?;
+    upload(objects, s3, target, publication)
+}
+
+/// Uploads `publication`, whose documents are in the local store of `objects`, as `target` to the
+/// bucket of `s3`: the objects first, then the pointer of its version, then the current pointer of
+/// `target`.
+///
+/// The holdings of `objects` record what the bucket holds. Every object of the publication that
+/// they do not record and that the local store has is uploaded, and recorded once the bucket
+/// accepts it, also when the publication fails later. An object the local store does not have was
+/// named by an earlier publication or record, and those are written only once their objects are
+/// in the bucket. A failed stage leaves the previous pointer in place, and running the
+/// publication again uploads only what is still unrecorded.
+pub fn upload(
+    objects: &Objects<'_>,
+    s3: &S3,
+    target: &str,
+    publication: Publication,
+) -> Result<(Pointer, S3Report), PublishError> {
     let Publication {
         pointer,
         objects: referred,
-    } = documents(objects.local, target, plan, layout)?;
+    } = publication;
+    check_version(&pointer.published_version)?;
     let referred: BTreeMap<Key, (u64, String)> = referred
         .into_iter()
         .map(|object| (object.key, (object.size, object.media_type)))
@@ -631,9 +648,9 @@ pub fn publish_with(
         .get(&pointer_name)
         .map_err(|e| PublishError::new("pointer", e))?;
 
-    let unrecorded = unrecorded(objects.held, &referred)?;
+    let unrecorded = unrecorded(objects, &referred)?;
     let confirmed = Mutex::new(Vec::with_capacity(unrecorded.len()));
-    let uploading = upload(objects.local, s3, &unrecorded, &confirmed);
+    let uploading = put_objects(objects.local, s3, &unrecorded, &confirmed);
     let confirmed = confirmed.into_inner().unwrap_or_else(|e| e.into_inner());
     objects
         .held
@@ -649,7 +666,7 @@ pub fn publish_with(
         let version_name = format!(
             "{}published/{}",
             s3.bucket.prefix,
-            version_pointer(target, &plan.version)
+            version_pointer(target, &pointer.published_version)
         );
         for name in [&version_name, &pointer_name] {
             s3.put(
@@ -675,21 +692,32 @@ pub fn publish_with(
 /// An object a publication refers to: its key, its size and its media type.
 type Referred = (Key, (u64, String));
 
-/// The objects of `referred`, in key order, that `held` does not record with their size.
+/// The objects of `referred`, in key order, that the holdings of `objects` do not record with
+/// their size and that its local store has. A local file of another size is refused.
 fn unrecorded<'a>(
-    held: &dyn Holdings,
+    objects: &Objects<'_>,
     referred: &'a [Referred],
 ) -> Result<Vec<&'a Referred>, PublishError> {
     let mut unknown = Vec::new();
     for directory in referred.chunk_by(|(a, _), (b, _)| a.sha256[0] == b.sha256[0]) {
-        let sizes = held
-            .sizes(directory[0].0.sha256[0])
-            .map_err(PublishError::wrap("holdings"))?;
-        unknown.extend(
-            directory
-                .iter()
-                .filter(|(key, (size, _))| sizes.get(key) != Some(size)),
-        );
+        let held = objects.held.sizes(directory[0].0.sha256[0]);
+        let held = held.map_err(PublishError::wrap("holdings"))?;
+        for referred @ (key, (size, _)) in directory {
+            if held.get(key) == Some(size) {
+                continue;
+            }
+            let local = objects.local.size(key);
+            match local.map_err(PublishError::wrap("files"))? {
+                Some(local) if local == *size => unknown.push(referred),
+                Some(local) => {
+                    return Err(PublishError::new(
+                        "verify",
+                        format!("{key} has {local} bytes in the store, not {size}"),
+                    ));
+                }
+                None => {}
+            }
+        }
     }
     Ok(unknown)
 }
@@ -697,7 +725,7 @@ fn unrecorded<'a>(
 /// Uploads each of `unrecorded` from `local`, adding every object the bucket then holds to
 /// `confirmed`. The bucket is not asked first: an object is named by its bytes, so writing it
 /// again changes nothing.
-fn upload(
+fn put_objects(
     local: &LocalStore,
     s3: &S3,
     unrecorded: &[&Referred],
@@ -706,12 +734,6 @@ fn upload(
     each(unrecorded.len(), s3.bucket.connections, |i| {
         let (key, (size, media_type)) = unrecorded[i];
         let path = local.path(key);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
-            return Err(PublishError::new(
-                "verify",
-                format!("{key} is neither in the store with {size} bytes nor recorded as held"),
-            ));
-        }
         s3.put(
             &s3.object(key),
             &hex(&key.sha256),

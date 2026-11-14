@@ -804,25 +804,53 @@ fn run_segment(
     let ran = runner.run(&runnable, &version)?;
     gathered.converted += ran.converted;
     gathered.reused += ran.reused;
+    if stream.ledger.is_some() {
+        let stored = stored_documents(&ran.outputs, stream.store)?;
+        for (produced, stored) in ran.outputs.iter().zip(&stored) {
+            let fresh = produced.as_ref().and_then(|p| p.document.as_ref());
+            if let Some(document) = fresh.or(stored.as_ref()) {
+                count_reads(&mut gathered.tallies, units, document);
+            }
+        }
+    }
     for (produced, (logical, path_id)) in ran.outputs.into_iter().zip(kept_roots) {
-        let Some(Produced { output, document }) = produced else {
+        let Some(Produced { output, .. }) = produced else {
             continue;
         };
-        if stream.ledger.is_some() {
-            // The document of an asset that an earlier run produced is in the store.
-            let document = match document {
-                Some(document) => document,
-                None => AssetDocument::from_bytes(&stream.store.read(&output.document)?)
-                    .map_err(io::Error::other)?,
-            };
-            count_reads(&mut gathered.tallies, units, &document);
-        }
         if output.error.is_some() {
             gathered.failed.insert(output.bundle.clone());
         }
         gathered.outputs.push((output, logical, path_id));
     }
     Ok(gathered)
+}
+
+/// How many stored documents are read at once. A document that is not in the local store comes
+/// from the destination, one round trip each.
+const DOCUMENT_READS: usize = 32;
+
+/// The document of each asset of `produced` that an earlier run produced, read from `store`
+/// [`DOCUMENT_READS`] at a time, and `None` for the others.
+fn stored_documents(
+    produced: &[Option<Produced>],
+    store: &dyn Store,
+) -> io::Result<Vec<Option<AssetDocument>>> {
+    let read = |i: usize| -> io::Result<Option<AssetDocument>> {
+        let Some(Produced {
+            output,
+            document: None,
+        }) = &produced[i]
+        else {
+            return Ok(None);
+        };
+        let bytes = store.read(&output.document)?;
+        AssetDocument::from_bytes(&bytes)
+            .map(Some)
+            .map_err(io::Error::other)
+    };
+    eval::parallel(produced.len(), DOCUMENT_READS, read)
+        .into_iter()
+        .collect()
 }
 
 /// Counts what the asset of `document` read for the ledgers of the bundles it read.

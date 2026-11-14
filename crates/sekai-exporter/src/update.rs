@@ -1,37 +1,34 @@
 //! `sekai-exporter update`: the current version of a region, from its source to a publication.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::io;
+use std::path::PathBuf;
+use std::sync::Mutex;
 use std::thread;
 
-use sekai_catalog::db::{BundleRow, Catalog, CatalogDerivations, CostRow, IndexCache};
-use sekai_catalog::store::{ObjectWriter, parse_hex};
+use sekai_catalog::db::{Catalog, CatalogDerivations, CostRow, IndexCache};
+use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects, Store};
 use sekai_convert::Converter;
-use sekai_convert::tables::{AssetEntry, TableConverter};
 use sekai_format::AssetDocument;
 use sekai_format::identity::VersionIdentity;
 use sekai_format::publication::Pointer;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
-use sekai_game::obfuscation::Deobfuscating;
-use sekai_game::sink::Sink;
 use sekai_pipeline::claims::Claims;
 use sekai_pipeline::eval::Output;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
+use sekai_pipeline::parallel;
 use sekai_pipeline::records::{Earlier, Records};
 use sekai_pipeline::reuse::{self, Reuse, UnitResult};
 use sekai_pipeline::state::{
     BundleState, MemoryFiles, RegionState, Root, StateFiles, TableOutput, Written,
 };
-use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
-use sekai_pipeline::tables::{TableStage, VersionAssets};
-use sekai_pipeline::{BundleInput, parallel};
+use sekai_pipeline::stream::{self, Entry, InBundle, Segment, Stream};
+use sekai_pipeline::tables::TableStage;
 use sekai_publish::patch::{self, Change, Lookup, Previous};
 use sekai_publish::{Binding, Layout, Object, Publication};
-use sekai_unity::{BoundedBlockCache, FileSource, NoClasses};
+use sekai_unity::{BoundedBlockCache, NoClasses};
 
 use crate::bucket::Bucket;
 use crate::budget;
@@ -39,17 +36,17 @@ use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, report, write_ledger
 use crate::monitor::{self, Monitor};
 
 mod backed;
+mod fetch;
 mod files;
 mod site;
+mod tables;
 mod views;
 
 use backed::Backed;
+use fetch::{Arriving, EarlierRun, Fetcher, declared_content, identify, in_opening_order};
 use site::Site;
+use tables::{build_tables, table_bindings, table_converters};
 use views::Advance;
-
-const INPUT_EXTENSION: &str = "bundle";
-/// How many fetched bundles are recorded together.
-const RECORD_BATCH: usize = 1024;
 
 struct Options {
     region: String,
@@ -137,25 +134,6 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
     .map_err(|e| lexopt::Error::from(e.to_string()))?
 }
 
-/// The bytes of a bundle on their way into the input store.
-struct Incoming<'s>(ObjectWriter<'s>);
-
-impl Write for Incoming<'_> {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        self.0.write(bytes)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
-    }
-}
-
-impl Sink for Incoming<'_> {
-    fn reset(&mut self) -> io::Result<()> {
-        self.0.reset()
-    }
-}
-
 /// The entries whose names start with one of `only`, with everything they depend on. Without
 /// prefixes, every entry.
 fn select(mut entries: Vec<Entry>, only: &[String]) -> Vec<Entry> {
@@ -186,378 +164,6 @@ fn selected(entries: &[Entry], only: &[String]) -> Option<BTreeSet<String>> {
         }
     }
     Some(selected)
-}
-
-/// The bundles of a run in the input store, as they arrive. Opening one waits until it has been
-/// fetched, so evaluation starts with the first bundles while later ones are still on their way.
-struct Arriving<'s> {
-    inputs: &'s LocalStore,
-    arrivals: Mutex<Arrivals>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct Arrivals {
-    /// The key of each fetched bundle, or why it could not be fetched.
-    fetched: HashMap<String, Result<Key, String>>,
-    /// Whether fetching has ended. A bundle that has not arrived by then never does.
-    ended: bool,
-}
-
-impl<'s> Arriving<'s> {
-    fn new(inputs: &'s LocalStore) -> Self {
-        Self {
-            inputs,
-            arrivals: Mutex::default(),
-            changed: Condvar::new(),
-        }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Arrivals> {
-        self.arrivals.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn arrive(&self, name: &str, fetched: Result<Key, String>) {
-        self.lock().fetched.insert(name.to_owned(), fetched);
-        self.changed.notify_all();
-    }
-
-    /// Marks the end of fetching when dropped, however fetching ends.
-    fn ending(&self) -> Ending<'_, 's> {
-        Ending(self)
-    }
-
-    fn wait_until(&self, done: impl Fn(&Arrivals) -> bool) -> MutexGuard<'_, Arrivals> {
-        self.changed
-            .wait_while(self.lock(), |arrivals| !done(arrivals))
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// Ends the fetching of an [`Arriving`] when dropped.
-struct Ending<'a, 's>(&'a Arriving<'s>);
-
-impl Drop for Ending<'_, '_> {
-    fn drop(&mut self) {
-        self.0.lock().ended = true;
-        self.0.changed.notify_all();
-    }
-}
-
-impl Inputs for Arriving<'_> {
-    fn open(&self, name: &str) -> io::Result<BundleInput> {
-        let arrivals =
-            self.wait_until(|arrivals| arrivals.ended || arrivals.fetched.contains_key(name));
-        let key = match arrivals.fetched.get(name) {
-            Some(Ok(key)) => key.clone(),
-            Some(Err(e)) => return Err(io::Error::other(format!("{name}: {e}"))),
-            None => {
-                let message = format!("{name} was not fetched");
-                return Err(io::Error::new(io::ErrorKind::NotFound, message));
-            }
-        };
-        drop(arrivals);
-        open_input(self.inputs, name, &key)
-    }
-}
-
-/// The bundle `name` that `inputs` hold under `key`.
-fn open_input(inputs: &LocalStore, name: &str, key: &Key) -> io::Result<BundleInput> {
-    let source = FileSource::open(inputs.path(key)).map_err(io::Error::other)?;
-    Ok(BundleInput {
-        name: name.to_owned(),
-        source: Arc::new(source),
-        sha256: key.sha256,
-    })
-}
-
-/// The bundles that another output directory holds.
-struct EarlierRun {
-    catalog: Catalog,
-    inputs: LocalStore,
-}
-
-impl EarlierRun {
-    fn open(output: &Path) -> Result<Self, String> {
-        let database = output.join("catalog.redb");
-        if !database.is_file() {
-            return Err(format!("{}: no catalog", output.display()));
-        }
-        let store = LocalStore::open(output.join("store")).map_err(|e| e.to_string())?;
-        Ok(Self {
-            catalog: Catalog::open_or_rebuild(&database, &store).map_err(|e| e.to_string())?,
-            inputs: LocalStore::open(output.join("inputs")).map_err(|e| e.to_string())?,
-        })
-    }
-}
-
-/// Copies the bundle from the first earlier run that holds it under the same declared hash.
-fn from_earlier_runs(
-    earlier: &[EarlierRun],
-    region: &str,
-    entry: &BundleEntry,
-    inputs: &LocalStore,
-) -> io::Result<Option<Key>> {
-    for run in earlier {
-        let Some(key) = already_stored(&run.catalog, region, entry, &run.inputs)? else {
-            continue;
-        };
-        inputs.adopt(&key, &run.inputs.path(&key))?;
-        return Ok(Some(key));
-    }
-    Ok(None)
-}
-
-/// The key of the bundle that an earlier run stored under the same declared hash.
-fn already_stored(
-    catalog: &Catalog,
-    region: &str,
-    entry: &BundleEntry,
-    inputs: &LocalStore,
-) -> io::Result<Option<Key>> {
-    let Some(row) = catalog.bundle(region, &entry.name)? else {
-        return Ok(None);
-    };
-    if entry.declared.is_empty() || row.declared != entry.declared {
-        return Ok(None);
-    }
-    let key = parse_hex(&row.sha256).map(|sha256| Key {
-        sha256,
-        extension: INPUT_EXTENSION.to_owned(),
-    });
-    Ok(key.filter(|key| inputs.contains(key)))
-}
-
-/// Where the bundles of a run come from, and where they are recorded.
-struct Fetcher<'r> {
-    source: &'r dyn Source,
-    identity: &'r VersionIdentity,
-    inputs: &'r LocalStore,
-    catalog: &'r Catalog,
-    /// The bundles of the last version of the region, in name order.
-    bundles: &'r [BundleState],
-    earlier: &'r [EarlierRun],
-    region: &'r str,
-    monitor: &'r Monitor,
-    /// The key of each bundle this run has fetched, by name, so that none is fetched twice.
-    fetched: Mutex<HashMap<String, Key>>,
-}
-
-impl Fetcher<'_> {
-    /// Fetches `entries` into the input store in their order, `concurrency` at a time, and tells
-    /// `arriving` of each as it arrives. The bundles this run places are recorded in the catalog
-    /// in batches, and a bundle that cannot be recorded counts as not fetched. Returns how many
-    /// bundles could not be fetched.
-    fn fetch_all(
-        &self,
-        entries: &[BundleEntry],
-        concurrency: usize,
-        arriving: &Arriving<'_>,
-    ) -> Result<usize, String> {
-        let rows = Mutex::new(Vec::new());
-        let results = parallel(entries.len(), concurrency, |i| -> Result<bool, String> {
-            let entry = &entries[i];
-            let fetched = self.fetch(entry);
-            arriving.arrive(&entry.name, fetched.clone().map(|(key, _)| key));
-            let (key, placed) = fetched?;
-            if placed {
-                self.place(&rows, entry, &key)?;
-            }
-            Ok(placed)
-        });
-        let mut new = 0;
-        let mut failed = 0;
-        for (entry, result) in entries.iter().zip(results) {
-            match result {
-                Ok(placed) => new += usize::from(placed),
-                Err(e) => {
-                    failed += 1;
-                    eprintln!("{}: {e}", entry.name);
-                }
-            }
-        }
-        self.record(&rows.into_inner().unwrap_or_else(PoisonError::into_inner))?;
-        println!(
-            "bundles {} fetched {new} reused {} failed {failed}",
-            entries.len(),
-            entries.len() - new - failed
-        );
-        Ok(failed)
-    }
-
-    /// Fetches `entries` into the input store, `concurrency` at a time, and returns the key of
-    /// each bundle that could be fetched, by name. A bundle that cannot be fetched is left out;
-    /// fetching it again reports why.
-    fn fetch_keys(
-        &self,
-        entries: &[BundleEntry],
-        concurrency: usize,
-    ) -> Result<HashMap<String, Key>, String> {
-        let rows = Mutex::new(Vec::new());
-        let keys = parallel(
-            entries.len(),
-            concurrency,
-            |i| -> Result<Option<Key>, String> {
-                let entry = &entries[i];
-                let Ok((key, placed)) = self.fetch(entry) else {
-                    return Ok(None);
-                };
-                if placed {
-                    self.place(&rows, entry, &key)?;
-                }
-                Ok(Some(key))
-            },
-        );
-        self.record(&rows.into_inner().unwrap_or_else(PoisonError::into_inner))?;
-        let mut fetched = HashMap::new();
-        for (entry, key) in entries.iter().zip(keys) {
-            if let Some(key) = key? {
-                fetched.insert(entry.name.clone(), key);
-            }
-        }
-        Ok(fetched)
-    }
-
-    /// The key of `entry` in the input store, and whether this call placed it there: fetched
-    /// earlier in this run, found in the catalog, linked from an earlier run, or downloaded.
-    fn fetch(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
-        let fetched = || self.fetched.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(key) = fetched().get(&entry.name) {
-            return Ok((key.clone(), false));
-        }
-        let (key, placed) = self.locate(entry)?;
-        fetched().insert(entry.name.clone(), key.clone());
-        Ok((key, placed))
-    }
-
-    /// The key of `entry` in the input store, and whether this call placed it there: found in the
-    /// catalog, linked from an earlier run, or downloaded.
-    fn locate(&self, entry: &BundleEntry) -> Result<(Key, bool), String> {
-        let error = |e: io::Error| e.to_string();
-        if let Some(key) =
-            already_stored(self.catalog, self.region, entry, self.inputs).map_err(error)?
-        {
-            return Ok((key, false));
-        }
-        if let Some(key) =
-            from_earlier_runs(self.earlier, self.region, entry, self.inputs).map_err(error)?
-        {
-            return Ok((key, true));
-        }
-        self.download(entry).map(|key| (key, true))
-    }
-
-    fn download(&self, entry: &BundleEntry) -> Result<Key, String> {
-        let mut span = self.monitor.span("fetch", "bundle", &entry.name);
-        let writer = self
-            .inputs
-            .writer(INPUT_EXTENSION)
-            .map_err(|e| format!("input store: {e}"))?;
-        let mut sink = Deobfuscating::new(Incoming(writer));
-        let read = self
-            .source
-            .fetch(self.identity, entry, &mut sink)
-            .map_err(|e| e.to_string())?;
-        let Incoming(writer) = sink.finish().map_err(|e| e.to_string())?;
-        let (key, size) = writer.finish().map_err(|e| format!("input store: {e}"))?;
-        span.bytes(read, size);
-        Ok(key)
-    }
-
-    /// Adds the row of a bundle this run placed to `rows`, and records them once there are
-    /// [`RECORD_BATCH`] of them.
-    fn place(
-        &self,
-        rows: &Mutex<Vec<(String, BundleRow)>>,
-        entry: &BundleEntry,
-        key: &Key,
-    ) -> Result<(), String> {
-        let row = BundleRow {
-            declared: entry.declared.clone(),
-            sha256: key.to_string()[..64].to_owned(),
-        };
-        let full = {
-            let mut rows = rows.lock().unwrap_or_else(PoisonError::into_inner);
-            rows.push((entry.name.clone(), row));
-            (rows.len() >= RECORD_BATCH).then(|| std::mem::take(&mut *rows))
-        };
-        full.map_or(Ok(()), |full| self.record(&full))
-    }
-
-    fn record(&self, rows: &[(String, BundleRow)]) -> Result<(), String> {
-        let write = || -> io::Result<()> {
-            let mut batch = self.catalog.write()?;
-            for (name, row) in rows {
-                batch.put_bundle(self.region, name, row)?;
-            }
-            batch.commit()
-        };
-        write().map_err(|e| format!("catalog: {e}"))
-    }
-}
-
-/// The entries of `all` that `manifest` names, in the order an evaluation of `manifest` opens
-/// them, and then the rest of them.
-fn in_opening_order(all: &[BundleEntry], manifest: &[Entry]) -> Vec<BundleEntry> {
-    let rank: HashMap<&str, usize> = stream::opening_order(manifest)
-        .into_iter()
-        .enumerate()
-        .map(|(rank, name)| (name, rank))
-        .collect();
-    let wanted: BTreeSet<&str> = manifest.iter().map(|entry| entry.name.as_str()).collect();
-    let mut entries: Vec<BundleEntry> = all
-        .iter()
-        .filter(|entry| wanted.contains(entry.name.as_str()))
-        .cloned()
-        .collect();
-    entries.sort_by_key(|entry| rank.get(entry.name.as_str()).copied().unwrap_or(usize::MAX));
-    entries
-}
-
-/// What identifies the content of a bundle whose manifest entry declares the hash `declared`:
-/// that hash, or nothing when it is empty.
-fn declared_content(declared: &str) -> String {
-    if declared.is_empty() {
-        String::new()
-    } else {
-        format!("declared {declared}")
-    }
-}
-
-/// Identifies the content of each entry of `manifest` that declares no hash by the bytes of its
-/// bundle, which are fetched for that from the entries of `all`. An entry whose bundle cannot be
-/// fetched stays unidentified.
-fn identify(
-    fetcher: &Fetcher<'_>,
-    all: &[BundleEntry],
-    manifest: &mut [Entry],
-    concurrency: usize,
-) -> Result<(), String> {
-    let undeclared: HashSet<&str> = manifest
-        .iter()
-        .filter(|entry| entry.content.is_empty())
-        .map(|entry| entry.name.as_str())
-        .collect();
-    if undeclared.is_empty() {
-        return Ok(());
-    }
-    let entries: Vec<BundleEntry> = all
-        .iter()
-        .filter(|entry| undeclared.contains(entry.name.as_str()))
-        .cloned()
-        .collect();
-    let keys = fetcher.fetch_keys(&entries, concurrency)?;
-    println!(
-        "bundles without a declared hash {} identified {}",
-        entries.len(),
-        keys.len()
-    );
-    for entry in manifest {
-        if let Some(key) = keys.get(&entry.name) {
-            entry.content = format!("bytes {key}");
-        }
-    }
-    Ok(())
 }
 
 /// What a run evaluates.
@@ -783,24 +389,19 @@ fn export_version(
     let records = Records::new(files, &held);
     let backed = Backed {
         records: &records,
-        catalog: Some(&opened.catalog),
+        catalog: &opened.catalog,
     };
-    let mut baseline = Baseline::read(files, site, region_name, &objects, options.threads)?;
-    let evaluation = opened.evaluate(
-        options,
-        &identity,
-        &objects,
-        &backed,
-        &baseline.state,
-        monitor,
-    )?;
+    let baseline = Baseline::read(files, site, region_name, &objects, options.threads)?;
+    let Baseline {
+        mut state,
+        root,
+        publications,
+    } = baseline;
+    let evaluation = opened.evaluate(options, &identity, &objects, &backed, &state, monitor)?;
     let Some(Evaluation { outcome, bundles }) = evaluation else {
         return Ok(Outcome::Incomplete);
     };
-    let rulings = baseline.state.advance(&outcome.kept, &outcome.results);
-    if let Some(bundles) = bundles {
-        baseline.state.bundles = bundles;
-    }
+    let rulings = state.advance(bundles, &outcome.kept, &outcome.results);
 
     let context = Context {
         options,
@@ -813,14 +414,14 @@ fn export_version(
     };
     let advance = Advance {
         rulings: &rulings,
-        state: &baseline.state,
+        state: &state,
         results: &outcome.results,
         records: &backed,
     };
-    let views = context.publish(&identity.name(), &baseline, &advance, &opened)?;
-    let committed = context.commit(&records, &outcome.results, &mut baseline, &views, &identity)?;
+    let views = context.publish(&identity.name(), &publications, &advance, &opened)?;
+    let committed = context.commit(&outcome.results, state, root.as_ref(), &views, &identity)?;
     record_costs(opened.catalog.catalog(), monitor)?;
-    print_summary(region_name, &baseline.state, &views, &outcome, &committed);
+    print_summary(region_name, &committed, &views, &outcome);
     Ok(Outcome::Updated(identity))
 }
 
@@ -912,22 +513,26 @@ impl Opened {
         let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
         let indexes =
             IndexCache::open(&options.output.join("indexes.redb")).map_err(|e| e.to_string())?;
-        let mut bundles = None;
-        if self.listed {
+        // A manifest without dependencies has its bundles read as they are evaluated, so the
+        // state learns nothing of their files.
+        let bundles = if self.listed {
             let selected = selected(&manifest, &options.only);
             let fetchable = |name: &str| selected.as_ref().is_none_or(|names| names.contains(name));
             let concurrency = self.concurrency;
-            bundles = Some(fetcher.add_file_dependencies(
+            let bundles = fetcher.add_file_dependencies(
                 &all,
                 &mut manifest,
                 fetchable,
                 &cache,
                 &indexes,
                 concurrency,
-            )?);
+            )?;
             manifest = select(manifest, &options.only);
             identify(&fetcher, &all, &mut manifest, concurrency)?;
-        }
+            bundles
+        } else {
+            Vec::new()
+        };
         let fusion = crate::storage::Fusion::new(&self.store, backed, monitor);
         let stream = Stream {
             converters: &self.converters,
@@ -987,8 +592,8 @@ fn manifest_entries(all: &[BundleEntry]) -> Vec<Entry> {
 /// What a complete evaluation of a version gave.
 struct Evaluation {
     outcome: reuse::Outcome,
-    /// The bundles of the version, when its manifest lists their dependencies.
-    bundles: Option<Vec<BundleState>>,
+    /// What the bundles of the version hold and name, for those whose files the run knows.
+    bundles: Vec<BundleState>,
 }
 
 /// The objects that `site` is known to hold before the run: with `--verify`, those a listing of
@@ -1015,6 +620,12 @@ struct Baseline {
     state: RegionState,
     /// The root of the state, whose chunks a write keeps.
     root: Option<Root>,
+    publications: Publications,
+}
+
+/// The publications of the views of a region that a run patches.
+#[derive(Default)]
+struct Publications {
     canonical: Previous,
     storage: Previous,
 }
@@ -1050,8 +661,7 @@ impl Baseline {
             return Ok(Self {
                 state,
                 root,
-                canonical: Previous::default(),
-                storage: Previous::default(),
+                publications: Publications::default(),
             });
         }
         let previous = |pointer: Option<Pointer>| {
@@ -1059,11 +669,14 @@ impl Baseline {
                 Previous::read(store, &pointer).map_err(|e| e.to_string())
             })
         };
-        Ok(Self {
+        let publications = Publications {
             canonical: previous(canonical)?,
             storage: previous(storage)?,
+        };
+        Ok(Self {
             state,
             root,
+            publications,
         })
     }
 }
@@ -1079,25 +692,25 @@ fn storage_target(region: &str) -> String {
 /// The publications of the views of a version, and the assets it built from tables.
 struct Views {
     canonical: Publication,
-    /// The storage view, unless this build has none.
-    storage: Option<Publication>,
+    storage: Publication,
     tables: Vec<Output>,
 }
 
 impl Views {
-    /// The target of each view of `region`, with its publication when it has one.
-    fn published(&self, region: &str) -> [(String, Option<&Publication>); 2] {
+    /// The target of each view of `region`, with its publication.
+    fn published(&self, region: &str) -> [(String, &Publication); 2] {
         [
-            (canonical_target(region), Some(&self.canonical)),
-            (storage_target(region), self.storage.as_ref()),
+            (canonical_target(region), &self.canonical),
+            (storage_target(region), &self.storage),
         ]
     }
 
     /// The objects that the publications refer to.
     fn objects(&self) -> impl Iterator<Item = Object> + '_ {
-        let publications = [Some(&self.canonical), self.storage.as_ref()];
-        let publications = publications.into_iter().flatten();
-        publications.flat_map(|publication| publication.objects.iter().cloned())
+        let publications = [&self.canonical, &self.storage];
+        publications
+            .into_iter()
+            .flat_map(|publication| publication.objects.iter().cloned())
     }
 }
 
@@ -1116,23 +729,26 @@ struct Context<'a> {
 
 /// What a commit wrote.
 struct Committed {
+    /// The state of the region after the run.
+    state: RegionState,
     /// How many records.
     records: usize,
-    state: Written,
+    /// The chunks of the state.
+    chunks: Written,
 }
 
 impl Context<'_> {
-    /// The publications of the version `name` that `advance` reaches from `baseline`, patched
-    /// from the previous ones, with the converters of `opened`.
+    /// The publications of the version `name` that `advance` reaches, patched from the previous
+    /// `publications`, with the converters of `opened`.
     fn publish(
         &self,
         name: &str,
-        baseline: &Baseline,
+        publications: &Publications,
         advance: &Advance<'_>,
         opened: &Opened,
     ) -> Result<Views, String> {
         let owners = advance.owners()?;
-        let canonical = baseline.canonical.lookup(self.objects);
+        let canonical = publications.canonical.lookup(self.objects);
         let tables = self.build_tables(opened, &advance.state.claims, &owners, &canonical)?;
         let (mut old, mut new) = advance.canonical_bindings(&canonical, &owners)?;
         old.extend(table_bindings(&advance.state.tables)?);
@@ -1144,11 +760,11 @@ impl Context<'_> {
         let change = views::canonical_change(old, new, self.objects, threads)?;
         let layout = self.site.layout();
         let canonical_publication =
-            self.apply("canonical", name, layout, &baseline.canonical, change)?;
+            self.apply("canonical", name, layout, &publications.canonical, change)?;
 
         let (units, assets) = advance.storage_assets(&canonical, &owners)?;
-        let previous = baseline.storage.lookup(self.objects);
-        let storage = crate::storage::change(
+        let previous = publications.storage.lookup(self.objects);
+        let change = crate::storage::change(
             &units,
             &assets,
             &previous,
@@ -1157,11 +773,16 @@ impl Context<'_> {
             threads,
             self.monitor,
         )?;
-        let storage = storage
-            .map(|change| self.apply("storage", name, Layout::Paths, &baseline.storage, change));
+        let storage = self.apply(
+            "storage",
+            name,
+            Layout::Paths,
+            &publications.storage,
+            change,
+        )?;
         Ok(Views {
             canonical: canonical_publication,
-            storage: storage.transpose()?,
+            storage,
             tables,
         })
     }
@@ -1218,18 +839,20 @@ impl Context<'_> {
     }
 
     /// Commits the version `identity` that `views` publish, in this order: puts at the site every
-    /// object of the views and of the records of `results`, then writes the records, the state of
-    /// `baseline` advanced to the version, the pointers of the views and the last version.
+    /// object of the views and of the records of `results`, then writes the records, the state
+    /// that `advanced` becomes with the views (the chunks that `root` does not name, and the
+    /// root), the pointers of the views and the last version.
     fn commit(
         &self,
-        records: &Records<'_>,
         results: &[UnitResult],
-        baseline: &mut Baseline,
+        advanced: RegionState,
+        root: Option<&Root>,
         views: &Views,
         identity: &VersionIdentity,
     ) -> Result<Committed, String> {
         let threads = self.options.threads;
         let region = self.options.region.as_str();
+        let records = self.backed.records;
         let results: Vec<&UnitResult> = results.iter().collect();
         let mut referred: Vec<Object> = record_objects(records, &results, self.objects, threads)?;
         // The publications come last, so the media types they give are the ones stored.
@@ -1239,39 +862,32 @@ impl Context<'_> {
         let written = written.map_err(|e| format!("records: {e}"))?;
 
         let published = views.published(region);
-        let state = &mut baseline.state;
-        state.version = identity.name();
-        state.tables = views.tables.iter().map(TableOutput::of).collect();
-        state.published = published
+        let revisions = published
             .iter()
-            .filter_map(|(target, publication)| {
-                publication
-                    .map(|publication| (target.clone(), publication.pointer.revision.clone()))
-            })
-            .collect();
-        let state_written = state.write(self.files, region, baseline.root.as_ref(), threads);
-        let state_written = state_written.map_err(|e| format!("the state of {region}: {e}"))?;
+            .map(|(target, publication)| (target.clone(), publication.pointer.revision.clone()));
+        let state = RegionState {
+            version: identity.name(),
+            published: revisions.collect(),
+            tables: views.tables.iter().map(TableOutput::of).collect(),
+            ..advanced
+        };
+        let chunks = state.write(self.files, region, root, threads);
+        let chunks = chunks.map_err(|e| format!("the state of {region}: {e}"))?;
         for (target, publication) in &published {
-            if let Some(publication) = publication {
-                self.site.make_current(target, &publication.pointer)?;
-            }
+            self.site.make_current(target, &publication.pointer)?;
         }
         site::set_last_version(self.files, region, identity)?;
         Ok(Committed {
+            state,
             records: written,
-            state: state_written,
+            chunks,
         })
     }
 }
 
-/// Prints what the run of `region` published and wrote, with the `state` it left.
-fn print_summary(
-    region: &str,
-    state: &RegionState,
-    views: &Views,
-    outcome: &reuse::Outcome,
-    committed: &Committed,
-) {
+/// Prints what the run of `region` published and committed.
+fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &reuse::Outcome) {
+    let state = &committed.state;
     let owned = state.claims.iter().filter_map(Claims::owner);
     let errors = owned.clone().filter(|owner| owner.failed).count();
     let unnamed = state.claims.iter().filter(|c| c.owner().is_none()).count();
@@ -1287,69 +903,9 @@ fn print_summary(
         evaluation.converted,
         evaluation.reused,
         committed.records,
-        committed.state.chunks,
-        committed.state.bytes,
+        committed.chunks.chunks,
+        committed.chunks.bytes,
     );
-}
-
-/// The assets built from tables, with the produced assets that `claims` own as the assets of the
-/// version, whose forms are among `forms` and whose documents `document` finds.
-fn build_tables(
-    stage: &TableStage<'_>,
-    claims: &[Claims],
-    forms: &[&'static str],
-    document: &(dyn Fn(&str) -> io::Result<Option<Key>> + Sync),
-) -> Result<Vec<Output>, String> {
-    let mut by_bundle: BTreeMap<String, Vec<AssetEntry>> = BTreeMap::new();
-    for claims in claims {
-        let Some(owner) = claims.owner().filter(|owner| !owner.failed) else {
-            continue;
-        };
-        let form = forms
-            .iter()
-            .copied()
-            .find(|&form| form == owner.form)
-            .ok_or_else(|| format!("{} has the unknown form {}", claims.name, owner.form))?;
-        by_bundle
-            .entry(owner.unit.clone())
-            .or_default()
-            .push(AssetEntry {
-                name: claims.name.clone(),
-                form,
-            });
-    }
-    let version = VersionAssets {
-        by_bundle,
-        document,
-    };
-    let built = sekai_pipeline::tables::build(stage, &version).map_err(|e| e.to_string())?;
-    let owned = |name: &str| {
-        let found = claims.binary_search_by(|claims| claims.name.as_str().cmp(name));
-        found.is_ok_and(|index| claims[index].owner().is_some())
-    };
-    match built.iter().find(|output| owned(&output.name)) {
-        Some(output) => Err(format!("two assets are named {}", output.name)),
-        None => Ok(built),
-    }
-}
-
-/// The bindings of the assets built from tables that the state lists.
-fn table_bindings(tables: &[TableOutput]) -> Result<Vec<Binding>, String> {
-    tables
-        .iter()
-        .map(|table| {
-            let document = table.document.parse().map_err(|_| {
-                format!(
-                    "the table asset {} names the document {}",
-                    table.name, table.document
-                )
-            })?;
-            Ok(Binding {
-                name: table.name.clone(),
-                document,
-            })
-        })
-        .collect()
 }
 
 /// The objects that the records of `units` name, read from `objects` on up to `threads` threads:
@@ -1418,63 +974,8 @@ fn record_costs(catalog: &Catalog, monitor: &Monitor) -> Result<(), String> {
     record().map_err(|e| format!("catalog: {e}"))
 }
 
-/// The converters that build assets from game data tables.
-fn table_converters() -> Vec<Box<dyn TableConverter>> {
-    let mut converters = episode_converters();
-    converters.extend(costume_converters());
-    converters.extend(mysekai_converters());
-    converters
-}
-
-#[cfg(feature = "costume")]
-fn costume_converters() -> Vec<Box<dyn TableConverter>> {
-    vec![
-        Box::new(sekai_moesekai::costume::CostumeRoles),
-        Box::new(sekai_moesekai::costume::Costumes),
-    ]
-}
-
-#[cfg(not(feature = "costume"))]
-fn costume_converters() -> Vec<Box<dyn TableConverter>> {
-    Vec::new()
-}
-
-#[cfg(feature = "episode")]
-fn episode_converters() -> Vec<Box<dyn TableConverter>> {
-    vec![Box::new(sekai_moesekai::episode::Episode)]
-}
-
-#[cfg(not(feature = "episode"))]
-fn episode_converters() -> Vec<Box<dyn TableConverter>> {
-    Vec::new()
-}
-
-#[cfg(feature = "mysekai")]
-fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
-    vec![
-        Box::new(sekai_mysekai::alone::AloneActions),
-        Box::new(sekai_mysekai::characters::Characters),
-        Box::new(sekai_mysekai::client_config::ClientConfig),
-        Box::new(sekai_mysekai::communication::CommunicationActions),
-        Box::new(sekai_mysekai::emoticon::Emoticons),
-        Box::new(sekai_mysekai::facial::FacialTables),
-        Box::new(sekai_mysekai::fixture_areas::FixtureAreas),
-        Box::new(sekai_mysekai::fixture_attach_points::FixtureAttachPoints),
-        Box::new(sekai_mysekai::fixtures::Fixtures),
-        Box::new(sekai_mysekai::talks::FixtureTalks),
-        Box::new(sekai_mysekai::talks::Talks),
-    ]
-}
-
-#[cfg(not(feature = "mysekai"))]
-fn mysekai_converters() -> Vec<Box<dyn TableConverter>> {
-    Vec::new()
-}
-
 #[cfg(test)]
 mod tests {
-    use sekai_pipeline::NoBundleIndexes;
-
     use super::*;
 
     fn entry(name: &str, dependencies: &[&str]) -> BundleEntry {
@@ -1491,232 +992,6 @@ mod tests {
         entries.iter().map(|e| e.name.as_str()).collect()
     }
 
-    /// The manifest of `all`, as a run lists it before identifying any bundle.
-    fn listed(all: &[BundleEntry]) -> Vec<Entry> {
-        all.iter()
-            .map(|entry| Entry {
-                name: entry.name.clone(),
-                size: entry.size,
-                content: declared_content(&entry.declared),
-                dependencies: entry.dependencies.clone(),
-            })
-            .collect()
-    }
-
-    fn identity() -> VersionIdentity {
-        VersionIdentity {
-            asset: sekai_format::identity::AssetIdentity::Nuverse {
-                application_version: "1.0.0".to_owned(),
-                value: "1".to_owned(),
-            },
-            client: sekai_format::identity::ClientIdentity {
-                application_version: "1.0.0".to_owned(),
-                application_hash: None,
-                multiplayer_version: None,
-            },
-            tables: None,
-        }
-    }
-
-    /// Bundles in memory, counting how often each is fetched.
-    #[derive(Default)]
-    struct Bundles {
-        bytes: HashMap<String, Vec<u8>>,
-        fetched: Mutex<HashMap<String, usize>>,
-    }
-
-    impl Source for Bundles {
-        fn identity(
-            &self,
-            _previous: Option<&VersionIdentity>,
-        ) -> Result<VersionIdentity, cdn::SourceError> {
-            unreachable!("the tests name the version")
-        }
-
-        fn manifest(&self, _: &VersionIdentity) -> Result<Vec<BundleEntry>, cdn::SourceError> {
-            unreachable!("the tests list the manifest")
-        }
-
-        fn fetch(
-            &self,
-            _: &VersionIdentity,
-            entry: &BundleEntry,
-            sink: &mut dyn Sink,
-        ) -> Result<u64, cdn::SourceError> {
-            *self
-                .fetched
-                .lock()
-                .unwrap()
-                .entry(entry.name.clone())
-                .or_default() += 1;
-            let bytes = self.bytes.get(&entry.name).ok_or(cdn::SourceError {
-                code: "status",
-                message: format!("{} is missing", entry.name),
-                status: Some(404),
-            })?;
-            sink.write_all(bytes).unwrap();
-            Ok(bytes.len() as u64)
-        }
-    }
-
-    #[test]
-    fn bundles_without_a_declared_hash_are_identified_by_their_bytes() {
-        let root = std::env::temp_dir().join(format!("sekai-identify-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let store = LocalStore::open(root.join("store")).unwrap();
-        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
-        let inputs = LocalStore::open(root.join("inputs")).unwrap();
-        let source = Bundles {
-            bytes: HashMap::from([("b/plain".to_owned(), b"UnityFS\0plain".to_vec())]),
-            ..Bundles::default()
-        };
-        let identity = identity();
-        let mut undeclared = entry("b/plain", &[]);
-        undeclared.declared = String::new();
-        let mut lost = entry("c/lost", &[]);
-        lost.declared = String::new();
-        let all = [entry("a/declared", &[]), undeclared, lost];
-        let mut manifest = listed(&all);
-
-        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
-            let fetcher = Fetcher {
-                source: &source,
-                identity: &identity,
-                inputs: &inputs,
-                catalog: &catalog,
-                bundles: &[],
-                earlier: &[],
-                region: "r",
-                monitor,
-                fetched: Mutex::default(),
-            };
-            identify(&fetcher, &all, &mut manifest, 2).unwrap();
-            let key = Key::of(b"UnityFS\0plain", INPUT_EXTENSION);
-            assert_eq!(manifest[0].content, "declared h");
-            assert_eq!(manifest[1].content, format!("bytes {key}"));
-            assert_eq!(manifest[2].content, "");
-            // The identified bundle is not fetched again; the lost one is tried again.
-            assert_eq!(fetcher.fetch(&all[1]).unwrap(), (key, false));
-            assert!(fetcher.fetch(&all[2]).is_err());
-        })
-        .unwrap();
-        let fetched = source.fetched.into_inner().unwrap();
-        assert_eq!(
-            fetched,
-            HashMap::from([("b/plain".to_owned(), 1), ("c/lost".to_owned(), 2)])
-        );
-        drop(catalog);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn bundles_depend_on_the_bundles_that_hold_the_files_they_name() {
-        let root = std::env::temp_dir().join(format!("sekai-files-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let store = LocalStore::open(root.join("store")).unwrap();
-        let catalog = Catalog::open_or_rebuild(&root.join("catalog.redb"), &store).unwrap();
-        let inputs = LocalStore::open(root.join("inputs")).unwrap();
-        // The two fixture bundles name each other's serialized file as an external file.
-        let fixture = |name: &str| {
-            let fixtures =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma");
-            std::fs::read(fixtures.join(name)).unwrap()
-        };
-        let source = Bundles {
-            bytes: HashMap::from([
-                ("data".to_owned(), fixture("fixture_data")),
-                ("scene".to_owned(), fixture("fixture_scene")),
-            ]),
-            ..Bundles::default()
-        };
-        let identity = identity();
-        let all = [
-            entry("data", &[]),
-            entry("scene", &["data"]),
-            entry("unread", &[]),
-        ];
-        let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
-        let dependencies = |manifest: &[Entry]| -> Vec<Vec<String>> {
-            manifest.iter().map(|e| e.dependencies.clone()).collect()
-        };
-
-        Monitor::watch(&root.join("metrics.jsonl"), |monitor| {
-            let fetcher = || Fetcher {
-                source: &source,
-                identity: &identity,
-                inputs: &inputs,
-                catalog: &catalog,
-                bundles: &[],
-                earlier: &[],
-                region: "r",
-                monitor,
-                fetched: Mutex::default(),
-            };
-            // A run fetches and reads the bundles it may fetch; a listed dependency stays once.
-            let mut first = listed(&all);
-            let fetchable = |name: &str| name != "unread";
-            fetcher()
-                .add_file_dependencies(&all, &mut first, fetchable, &cache, &NoBundleIndexes, 2)
-                .unwrap();
-            assert_eq!(dependencies(&first), [vec!["scene"], vec!["data"], vec![]]);
-            // A later run finds the files in the catalog and fetches nothing.
-            let mut later = listed(&all);
-            fetcher()
-                .add_file_dependencies(&all, &mut later, |_| false, &cache, &NoBundleIndexes, 2)
-                .unwrap();
-            assert_eq!(later, first);
-        })
-        .unwrap();
-        let fetched = source.fetched.into_inner().unwrap();
-        assert_eq!(
-            fetched,
-            HashMap::from([("data".to_owned(), 1), ("scene".to_owned(), 1)])
-        );
-        drop(catalog);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn a_bundle_is_taken_from_an_earlier_run_with_the_same_declared_hash() {
-        let root = std::env::temp_dir().join(format!("sekai-earlier-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let output = root.join("earlier");
-        std::fs::create_dir_all(&output).unwrap();
-        let store = LocalStore::open(output.join("store")).unwrap();
-        let catalog = Catalog::open_or_rebuild(&output.join("catalog.redb"), &store).unwrap();
-        let earlier_inputs = LocalStore::open(output.join("inputs")).unwrap();
-        let key = earlier_inputs
-            .put(b"bundle bytes", INPUT_EXTENSION)
-            .unwrap();
-        let mut batch = catalog.write().unwrap();
-        let row = BundleRow {
-            declared: "h".to_owned(),
-            sha256: key.to_string()[..64].to_owned(),
-        };
-        batch.put_bundle("r", "a/one", &row).unwrap();
-        batch.commit().unwrap();
-        drop(catalog);
-
-        let runs = [EarlierRun::open(&output).unwrap()];
-        let inputs = LocalStore::open(root.join("inputs")).unwrap();
-        let found = from_earlier_runs(&runs, "r", &entry("a/one", &[]), &inputs).unwrap();
-        assert_eq!(found, Some(key.clone()));
-        assert_eq!(inputs.read(&key).unwrap(), b"bundle bytes");
-
-        let mut changed = entry("a/one", &[]);
-        changed.declared = "other".to_owned();
-        assert_eq!(
-            from_earlier_runs(&runs, "r", &changed, &inputs).unwrap(),
-            None
-        );
-        assert_eq!(
-            from_earlier_runs(&runs, "r", &entry("a/two", &[]), &inputs).unwrap(),
-            None
-        );
-        drop(runs);
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
     #[test]
     fn a_selection_brings_its_dependencies() {
         let entries: Vec<Entry> = [
@@ -1729,7 +1004,7 @@ mod tests {
         .map(|entry| Entry {
             name: entry.name,
             size: entry.size,
-            content: entry.declared,
+            content: declared_content(&entry.declared),
             dependencies: entry.dependencies,
         })
         .collect();

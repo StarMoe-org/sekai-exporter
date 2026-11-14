@@ -241,7 +241,7 @@ pub(crate) fn change(
     derivations: &dyn Derivations,
     threads: usize,
     monitor: &Monitor,
-) -> Result<Option<Change>, String> {
+) -> Result<Change, String> {
     let _span = monitor.span("publish", "storage", "");
     let files = files(assets, objects, derivations, threads, monitor)?;
     let outside = files.values().find(|file| {
@@ -264,5 +264,5 @@ pub(crate) fn change(
     for file in files.into_values() {
         change.add_file(file).map_err(|e| e.to_string())?;
     }
-    Ok(Some(change))
+    Ok(change)
 }

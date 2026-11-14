@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use crate::claims::{self, Claims, Ruling};
 use crate::eval::{Output, hex, parallel};
 use crate::reuse::{UnitKey, UnitResult};
+use crate::stream::Content;
 use crate::version::BundleFiles;
 
 /// The format version of the root of a region.
@@ -108,8 +109,8 @@ impl StateFiles for DirectoryFiles {
 pub struct BundleState {
     /// The name of the bundle.
     pub name: String,
-    /// The content of the bundle, as [`crate::stream::Entry::content`] identifies it.
-    pub content: String,
+    /// The content of the bundle.
+    pub content: Content,
     /// Each serialized file of the bundle and the external files it names.
     pub files: BundleFiles,
 }
@@ -279,10 +280,16 @@ macro_rules! state_rows {
 state_rows!(BundleState => name, UnitState => unit, Claims => name, TableOutput => name);
 
 impl RegionState {
-    /// Advances the units and claims of the state by a run that kept what the units `kept` gave
-    /// last time and gave `results` for every other unit. Returns a ruling for each name the
-    /// owner of which may have changed.
-    pub fn advance(&mut self, kept: &[String], results: &[UnitResult]) -> Vec<Ruling> {
+    /// Advances the bundles, units and claims of the state by a run of a version with `bundles`,
+    /// which kept what the units `kept` gave last time and gave `results` for every other unit.
+    /// Returns a ruling for each name the owner of which may have changed.
+    pub fn advance(
+        &mut self,
+        bundles: Vec<BundleState>,
+        kept: &[String],
+        results: &[UnitResult],
+    ) -> Vec<Ruling> {
+        self.bundles = bundles;
         let kept: BTreeSet<&str> = kept.iter().map(String::as_str).collect();
         self.units.retain(|unit| kept.contains(unit.unit.as_str()));
         self.units.extend(results.iter().filter_map(UnitState::of));
@@ -473,7 +480,7 @@ mod tests {
             bundles: (0..units)
                 .map(|i| BundleState {
                     name: name(i),
-                    content: format!("declared {i}"),
+                    content: Content::Declared(i.to_string()),
                     files: vec![(format!("CAB-{i}"), vec!["CAB-0".to_owned()])],
                 })
                 .collect(),
@@ -555,7 +562,7 @@ mod tests {
             result("b", &["y"]),
             result("c", &["z"]),
         ];
-        state.advance(&[], &first);
+        state.advance(Vec::new(), &[], &first);
         let owners = |state: &RegionState| -> Vec<(String, Option<String>)> {
             let owner = |c: &Claims| c.owner().map(|o| o.unit.clone());
             state
@@ -567,7 +574,7 @@ mod tests {
         assert_eq!(owners(&state).len(), 3);
 
         // b now gives x as well, c is gone, and a is kept.
-        let rulings = state.advance(&["a".to_owned()], &[result("b", &["x", "y"])]);
+        let rulings = state.advance(Vec::new(), &["a".to_owned()], &[result("b", &["x", "y"])]);
         let units: Vec<&str> = state.units.iter().map(|u| u.unit.as_str()).collect();
         assert_eq!(units, ["a", "b"]);
         assert_eq!(

@@ -37,7 +37,7 @@ fn entry(name: &str, dependencies: &[&str]) -> Entry {
     Entry {
         name: name.to_owned(),
         size: 1,
-        content: String::new(),
+        content: None,
         dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
     }
 }

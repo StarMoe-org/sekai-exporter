@@ -1,8 +1,10 @@
-//! The records of the state of a region, backed by the catalog of the output directory.
+//! The records of the state of a region, with the catalog of the output directory in front.
 //!
 //! An output directory that earlier versions of `update` wrote keeps the records of units and
-//! derivations in its catalog. A run finds there what the records lack, and the units it takes
-//! from there are recorded with the run, so that later runs on any machine find them.
+//! derivations in its catalog. A record is named by the key or fingerprint of what it holds, so
+//! the catalog and the records agree on every name they share. A run therefore looks in the
+//! catalog first, which costs no request, and in the records after it. The units it takes from the
+//! catalog are recorded with the run, so that later runs on any machine find them.
 
 use std::io;
 
@@ -11,20 +13,17 @@ use sekai_catalog::{Derivations, Derived};
 use sekai_pipeline::records::Records;
 use sekai_pipeline::reuse::{Found, Recorded, UnitKey};
 
-/// The records, and the catalog behind them when the output directory has one.
+/// The records, behind the catalog of the output directory.
 pub(super) struct Backed<'a> {
     pub(super) records: &'a Records<'a>,
-    pub(super) catalog: Option<&'a CatalogDerivations>,
+    pub(super) catalog: &'a CatalogDerivations,
 }
 
 impl Derivations for Backed<'_> {
     fn get(&self, fingerprint: &[u8; 32]) -> io::Result<Option<Derived>> {
-        if let Some(derived) = self.records.get(fingerprint)? {
-            return Ok(Some(derived));
-        }
-        match self.catalog {
-            Some(catalog) => catalog.get(fingerprint),
-            None => Ok(None),
+        match self.catalog.get(fingerprint)? {
+            Some(derived) => Ok(Some(derived)),
+            None => self.records.get(fingerprint),
         }
     }
 
@@ -39,12 +38,9 @@ impl Derivations for Backed<'_> {
 
 impl Recorded for Backed<'_> {
     fn record(&self, unit: &str, key: &UnitKey) -> io::Result<Option<Found>> {
-        if let Some(found) = self.records.record(unit, key)? {
-            return Ok(Some(found));
-        }
-        match self.catalog {
-            Some(catalog) => catalog.catalog().record(unit, key),
-            None => Ok(None),
+        match self.catalog.catalog().record(unit, key)? {
+            Some(found) => Ok(Some(found)),
+            None => self.records.record(unit, key),
         }
     }
 }

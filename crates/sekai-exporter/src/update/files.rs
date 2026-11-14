@@ -15,12 +15,12 @@ use std::sync::PoisonError;
 use sekai_catalog::store::parse_hex;
 use sekai_game::cdn::BundleEntry;
 use sekai_pipeline::state::BundleState;
-use sekai_pipeline::stream::{self, Entry};
+use sekai_pipeline::stream::{self, Content, Entry};
 use sekai_pipeline::version::{BundleFiles, bundle_files, indexed_files};
 use sekai_pipeline::{BundleIndexes, parallel};
 use sekai_unity::BlockCache;
 
-use super::{Fetcher, declared_content, open_input};
+use super::fetch::{Fetcher, open_input};
 
 /// The serialized files of a bundle.
 struct Files {
@@ -68,11 +68,10 @@ impl Fetcher<'_> {
         let mut stated: Vec<BundleState> = manifest
             .iter()
             .zip(&known)
-            .filter(|(entry, _)| !entry.content.is_empty())
             .filter_map(|(entry, files)| {
                 Some(BundleState {
                     name: entry.name.clone(),
-                    content: entry.content.clone(),
+                    content: entry.content.clone()?,
                     files: files.as_ref()?.files.clone(),
                 })
             })
@@ -152,13 +151,11 @@ impl Fetcher<'_> {
 
     /// The files of the bundle of `entry` that the state of the region has under its content.
     fn stated_files(&self, entry: &Entry) -> Option<&BundleFiles> {
-        if entry.content.is_empty() {
-            return None;
-        }
+        let content = entry.content.as_ref()?;
         let bundles = self.bundles;
         let found = bundles.binary_search_by(|bundle| bundle.name.as_str().cmp(&entry.name));
         let bundle = &bundles[found.ok()?];
-        (bundle.content == entry.content).then_some(&bundle.files)
+        (bundle.content == *content).then_some(&bundle.files)
     }
 
     /// The SHA-256 of the bundle of `entry`: as this run fetched it, or as the catalog records it
@@ -170,9 +167,9 @@ impl Fetcher<'_> {
         }
         drop(fetched);
         let row = self.catalog.bundle(self.region, &entry.name)?;
-        let declared = row.filter(|row| {
-            !row.declared.is_empty() && declared_content(&row.declared) == entry.content
-        });
+        let declared = row.filter(
+            |row| matches!(&entry.content, Some(Content::Declared(hash)) if *hash == row.declared),
+        );
         Ok(declared.and_then(|row| parse_hex(&row.sha256)))
     }
 

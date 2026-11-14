@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use sekai_catalog::{LocalStore, MemoryUnitRecords, UnitRecords};
 use sekai_convert::image::Texture;
 use sekai_convert::{
-    Asset, Content, Context, ConvertError, Converter, Member, ObjectId, ObjectIndex,
+    Asset, Content, Context, ConvertError, Converter, Cost, Encoders, Member, ObjectId, ObjectIndex,
 };
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::NoRecorder;
@@ -55,7 +55,7 @@ fn entry(name: &str, dependencies: &[&str]) -> Entry {
     Entry {
         name: name.to_owned(),
         size: 1,
-        content: String::new(),
+        content: None,
         dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
     }
 }
@@ -107,70 +107,80 @@ fn converters() -> Vec<Box<dyn Converter>> {
     vec![Box::new(Texture), Box::new(Data)]
 }
 
-/// The converter of the same form at its next version, giving the same assets.
-struct Next(Box<dyn Converter>);
+/// The converter of a form as another build has it: at a later version or revision, or unable to
+/// read its roots yet. Everything else is the converter's own.
+struct Build {
+    of: Box<dyn Converter>,
+    later_versions: u32,
+    later_revisions: u32,
+    reads: bool,
+}
 
-impl Converter for Next {
-    fn name(&self) -> &'static str {
-        self.0.name()
+impl Build {
+    /// `of` at its next version, giving the same assets.
+    fn next_version(of: impl Converter + 'static) -> Box<dyn Converter> {
+        Self::of(of, 1, 0, true)
     }
 
-    fn version(&self) -> u32 {
-        self.0.version() + 1
+    /// `of` at the same version and its next revision.
+    fn next_revision(of: impl Converter + 'static) -> Box<dyn Converter> {
+        Self::of(of, 0, 1, true)
     }
 
-    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
-        self.0.is_root(object, script, paths)
+    /// `of` at the same version and revision, unable to read its roots yet.
+    fn unready(of: impl Converter + 'static) -> Box<dyn Converter> {
+        Self::of(of, 0, 0, false)
     }
 
-    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
-        self.0.convert(root, cx)
+    fn of(
+        of: impl Converter + 'static,
+        later_versions: u32,
+        later_revisions: u32,
+        reads: bool,
+    ) -> Box<dyn Converter> {
+        Box::new(Self {
+            of: Box::new(of),
+            later_versions,
+            later_revisions,
+            reads,
+        })
     }
 }
 
-/// The converter of the same form and version at its next revision.
-struct Revised(Box<dyn Converter>);
-
-impl Converter for Revised {
+impl Converter for Build {
     fn name(&self) -> &'static str {
-        self.0.name()
+        self.of.name()
     }
 
     fn version(&self) -> u32 {
-        self.0.version()
+        self.of.version() + self.later_versions
     }
 
     fn revision(&self) -> u32 {
-        self.0.revision() + 1
+        self.of.revision() + self.later_revisions
+    }
+
+    fn encoders(&self) -> Encoders {
+        self.of.encoders()
     }
 
     fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
-        self.0.is_root(object, script, paths)
+        self.of.is_root(object, script, paths)
     }
 
     fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
-        self.0.convert(root, cx)
-    }
-}
-
-/// The converter of the same form and version in a build that cannot read its roots yet.
-struct Unready(Box<dyn Converter>);
-
-impl Converter for Unready {
-    fn name(&self) -> &'static str {
-        self.0.name()
+        if !self.reads {
+            return Err(ConvertError::new("unsupported", "not readable yet"));
+        }
+        self.of.convert(root, cx)
     }
 
-    fn version(&self) -> u32 {
-        self.0.version()
+    fn inputs(&self, root: ObjectId, cx: &dyn Context) -> Vec<ObjectId> {
+        self.of.inputs(root, cx)
     }
 
-    fn is_root(&self, object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
-        self.0.is_root(object, script, paths)
-    }
-
-    fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
-        Err(ConvertError::new("unsupported", "not readable yet"))
+    fn cost(&self, root: ObjectId, object: &ObjectIndex, cx: &dyn Context) -> Cost {
+        self.of.cost(root, object, cx)
     }
 }
 
@@ -311,12 +321,15 @@ fn content(streamed: &Streamed) -> Streamed {
     content
 }
 
-/// Two independent units: the data object refers to a material of `fixture_scene`, which its
-/// unit does not depend on, so that asset fails.
+/// Two independent units, whose bundles have the declared hashes `data` and `scene`, or none
+/// when empty: the data object refers to a material of `fixture_scene`, which its unit does not
+/// depend on, so that asset fails.
 fn identified_manifest(data: &str, scene: &str) -> Vec<Entry> {
+    let declared =
+        |hash: &str| (!hash.is_empty()).then(|| stream::Content::Declared(hash.to_owned()));
     let mut manifest = vec![entry("fixture_data", &[]), entry("fixture_scene", &[])];
-    manifest[0].content = data.to_owned();
-    manifest[1].content = scene.to_owned();
+    manifest[0].content = declared(data);
+    manifest[1].content = declared(scene);
     manifest
 }
 
@@ -373,7 +386,7 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
     let reuse = Reuse::new(&first.manifest, &stream, &records).unwrap();
     let outcome = reuse.evaluate(first.inputs, &stream).unwrap();
     let mut state = RegionState::default();
-    state.advance(&outcome.kept, &outcome.results);
+    state.advance(Vec::new(), &outcome.kept, &outcome.results);
 
     // fixture_data has new content. No record is written, so what fixture_scene gave comes from
     // the state alone.
@@ -397,7 +410,7 @@ fn units_the_last_run_left_under_the_same_key_keep_what_they_gave() {
 
     // The claims are those of the first run, and fixture_data has its new key.
     let mut again = state.clone();
-    again.advance(&outcome.kept, &outcome.results);
+    again.advance(Vec::new(), &outcome.kept, &outcome.results);
     assert_eq!(again.claims, state.claims);
     let keys = |state: &RegionState| state.units.iter().map(|u| u.key).collect::<Vec<_>>();
     assert_eq!(keys(&again)[1], keys(&state)[1]);
@@ -417,7 +430,7 @@ fn a_new_version_evaluates_again_only_the_units_with_roots_of_its_form() {
     assert_eq!(records.len(), 2);
 
     // Only fixture_data has roots of the data form.
-    let renewed: Vec<Box<dyn Converter>> = vec![Box::new(Texture), Box::new(Next(Box::new(Data)))];
+    let renewed: Vec<Box<dyn Converter>> = vec![Box::new(Texture), Build::next_version(Data)];
     let (evaluated, reused, _) = streamed_reusing_with(&root, &run, &records, &renewed);
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
@@ -438,8 +451,7 @@ fn an_asset_that_failed_is_converted_again_once_its_converter_has_a_new_revision
     };
     let whole = streamed(&root, &run);
 
-    let unready: Vec<Box<dyn Converter>> =
-        vec![Box::new(Unready(Box::new(Texture))), Box::new(Data)];
+    let unready: Vec<Box<dyn Converter>> = vec![Build::unready(Texture), Box::new(Data)];
     let (_, _, first) = streamed_reusing_with(&root, &run, &records, &unready);
     let failed = |streamed: &Streamed| {
         let outputs = &streamed.evaluation.outputs;
@@ -457,8 +469,7 @@ fn an_asset_that_failed_is_converted_again_once_its_converter_has_a_new_revision
     assert!(failed(&again));
 
     // The next revision, able to read them, converts them; fixture_scene has no textures.
-    let revised: Vec<Box<dyn Converter>> =
-        vec![Box::new(Revised(Box::new(Texture))), Box::new(Data)];
+    let revised: Vec<Box<dyn Converter>> = vec![Build::next_revision(Texture), Box::new(Data)];
     let (evaluated, reused, second) = streamed_reusing_with(&root, &run, &records, &revised);
     assert_eq!(evaluated, ["fixture_data"]);
     assert_eq!(reused, 1);
@@ -481,7 +492,7 @@ fn a_unit_without_identified_contents_or_with_errors_is_not_recorded() {
     let mut manifest = identified_manifest("d1", "s1");
     manifest[0].dependencies = vec!["absent".to_owned()];
     manifest.push(entry("absent", &[]));
-    manifest[2].content = "a1".to_owned();
+    manifest[2].content = Some(stream::Content::Declared("a1".to_owned()));
     let records = MemoryUnitRecords::default();
     let run = Run {
         manifest,

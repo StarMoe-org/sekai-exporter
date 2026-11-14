@@ -17,13 +17,14 @@
 //! nor on the number of threads, and publishing is a step after the last unit.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map};
+use std::fmt;
 use std::io;
 use std::ops::Range;
 use std::panic;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, ScopedJoinHandle};
 
-use sekai_catalog::{BundleIndexes, Derivations, Store};
+use sekai_catalog::{BundleIndexes, Derivations, Key, Store};
 use sekai_convert::{Converter, ObjectId};
 use sekai_format::{AssetDocument, AssetError};
 use sekai_unity::index::{Resolved, VersionIndex};
@@ -47,12 +48,49 @@ pub struct Entry {
     pub name: String,
     /// The size of the bundle in bytes, as the manifest declares it.
     pub size: u64,
-    /// What identifies the bytes of the bundle, such as a hash the manifest declares for them or
-    /// their SHA-256, or empty when nothing does. Entries with the same name and content hold the
-    /// same bytes.
-    pub content: String,
+    /// What identifies the bytes of the bundle, unless nothing does.
+    pub content: Option<Content>,
     /// The names of the bundles this one depends on.
     pub dependencies: Vec<String>,
+}
+
+/// What identifies the bytes of a bundle: entries with the same name and content hold the same
+/// bytes. Its text, such as `declared 1a2b`, is what keys and states hold of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "String", try_from = "String")]
+pub enum Content {
+    /// A hash that the manifest declares for them.
+    Declared(String),
+    /// Their SHA-256, as the key of the bundle in the input store.
+    Bytes(Key),
+}
+
+impl fmt::Display for Content {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Declared(hash) => write!(f, "declared {hash}"),
+            Self::Bytes(key) => write!(f, "bytes {key}"),
+        }
+    }
+}
+
+impl From<Content> for String {
+    fn from(content: Content) -> Self {
+        content.to_string()
+    }
+}
+
+impl TryFrom<String> for Content {
+    type Error = String;
+
+    fn try_from(text: String) -> Result<Self, String> {
+        let unknown = || format!("{text:?} identifies no content");
+        match text.split_once(' ') {
+            Some(("declared", hash)) => Ok(Self::Declared(hash.to_owned())),
+            Some(("bytes", key)) => key.parse().map(Self::Bytes).map_err(|_| unknown()),
+            _ => Err(unknown()),
+        }
+    }
 }
 
 /// Where the bytes of the bundles of a manifest come from.
@@ -1124,11 +1162,22 @@ pub(crate) fn finish(gathered: Gathered) -> Streamed {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_content_reads_back_from_its_text() {
+        let key = Key::of(b"bundle bytes", "bundle");
+        for content in [Content::Declared("1a2b".to_owned()), Content::Bytes(key)] {
+            let text = String::from(content.clone());
+            assert_eq!(Content::try_from(text), Ok(content));
+        }
+        assert!(Content::try_from("1a2b".to_owned()).is_err());
+        assert!(Content::try_from("bytes 1a2b".to_owned()).is_err());
+    }
+
     fn entry(name: &str, size: u64, dependencies: &[&str]) -> Entry {
         Entry {
             name: name.to_owned(),
             size,
-            content: String::new(),
+            content: None,
             dependencies: dependencies.iter().map(|d| (*d).to_owned()).collect(),
         }
     }

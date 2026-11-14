@@ -179,26 +179,27 @@ impl<'m> Reuse<'m> {
     fn split(
         manifest: &'m [Entry],
         stream: &Stream<'_>,
-        lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Found>>,
+        lookup: impl Fn(&str, &UnitKey) -> io::Result<Option<Found>> + Sync,
     ) -> io::Result<Self> {
         let units = Units::new(manifest);
         let context = context(stream);
         let identities = identities(stream);
         let current: BTreeSet<&str> = identities.values().flat_map(Identities::both).collect();
         let name = |entry: usize| units.entries[entry].name.as_str();
-        let found = (0..units.entries.len())
-            .map(|unit| {
-                let key = key(&context, &units, unit);
-                let found = match &key {
-                    Some(key) => lookup(name(unit), key)?,
-                    None => None,
-                };
-                Ok((
-                    key,
-                    found.filter(|found| holds_with(found.forms(), &current)),
-                ))
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+        let found_for = |unit: usize| -> io::Result<(Option<UnitKey>, Option<Found>)> {
+            let key = key(&context, &units, unit);
+            let found = match &key {
+                Some(key) => lookup(name(unit), key)?,
+                None => None,
+            };
+            Ok((
+                key,
+                found.filter(|found| holds_with(found.forms(), &current)),
+            ))
+        };
+        // A lookup may wait on a request, so the units are looked up on the threads of the run.
+        let found = eval::parallel(units.entries.len(), stream.options.threads, found_for);
+        let found = found.into_iter().collect::<io::Result<Vec<_>>>()?;
         let needed: BTreeSet<usize> = found
             .iter()
             .enumerate()
@@ -397,10 +398,8 @@ fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
     let mut text = format!("{context}unit {}\n", units.entries[unit].name);
     for &entry in &units.windows[unit] {
         let entry = units.entries[entry];
-        if entry.content.is_empty() {
-            return None;
-        }
-        text.push_str(&format!("bundle {} {}\n", entry.name, entry.content));
+        let content = entry.content.as_ref()?;
+        text.push_str(&format!("bundle {} {content}\n", entry.name));
     }
     Some(UnitKey(Sha256::digest(text.as_bytes()).into()))
 }

@@ -2,14 +2,15 @@
 //! under its key, and the output of a derivation under its fingerprint.
 //!
 //! A run reads a record only when it needs it, and writes the records of what it derived once
-//! the objects they name are in the destination. Every object a record names is therefore there,
-//! and a run knows the size of each object a derivation record names without asking.
+//! the objects they name are in the destination. A derivation whose object the destination does
+//! not hold is not recorded. Every object a record names is therefore there, and a run knows the
+//! size of each object a derivation record names without asking.
 
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use sekai_catalog::{Derivations, Derived, Holdings, Key, MemoryHoldings, Store};
+use sekai_catalog::{Derivations, Derived, Holdings, Key, MemoryHoldings};
 use serde::{Deserialize, Serialize};
 
 use crate::eval::{hex, parallel};
@@ -42,10 +43,9 @@ enum DerivationRecord {
 /// The records of earlier runs, and those of this run until they are written.
 pub struct Records<'a> {
     files: &'a dyn StateFiles,
-    /// The objects that the records read name, with their sizes.
+    /// The objects that the destination holds, with their sizes: those the records read name,
+    /// and those the run puts there.
     held: &'a MemoryHoldings,
-    /// Where the objects of this run's derivations are, to size them.
-    store: &'a dyn Store,
     /// The derivations read or made, by fingerprint.
     derivations: Mutex<HashMap<[u8; 32], Option<Derived>>>,
     /// The derivations made by this run, to write.
@@ -63,29 +63,21 @@ fn invalid(name: &str, e: impl std::fmt::Display) -> io::Error {
 }
 
 impl<'a> Records<'a> {
-    /// The records `files` keep. The objects the derivation records name are added to `held` as
-    /// they are read, and the objects of new derivations are sized from `store`.
-    pub fn new(files: &'a dyn StateFiles, held: &'a MemoryHoldings, store: &'a dyn Store) -> Self {
+    /// The records `files` keep, for a destination that holds `held`. The objects the derivation
+    /// records name are added to `held` as they are read.
+    pub fn new(files: &'a dyn StateFiles, held: &'a MemoryHoldings) -> Self {
         Self {
             files,
             held,
-            store,
             derivations: Mutex::default(),
             made: Mutex::default(),
             read: Mutex::default(),
         }
     }
 
-    /// The asset documents that [`Records::write`] of `units` names: those of the derivations
-    /// this run made and of the assets of the units it writes.
+    /// The asset documents that the unit records of [`Records::write`] of `units` name.
     pub fn documents(&self, units: &[&UnitResult]) -> io::Result<Vec<Key>> {
-        let mut documents: Vec<Key> = lock(&self.made)
-            .iter()
-            .filter_map(|(_, derived)| match derived {
-                Derived::Document(key) => Some(key.clone()),
-                Derived::Nothing => None,
-            })
-            .collect();
+        let mut documents = Vec::new();
         for unit in self.to_write(units) {
             documents.extend(unit.record.documents()?);
         }
@@ -104,15 +96,22 @@ impl<'a> Records<'a> {
             .collect()
     }
 
-    /// Writes the derivations this run made and the record of each of `units` that a later run
-    /// may take and that was not read from the records, on up to `threads` threads. Call it once
-    /// the objects they name are in the destination. Returns how many records were written.
+    /// Writes the derivations this run made whose objects the destination holds, and the record
+    /// of each of `units` that a later run may take and that was not read from the records, on up
+    /// to `threads` threads. Call it once the objects the unit records name are in the
+    /// destination. Returns how many records were written.
     pub fn write(&self, units: &[&UnitResult], threads: usize) -> io::Result<usize> {
         let units = self.to_write(units);
         let made = std::mem::take(&mut *lock(&self.made));
-        let derivations = parallel(made.len(), threads, |i| {
-            let (fingerprint, derived) = &made[i];
-            self.write_derivation(fingerprint, derived)
+        let mut held = Vec::with_capacity(made.len());
+        for (fingerprint, derived) in made {
+            if let Some(recorded) = self.recorded(derived)? {
+                held.push((fingerprint, recorded));
+            }
+        }
+        let derivations = parallel(held.len(), threads, |i| {
+            let (fingerprint, recorded) = &held[i];
+            self.write_derivation(fingerprint, recorded)
         });
         let records = parallel(units.len(), threads, |i| self.write_unit(units[i]));
         derivations
@@ -122,23 +121,26 @@ impl<'a> Records<'a> {
             .map(|written| written.len())
     }
 
-    fn write_derivation(&self, fingerprint: &[u8; 32], derived: &Derived) -> io::Result<()> {
-        let recorded = match derived {
+    /// The record of `derived`, or `None` when the destination does not hold its object.
+    fn recorded(&self, derived: Derived) -> io::Result<Option<DerivationRecord>> {
+        Ok(match derived {
             Derived::Document(key) => {
-                let size = self.store.size(key)?.ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::NotFound,
-                        format!("{key} is not in the store"),
-                    )
-                })?;
-                DerivationRecord::Document {
+                let size = self.held.size(&key)?;
+                size.map(|size| DerivationRecord::Document {
                     key: key.to_string(),
                     size,
-                }
+                })
             }
-            Derived::Nothing => DerivationRecord::Nothing,
-        };
-        let bytes = serde_json::to_vec(&recorded).map_err(io::Error::other)?;
+            Derived::Nothing => Some(DerivationRecord::Nothing),
+        })
+    }
+
+    fn write_derivation(
+        &self,
+        fingerprint: &[u8; 32],
+        recorded: &DerivationRecord,
+    ) -> io::Result<()> {
+        let bytes = serde_json::to_vec(recorded).map_err(io::Error::other)?;
         self.files.write(&derivation_file(fingerprint), &bytes)
     }
 
@@ -225,7 +227,6 @@ impl Recorded for Earlier<'_> {
 
 #[cfg(test)]
 mod tests {
-    use sekai_catalog::MemoryStore;
 
     use super::*;
     use crate::state::MemoryFiles;
@@ -240,40 +241,42 @@ mod tests {
     }
 
     #[test]
-    fn derivations_are_written_with_the_sizes_of_their_objects() {
+    fn derivations_are_written_with_the_sizes_of_their_held_objects() {
         let files = MemoryFiles::default();
-        let store = MemoryStore::default();
-        let document = store.put(b"{\"a\":1}", "json").unwrap();
+        let document = Key::of(b"{\"a\":1}", "json");
+        let unheld = Key::of(b"unheld", "webp");
         let held = MemoryHoldings::default();
-        let records = Records::new(&files, &held, &store);
+        let records = Records::new(&files, &held);
         records
             .put([1; 32], Derived::Document(document.clone()))
             .unwrap();
         records.put([2; 32], Derived::Nothing).unwrap();
+        records.put([4; 32], Derived::Document(unheld)).unwrap();
         assert_eq!(
             records.get(&[1; 32]).unwrap(),
             Some(Derived::Document(document.clone()))
         );
         assert!(files.names().is_empty());
+        held.hold(&[(document.clone(), 7)]).unwrap();
         assert_eq!(records.write(&[], 2).unwrap(), 2);
 
         let later_held = MemoryHoldings::default();
-        let later = Records::new(&files, &later_held, &store);
+        let later = Records::new(&files, &later_held);
         assert_eq!(
             later.get(&[1; 32]).unwrap(),
             Some(Derived::Document(document.clone()))
         );
         assert_eq!(later.get(&[2; 32]).unwrap(), Some(Derived::Nothing));
         assert_eq!(later.get(&[3; 32]).unwrap(), None);
+        assert_eq!(later.get(&[4; 32]).unwrap(), None);
         assert_eq!(later_held.size(&document).unwrap(), Some(7));
     }
 
     #[test]
     fn only_reusable_units_are_recorded() {
         let files = MemoryFiles::default();
-        let store = MemoryStore::default();
         let held = MemoryHoldings::default();
-        let records = Records::new(&files, &held, &store);
+        let records = Records::new(&files, &held);
         let (kept, broken) = (unit("a", 1, true), unit("b", 2, false));
         assert_eq!(records.write(&[&kept, &broken], 2).unwrap(), 1);
         let key = |unit: &UnitResult| unit.key.unwrap();
@@ -287,13 +290,12 @@ mod tests {
     #[test]
     fn a_record_read_is_not_written_again() {
         let files = MemoryFiles::default();
-        let store = MemoryStore::default();
         let held = MemoryHoldings::default();
-        let first = Records::new(&files, &held, &store);
+        let first = Records::new(&files, &held);
         let shared = unit("shared", 3, true);
         assert_eq!(first.write(&[&shared], 1).unwrap(), 1);
 
-        let later = Records::new(&files, &held, &store);
+        let later = Records::new(&files, &held);
         assert!(later.record("shared", &UnitKey([3; 32])).unwrap().is_some());
         let new = unit("new", 4, true);
         assert_eq!(later.write(&[&shared, &new], 1).unwrap(), 1);
@@ -302,9 +304,8 @@ mod tests {
     #[test]
     fn the_last_run_of_the_region_comes_first() {
         let files = MemoryFiles::default();
-        let store = MemoryStore::default();
         let held = MemoryHoldings::default();
-        let records = Records::new(&files, &held, &store);
+        let records = Records::new(&files, &held);
         let elsewhere = unit("shared", 3, true);
         records.write(&[&elsewhere], 1).unwrap();
 

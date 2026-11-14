@@ -71,14 +71,14 @@ impl<'de> Deserialize<'de> for UnitKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Found {
     /// The last run of the region gave the unit under the same key, with converters of these
-    /// [`identity`]s; the state of the region holds what it gave.
+    /// identities; the state of the region holds what it gave.
     Kept(BTreeSet<String>),
     /// A result recorded by any run.
     Recorded(Record),
 }
 
 impl Found {
-    /// The [`identity`] of each converter the unit has roots of.
+    /// The identity of each converter the unit has roots of.
     fn forms(&self) -> &BTreeSet<String> {
         match self {
             Found::Kept(forms) => forms,
@@ -393,7 +393,7 @@ fn key(context: &str, units: &Units<'_>, unit: usize) -> Option<UnitKey> {
 /// window, with the converters that gave them.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
-    /// The [`identity`] of each converter the unit has roots of.
+    /// The identity of each converter the unit has roots of.
     forms: BTreeSet<String>,
     assets: Vec<RecordedAsset>,
     /// The logical path and path ID of each root left unnamed.
@@ -438,7 +438,7 @@ impl Record {
         serde_json::to_vec(self).map_err(io::Error::other)
     }
 
-    /// The [`identity`] of each converter the unit has roots of.
+    /// The identity of each converter the unit has roots of.
     pub fn forms(&self) -> &BTreeSet<String> {
         &self.forms
     }

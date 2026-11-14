@@ -60,6 +60,8 @@ struct Options {
     force: bool,
     /// Whether the bucket is checked against a listing of its store, trusting nothing else.
     verify: bool,
+    /// Whether every asset built from tables is built again, whatever the state keeps of it.
+    rebuild_tables: bool,
     /// Whether the version of the source is only compared with the last one recorded.
     check: bool,
 }
@@ -76,6 +78,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut plain = false;
     let mut force = false;
     let mut verify = false;
+    let mut rebuild_tables = false;
     let mut check = false;
     while let Some(arg) = parser.next()? {
         match arg {
@@ -87,6 +90,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("plain") => plain = true,
             Long("force") => force = true,
             Long("verify") => verify = true,
+            Long("rebuild-tables") => rebuild_tables = true,
             Long("check") => check = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
@@ -101,6 +105,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let acts = [
         ("--force", force),
         ("--verify", verify),
+        ("--rebuild-tables", rebuild_tables),
         ("--only", !only.is_empty()),
     ];
     if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
@@ -117,6 +122,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         plain,
         force,
         verify,
+        rebuild_tables,
         check,
     })
 }
@@ -819,9 +825,10 @@ impl Context<'_> {
         })
     }
 
-    /// The assets that the converters of tables build, or keep from those the state lists, with
-    /// the assets that the claims of `state` own as those of the version: their documents are
-    /// those of `owners`, or else those of the previous publication `canonical`.
+    /// The assets that the converters of tables build, or keep from those the state lists unless
+    /// `--rebuild-tables` is given, with the assets that the claims of `state` own as those of the
+    /// version: their documents are those of `owners`, or else those of the previous publication
+    /// `canonical`.
     fn build_tables(
         &self,
         opened: &Opened,
@@ -843,7 +850,11 @@ impl Context<'_> {
             store: self.objects,
             recorder: self.monitor,
             threads: self.requests(),
-            previous: &state.tables,
+            previous: if self.options.rebuild_tables {
+                &[]
+            } else {
+                &state.tables
+            },
         };
         let forms: Vec<&'static str> = opened.converters.iter().map(|c| c.name()).collect();
         build_tables(&stage, &state.claims, &forms, &document)

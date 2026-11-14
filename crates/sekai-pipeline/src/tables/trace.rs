@@ -5,6 +5,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::sync::{Mutex, MutexGuard};
 
+use sekai_catalog::Key;
 use sekai_convert::ConvertError;
 use sekai_convert::tables::{AssetEntry, SharedEntries, TableContext, TablePlan};
 use sekai_format::AssetDocument;
@@ -119,11 +120,12 @@ impl TableContext for Traced<'_> {
     }
 }
 
-/// What reads give in this run, each table and each listing of a bundle worked out once.
+/// What reads give in this run, each table, listing of a bundle and document looked up once.
 pub(super) struct Values<'a> {
     version: &'a Assets<'a>,
     tables: Mutex<HashMap<String, Option<String>>>,
     listings: Mutex<HashMap<String, String>>,
+    documents: Mutex<HashMap<String, Option<Key>>>,
 }
 
 impl<'a> Values<'a> {
@@ -132,6 +134,7 @@ impl<'a> Values<'a> {
             version,
             tables: Mutex::default(),
             listings: Mutex::default(),
+            documents: Mutex::default(),
         }
     }
 
@@ -165,7 +168,7 @@ impl<'a> Values<'a> {
             Read::Bundles => Some(digest_of(self.version.bundles().join("\n"))),
             Read::Assets(bundle) => Some(self.listing(bundle)),
             Read::Document(name) => {
-                let key = (self.version.version.document)(name)?;
+                let key = self.document(name)?;
                 Some(key.map_or_else(|| "none".to_owned(), |key| key.to_string()))
             }
             Read::Shared { map, key } => {
@@ -184,6 +187,16 @@ impl<'a> Values<'a> {
         let digest = (self.version.read)(name).ok().map(digest_of);
         lock(&self.tables).insert(name.to_owned(), digest.clone());
         digest
+    }
+
+    /// The key of the document of the asset `name`, if the version has one.
+    fn document(&self, name: &str) -> io::Result<Option<Key>> {
+        if let Some(found) = lock(&self.documents).get(name) {
+            return Ok(found.clone());
+        }
+        let key = (self.version.version.document)(name)?;
+        lock(&self.documents).insert(name.to_owned(), key.clone());
+        Ok(key)
     }
 
     /// The digest of the assets of `bundle`.

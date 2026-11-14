@@ -105,7 +105,7 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--threads <n>] [--memory <bytes>] [--plain] [--force] [--verify]
-         [--check]
+         [--rebuild-tables] [--check]
       Bring the site of a region of the configuration up to its current
       version. The site is the bucket of the configuration, or else <output>.
       Bundles go to <output>/inputs, which holds game data and must stay
@@ -129,13 +129,16 @@ commands:
       last version in place. An object missing from <output>/store is read back
       from the bucket; --verify first lists the bucket's store, uploads every
       object the version needs that it lacks, and stops when one is in neither
-      the bucket nor <output>/store. --only selects bundles by name prefix, with
+      the bucket nor <output>/store. An asset built from tables is kept when
+      what it read gives what it gave in the last run; --rebuild-tables builds
+      every one again. --only selects bundles by name prefix, with
       their dependencies. A selection is neither recorded as a version nor sent
       to a bucket; it publishes under <output>/published and needs an <output>
       without a complete run. --check only looks up the current version and
       prints whether it differs from the last one the site recorded. It exits
       with 0 when the version is unchanged and 1 when it changed, downloads and
-      writes nothing, and cannot be combined with --force, --verify or --only.
+      writes nothing, and cannot be combined with --force, --verify,
+      --rebuild-tables or --only.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

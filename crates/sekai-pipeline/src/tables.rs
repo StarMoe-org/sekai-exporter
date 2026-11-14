@@ -188,6 +188,7 @@ fn store_members(
 /// What the previous run built for the asset of `job`, when its plan is reusable and its reads
 /// give what they gave then.
 fn kept(
+    stage: &TableStage<'_>,
     job: Job<'_>,
     previous: &HashMap<&str, &TableOutput>,
     values: &Values<'_>,
@@ -199,6 +200,7 @@ fn kept(
     let (Some(trace), Ok(document)) = (&old.trace, old.document.parse()) else {
         return Ok(None);
     };
+    let _span = stage.recorder.span("keep", job.converter.name(), name);
     if job.digest(values, &trace.reads)?.as_ref() != Some(&trace.digest) {
         return Ok(None);
     }
@@ -349,7 +351,7 @@ pub fn build(stage: &TableStage<'_>, version: &VersionAssets<'_>) -> io::Result<
     let values = Values::new(&assets);
     let built = parallel(jobs.len(), stage.threads, |i| {
         let job = jobs[i];
-        match kept(job, &previous, &values)? {
+        match kept(stage, job, &previous, &values)? {
             Some(kept) => Ok(kept),
             None => build_asset(stage, &assets, &values, job),
         }

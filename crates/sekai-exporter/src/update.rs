@@ -741,11 +741,12 @@ impl Outcome {
     }
 }
 
-/// Updates `options.region`. With a bucket, the run starts from the catalog the bucket keeps and
-/// writes it back once the run has changed it, also when the run fails, since what it recorded
-/// stays true. Then the last version of the region is written beside it, for checks that do not
-/// pull the catalog. One run per bucket goes at a time. A selection runs on the local output
-/// alone.
+/// Updates `options.region`. With a bucket, a version whose content is the last one the bucket
+/// recorded ends the run before anything else is read, unless the run is forced or verifies.
+/// Otherwise the run starts from the catalog the bucket keeps and writes it back once the run has
+/// changed it, also when the run fails, since what it recorded stays true. Then the last version
+/// of the region is written beside it. One run per bucket goes at a time. A selection runs on the
+/// local output alone.
 fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let (config, region) = configuration(options)?;
     let bucket = if options.only.is_empty() {
@@ -756,6 +757,9 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let Some(bucket) = bucket else {
         return export_version(options, region, None, monitor).map(|run| run.succeeded());
     };
+    if !(options.force || options.verify) && check(options)? {
+        return Ok(true);
+    }
     let catalog = options.output.join("catalog.redb");
     bucket.pull_catalog(&catalog, monitor)?;
     let run = export_version(options, region, Some(&bucket), monitor);

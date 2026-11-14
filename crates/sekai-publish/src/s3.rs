@@ -708,6 +708,12 @@ fn unrecorded<'a>(
                         format!("{key} has {local} bytes in the store, not {size}"),
                     ));
                 }
+                None if objects.held.complete() => {
+                    return Err(PublishError::new(
+                        "verify",
+                        format!("{key} is in neither the bucket nor the local store"),
+                    ));
+                }
                 None => {}
             }
         }

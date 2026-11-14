@@ -19,6 +19,12 @@ pub trait Holdings: Sync {
     fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>>;
     /// Records that the destination holds `objects`.
     fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()>;
+
+    /// Whether the destination holds nothing but these objects, as after a listing of it, so
+    /// that an object they lack is known to be missing there.
+    fn complete(&self) -> bool {
+        false
+    }
 }
 
 /// No destination: it holds nothing, and nothing can be recorded for it.
@@ -39,18 +45,25 @@ impl Holdings for NoHoldings {
     }
 }
 
-/// Holdings kept in memory.
+/// Holdings kept in memory: what a run learns the destination holds, or a listing of it.
 #[derive(Debug, Default)]
-pub struct MemoryHoldings(Mutex<BTreeMap<Key, u64>>);
+pub struct MemoryHoldings {
+    objects: Mutex<BTreeMap<Key, u64>>,
+    /// Whether they started from a listing of the whole destination.
+    listed: bool,
+}
 
 impl MemoryHoldings {
-    /// Holdings of exactly `objects`, such as a listing of the destination.
-    pub fn new(objects: BTreeMap<Key, u64>) -> Self {
-        Self(Mutex::new(objects))
+    /// The holdings that a listing of the whole destination gives: `objects`, and nothing else.
+    pub fn listed(objects: BTreeMap<Key, u64>) -> Self {
+        Self {
+            objects: Mutex::new(objects),
+            listed: true,
+        }
     }
 
     fn objects(&self) -> MutexGuard<'_, BTreeMap<Key, u64>> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.objects.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -68,6 +81,10 @@ impl Holdings for MemoryHoldings {
     fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()> {
         self.objects().extend(objects.iter().cloned());
         Ok(())
+    }
+
+    fn complete(&self) -> bool {
+        self.listed
     }
 }
 

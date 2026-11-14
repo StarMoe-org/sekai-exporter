@@ -127,15 +127,15 @@ commands:
       object at the site before the records and the state that name it, and
       those before the pointers of the views, so an interrupted run leaves the
       last version in place. An object missing from <output>/store is read back
-      from the bucket; --verify first lists the bucket's store and uploads
-      every object the version needs that it lacks. --only selects bundles by
-      name prefix, with their dependencies. A selection is neither recorded as
-      a version nor sent to a bucket; it publishes under <output>/published and
-      needs an <output> without a complete run. --check only looks up the
-      current version and prints whether it differs from the last one the site
-      recorded. It exits with 0 when the version is unchanged and 1 when it
-      changed, downloads and writes nothing, and cannot be combined with
-      --force, --verify or --only.
+      from the bucket; --verify first lists the bucket's store, uploads every
+      object the version needs that it lacks, and stops when one is in neither
+      the bucket nor <output>/store. --only selects bundles by name prefix, with
+      their dependencies. A selection is neither recorded as a version nor sent
+      to a bucket; it publishes under <output>/published and needs an <output>
+      without a complete run. --check only looks up the current version and
+      prints whether it differs from the last one the site recorded. It exits
+      with 0 when the version is unchanged and 1 when it changed, downloads and
+      writes nothing, and cannot be combined with --force, --verify or --only.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

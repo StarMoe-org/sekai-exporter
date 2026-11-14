@@ -1002,7 +1002,7 @@ fn holdings(
         Site::Bucket(bucket) if options.verify => {
             let listed = bucket.holdings(monitor)?;
             println!("bucket holds {} objects", listed.len());
-            Ok(MemoryHoldings::new(listed))
+            Ok(MemoryHoldings::listed(listed))
         }
         _ => Ok(MemoryHoldings::default()),
     }

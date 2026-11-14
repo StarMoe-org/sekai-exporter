@@ -340,7 +340,7 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
     assert_eq!(report.uploaded, 0);
     assert!(server.object(&lost).is_none());
 
-    let listed = MemoryHoldings::new(s3.holdings().unwrap());
+    let listed = MemoryHoldings::listed(s3.holdings().unwrap());
     // One request for each empty store directory, and more where a directory fills pages.
     assert!(server.count(Operation::List) >= 256);
     let objects = Objects {
@@ -360,6 +360,35 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
         listed.size(&plan.files[0].key).unwrap(),
         Some(plan.files[0].size)
     );
+}
+
+#[test]
+fn a_listing_without_an_object_the_store_lacks_is_an_error() {
+    let s = Scratch::new("unlisted");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let s3 = client(&server, SECRET_KEY);
+    let plan = sample(&store, "v1", b"mask");
+    publish(&objects, &s3, "jp/canonical", &plan).unwrap();
+    let key = &plan.files[0].key;
+    server.remove(&object_name(key));
+    std::fs::remove_file(store.path(key)).unwrap();
+
+    let listed = MemoryHoldings::listed(s3.holdings().unwrap());
+    let objects = Objects {
+        local: &store,
+        held: &listed,
+        remote: &NoRemote,
+    };
+    let e = publish(&objects, &s3, "jp/canonical", &plan).unwrap_err();
+    assert_eq!(e.stage, "verify");
+    assert!(e.to_string().contains(&key.to_string()), "{e}");
 }
 
 #[test]

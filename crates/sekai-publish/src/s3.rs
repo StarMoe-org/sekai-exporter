@@ -19,8 +19,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
-use std::sync::Mutex;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sekai_catalog::{Key, LocalStore, Objects, Remote, Store};
@@ -83,6 +84,8 @@ impl fmt::Debug for Credentials {
 /// A client for one bucket.
 pub struct S3 {
     agent: Agent,
+    /// One slot for each of the connections of the bucket.
+    slots: Slots,
     bucket: Bucket,
     credentials: Credentials,
     /// `<scheme>://<authority>` of the endpoint.
@@ -149,6 +152,7 @@ impl S3 {
             .into();
         Ok(Self {
             agent,
+            slots: Slots::new(bucket.connections),
             origin: format!("{scheme}://{authority}"),
             host: authority
                 .strip_suffix(default_port)
@@ -276,7 +280,9 @@ impl S3 {
     }
 
     /// Sends a request for `name` with the canonical query string `query` until it gets a
-    /// response that trying again cannot change.
+    /// response that trying again cannot change. Each attempt waits for a free slot, which the
+    /// response holds until it is dropped, so that no more requests are in flight than the bucket
+    /// has connections.
     fn send(
         &self,
         method: &'static str,
@@ -284,7 +290,7 @@ impl S3 {
         query: &str,
         payload: &str,
         request: impl Fn(&str, Vec<(&'static str, String)>) -> Result<Response<Body>, ureq::Error>,
-    ) -> Result<Response<Body>, String> {
+    ) -> Result<Sent<'_>, String> {
         let uri = format!("{}/{}", self.path, encode(name));
         let url = match query {
             "" => format!("{}{uri}", self.origin),
@@ -293,16 +299,21 @@ impl S3 {
         let mut attempt = 0;
         loop {
             attempt += 1;
+            let slot = self.slots.take();
             let failure = match request(&url, self.headers(method, &uri, query, payload)) {
                 Ok(response) => {
                     let status = response.status().as_u16();
                     if !(status == 429 || status >= 500) || attempt >= ATTEMPTS {
-                        return Ok(response);
+                        return Ok(Sent {
+                            response,
+                            _slot: slot,
+                        });
                     }
                     format!("{method} {name}: HTTP {status}")
                 }
                 Err(e) => format!("{method} {name}: {e}"),
             };
+            drop(slot);
             if attempt >= ATTEMPTS {
                 return Err(failure);
             }
@@ -320,6 +331,7 @@ impl S3 {
     }
 
     /// What `read` makes of the bytes of `name`, or `None` when the bucket does not hold it.
+    /// The request holds its slot while `read` runs, so `read` sends no request to the bucket.
     fn get_with<T>(
         &self,
         name: &str,
@@ -561,6 +573,66 @@ impl S3 {
     }
 }
 
+/// The requests a client may have in flight: a request waits for a free slot and holds it until
+/// its response is dropped.
+struct Slots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A slot taken from [`Slots`], given back when dropped.
+struct Slot<'s>(&'s Slots);
+
+impl Slots {
+    fn new(slots: usize) -> Self {
+        Self {
+            free: Mutex::new(slots),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn free(&self) -> MutexGuard<'_, usize> {
+        self.free.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A free slot, once there is one.
+    fn take(&self) -> Slot<'_> {
+        let mut free = self.free();
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Slot(self)
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        *self.0.free() += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// A response, which holds the slot of its request.
+struct Sent<'s> {
+    response: Response<Body>,
+    _slot: Slot<'s>,
+}
+
+impl Deref for Sent<'_> {
+    type Target = Response<Body>;
+
+    fn deref(&self) -> &Response<Body> {
+        &self.response
+    }
+}
+
+impl DerefMut for Sent<'_> {
+    fn deref_mut(&mut self) -> &mut Response<Body> {
+        &mut self.response
+    }
+}
+
 /// `request` with the signed `headers`.
 fn signed<B>(
     request: ureq::RequestBuilder<B>,
@@ -572,7 +644,7 @@ fn signed<B>(
 }
 
 /// The body of `response` to `method` on `name` as text, when the response is a success.
-fn success_text(method: &str, name: &str, mut response: Response<Body>) -> Result<String, String> {
+fn success_text(method: &str, name: &str, mut response: Sent<'_>) -> Result<String, String> {
     match response.status().as_u16() {
         200 => response
             .body_mut()

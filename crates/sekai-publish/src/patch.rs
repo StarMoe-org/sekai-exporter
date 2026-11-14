@@ -29,11 +29,20 @@ use crate::plan::{
 const JSON: &str = "application/json";
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
 
-/// What a change does at a path: the file of an asset it removes, and the file it adds.
+/// What a change does at a path: whether it removes the file there, and the file it adds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PathEdit {
-    removed: Option<String>,
+    removed: Option<Owner>,
     added: Option<File>,
+}
+
+/// The asset whose file a change removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Owner {
+    /// The file is one of this asset, which the previous publication must confirm.
+    Asset(String),
+    /// The file is whatever the previous publication has at the path.
+    Any,
 }
 
 /// A change to a publication: the files, listing entries and failures of the assets it removes
@@ -51,7 +60,7 @@ impl Change {
     pub(crate) fn remove(&mut self, asset: &Contribution) {
         for file in &asset.files {
             let edit = self.paths.entry(file.path.clone()).or_default();
-            edit.removed = Some(asset.asset.name.clone());
+            edit.removed = Some(Owner::Asset(asset.asset.name.clone()));
         }
         let name = asset.asset.name.clone();
         match &asset.outcome {
@@ -67,11 +76,7 @@ impl Change {
     /// Adds what `asset` contributes. Fails if another added asset has a file at the same path.
     pub(crate) fn add(&mut self, asset: Contribution) -> Result<(), PublishError> {
         for file in asset.files {
-            let edit = self.paths.entry(file.path.clone()).or_default();
-            if edit.added.is_some() {
-                return Err(two_files(&file.path));
-            }
-            edit.added = Some(file);
+            self.add_file(file)?;
         }
         let name = asset.asset.name;
         match asset.outcome {
@@ -82,6 +87,23 @@ impl Change {
                 self.failures.insert(name, Some(failure));
             }
         }
+        Ok(())
+    }
+
+    /// Removes the file at `path`, whichever asset it belongs to, from a view whose assets are
+    /// neither listed nor failed, such as the storage view.
+    pub fn remove_file(&mut self, path: &str) {
+        self.paths.entry(path.to_owned()).or_default().removed = Some(Owner::Any);
+    }
+
+    /// Adds `file` to a view whose assets are neither listed nor failed. Fails if the change adds
+    /// another file at its path.
+    pub fn add_file(&mut self, file: File) -> Result<(), PublishError> {
+        let edit = self.paths.entry(file.path.clone()).or_default();
+        if edit.added.is_some() {
+            return Err(two_files(&file.path));
+        }
+        edit.added = Some(file);
         Ok(())
     }
 
@@ -156,14 +178,46 @@ impl Previous {
         store: &dyn Store,
         paths: impl IntoIterator<Item = &'p str>,
     ) -> Result<Vec<PathFile>, PublishError> {
-        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
-        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
-        let table = Table::new(store, firsts, read_paths);
+        let table = self.path_table(store);
         let mut paths: Vec<&str> = paths.into_iter().collect();
         paths.sort_unstable();
         paths.dedup();
         let files = paths.into_iter().map(|path| table.get(path));
         files.filter_map(Result::transpose).collect()
+    }
+
+    /// The files directly in `directory`, in path order: those at `<directory>/<file>`, where the
+    /// file has no `/`. Only the chunks of the path index that hold such paths are read.
+    pub fn directory(
+        &self,
+        store: &dyn Store,
+        directory: &str,
+    ) -> Result<Vec<PathFile>, PublishError> {
+        let table = self.path_table(store);
+        let prefix = format!("{directory}/");
+        // Every path in the directory sorts before this, since `0` follows `/`.
+        let after = format!("{directory}0");
+        let start = table.chunk_of(&prefix).unwrap_or(0);
+        let mut files = Vec::new();
+        for position in start..table.chunks.len() {
+            if position > start && table.chunks[position].0 >= after {
+                break;
+            }
+            let rows = table.rows(position)?;
+            let inside = rows.iter().filter(|file| {
+                let file_name = file.path.strip_prefix(&prefix);
+                file_name.is_some_and(|name| !name.contains('/'))
+            });
+            files.extend(inside.cloned());
+        }
+        Ok(files)
+    }
+
+    /// The path index, whose chunks are read from `store` as they are needed.
+    fn path_table<'s>(&self, store: &'s dyn Store) -> Table<'s, PathFile> {
+        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
+        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        Table::new(store, firsts, read_paths)
     }
 
     /// The asset document of each asset of `names` that the publication has, in name order.
@@ -272,12 +326,18 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
         Ok(rows)
     }
 
-    /// The row of `key`.
-    fn get(&self, key: &str) -> Result<Option<R>, PublishError> {
-        let position = self
+    /// The position of the chunk that holds `key` if any chunk does, which is the last chunk
+    /// whose first key is not after it.
+    fn chunk_of(&self, key: &str) -> Option<usize> {
+        let after = self
             .chunks
             .partition_point(|(first, _)| first.as_str() <= key);
-        let Some(position) = position.checked_sub(1) else {
+        after.checked_sub(1)
+    }
+
+    /// The row of `key`.
+    fn get(&self, key: &str) -> Result<Option<R>, PublishError> {
+        let Some(position) = self.chunk_of(key) else {
             return Ok(None);
         };
         let rows = self.rows(position)?;
@@ -574,9 +634,16 @@ fn shard_edits(
         for (path, edit) in changes {
             let name = split(path).1;
             match (entries.remove(name), &edit.removed) {
-                (Some(entry), Some(owner)) if entry.asset == *owner => {}
+                (Some(_), Some(Owner::Any)) => {}
+                (Some(entry), Some(Owner::Asset(owner))) if entry.asset == *owner => {}
                 (Some(_), None) => return Err(two_files(path)),
-                (found, Some(owner)) => {
+                (None, Some(Owner::Any)) => {
+                    return Err(PublishError::new(
+                        "previous",
+                        format!("{path} holds no file to remove"),
+                    ));
+                }
+                (found, Some(Owner::Asset(owner))) => {
                     let found = found.map_or("nothing".to_owned(), |entry| entry.asset);
                     return Err(PublishError::new(
                         "previous",

@@ -8,9 +8,9 @@ use sekai_catalog::{
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
-use sekai_publish::patch::{self, Previous};
+use sekai_publish::patch::{self, Change, Previous};
 use sekai_publish::plan::change;
-use sekai_publish::{Binding, Layout, Plan, documents, plan, publish, tree};
+use sekai_publish::{Binding, File, Layout, Plan, documents, plan, publish, tree};
 
 struct Scratch(PathBuf);
 
@@ -555,6 +555,101 @@ fn a_publication_gives_back_the_documents_of_the_assets_it_names() {
     assert_eq!(previous.bindings(&store, names).unwrap(), expected);
     let nothing = Previous::default().bindings(&store, ["group_00/item_00000"]);
     assert!(nothing.unwrap().is_empty());
+}
+
+/// Whether `path` is directly in `directory`.
+fn directly_in(path: &str, directory: &str) -> bool {
+    let file = path
+        .strip_prefix(directory)
+        .and_then(|p| p.strip_prefix('/'));
+    file.is_some_and(|file| !file.contains('/'))
+}
+
+/// A plan of `files` alone, as a view without listings publishes them.
+fn files_plan(version: &str, mut files: Vec<File>) -> Plan {
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Plan {
+        version: version.to_owned(),
+        files,
+        assets: Vec::new(),
+        listings: Default::default(),
+        failures: Vec::new(),
+    }
+}
+
+#[test]
+fn a_directory_is_replaced_file_by_file() {
+    let s = Scratch::new("directory");
+    let store = s.store();
+    let assets = plan("v1", &many(&store, 6000, "x"), &store, 2).unwrap();
+    let before = documents(
+        &store,
+        "jp/storage",
+        &files_plan("v1", assets.files.clone()),
+        Layout::Paths,
+    );
+    let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
+
+    let directory = previous.directory(&store, "group_03").unwrap();
+    let paths: Vec<&str> = directory.iter().map(|f| f.path.as_str()).collect();
+    let expected: Vec<&str> = assets
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|path| directly_in(path, "group_03"))
+        .collect();
+    assert!(expected.len() > 100);
+    assert_eq!(paths, expected);
+    assert!(previous.directory(&store, "group_3").unwrap().is_empty());
+
+    // The directory now holds its files but the first, and a new one.
+    let added = File {
+        path: "group_03/new.webp".to_owned(),
+        key: store.put(b"new", "webp").unwrap(),
+        size: 3,
+        media_type: "image/webp".to_owned(),
+        asset: "group_03/new".to_owned(),
+        role: "image".to_owned(),
+    };
+    let mut change = Change::default();
+    change.remove_file(paths[0]);
+    change.add_file(added.clone()).unwrap();
+    let mut files: Vec<File> = assets
+        .files
+        .iter()
+        .filter(|f| f.path != paths[0])
+        .cloned()
+        .collect();
+    files.push(added);
+    for layout in [Layout::Paths, Layout::Index] {
+        let before = documents(
+            &store,
+            "jp/storage",
+            &files_plan("v1", assets.files.clone()),
+            layout,
+        );
+        let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
+        let patched = patch::apply(
+            &store,
+            &store,
+            "storage",
+            "v2",
+            layout,
+            &previous,
+            change.clone(),
+        );
+        let whole = documents(
+            &store,
+            "jp/storage",
+            &files_plan("v2", files.clone()),
+            layout,
+        );
+        assert_eq!(
+            patched.unwrap().pointer,
+            whole.unwrap().pointer,
+            "{layout:?}"
+        );
+    }
 }
 
 #[test]

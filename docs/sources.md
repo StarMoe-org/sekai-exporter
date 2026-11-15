@@ -97,7 +97,11 @@ Manifests and interface responses are encrypted. The decryption keys, the keys f
 
 ## Network
 
-Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a rate limit, retries with back-off and host rotation. Manifests carry no content digest. The exporter checks the length of each bundle, against the declared size for `nuverse` and against the length of the response for `cp`, whose declared size is not the size of the download, and records its SHA-256.
+Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit, a number of connection pools, a rate limit, retries with back-off and host rotation.
+
+`connections`, 1 by default, is the number of connection pools, which requests take in turn. A host that speaks HTTP/2 gets one connection from each pool and carries its requests side by side, so with one pool all downloads from that host share a connection; a host that speaks only HTTP/1.1 gets a connection for each request in flight either way. Where one connection is slower than the path allows, as through a distant proxy, more connections carry more: with `"concurrency": 64` and `"connections": 8`, an HTTP/2 host gets eight connections of about eight downloads each.
+
+Manifests carry no content digest. The exporter checks the length of each bundle, against the declared size for `nuverse` and against the length of the response for `cp`, whose declared size is not the size of the download, and records its SHA-256.
 
 ## The input store
 

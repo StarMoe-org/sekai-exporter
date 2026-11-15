@@ -1,5 +1,6 @@
 //! Requests with retries, back-off and a rate limit.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -21,10 +22,14 @@ pub(super) enum Failure {
 }
 
 /// A client that speaks HTTP/2 to the hosts that offer it, where the requests that run at the
-/// same time share one connection, and HTTP/1.1 to the others. Its methods block the calling
-/// thread; the connections are driven by a thread of the client.
+/// same time share a connection, and HTTP/1.1 to the others. Requests take its connection pools
+/// in turn, so a host that speaks HTTP/2 gets one connection per pool. Its methods block the
+/// calling thread; the connections are driven by a thread of the client.
 pub(super) struct Http {
-    client: Client,
+    /// One client per connection pool.
+    clients: Vec<Client>,
+    /// The number of requests started, which picks the client of the next one.
+    turn: AtomicUsize,
     runtime: Runtime,
     retries: u32,
     back_off: Duration,
@@ -36,20 +41,17 @@ impl Http {
     pub(super) fn new(network: &Network) -> Result<Self, SourceError> {
         // The process has one TLS provider; a client made earlier has installed it already.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let mut client = Client::builder()
-            .connect_timeout(Duration::from_secs(30))
-            .read_timeout(Duration::from_secs(60))
-            .http2_adaptive_window(true);
-        if let Some(proxy) = &network.proxy {
-            client = client.proxy(Proxy::all(proxy).map_err(|e| SourceError::new("config", e))?);
-        }
+        let clients = (0..network.connections.get())
+            .map(|_| build_client(network))
+            .collect::<Result<_, _>>()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .build()
             .map_err(|e| SourceError::new("config", e))?;
         Ok(Self {
-            client: client.build().map_err(|e| SourceError::new("config", e))?,
+            clients,
+            turn: AtomicUsize::new(0),
             runtime,
             retries: network.retries,
             back_off: Duration::from_millis(network.back_off_ms),
@@ -59,6 +61,12 @@ impl Http {
                 .map(|rate| Duration::from_secs_f64(1.0 / rate)),
             next: Mutex::new(Instant::now()),
         })
+    }
+
+    /// The client whose turn it is.
+    fn client(&self) -> &Client {
+        let turn = self.turn.fetch_add(1, Ordering::Relaxed);
+        &self.clients[turn % self.clients.len()]
     }
 
     /// Waits for the rate limit.
@@ -99,7 +107,7 @@ impl Http {
 
     /// Sends one GET request.
     pub(super) fn get(&self, url: &str, headers: &Headers) -> Result<Response, Failure> {
-        self.send(url, with(self.client.get(url), headers))
+        self.send(url, with(self.client().get(url), headers))
     }
 
     /// Sends `request` and returns the response when its status is a success.
@@ -156,7 +164,7 @@ impl Http {
         body: &[u8],
     ) -> Result<Vec<u8>, SourceError> {
         self.pace();
-        self.exchange(self.client.post(url), url, headers, body)
+        self.exchange(self.client().post(url), url, headers, body)
             .map_err(|(Failure::Retry(error) | Failure::Fatal(error))| error)
     }
 
@@ -167,13 +175,13 @@ impl Http {
         headers: &Headers,
         body: &[u8],
     ) -> Result<Vec<u8>, SourceError> {
-        self.attempts(|_| self.exchange(self.client.put(url), url, headers, body))
+        self.attempts(|_| self.exchange(self.client().put(url), url, headers, body))
     }
 
     /// Sends an empty POST request and returns the cookies it sets.
     pub(super) fn cookies(&self, url: &str, headers: &Headers) -> Result<Vec<String>, SourceError> {
         self.attempts(|_| {
-            let response = self.send(url, with(self.client.post(url), headers))?;
+            let response = self.send(url, with(self.client().post(url), headers))?;
             Ok(response
                 .headers()
                 .get_all("set-cookie")
@@ -210,6 +218,18 @@ impl Http {
             _ => Ok(total),
         }
     }
+}
+
+/// A client with a pool of its own, through the proxy of `network` when it names one.
+fn build_client(network: &Network) -> Result<Client, SourceError> {
+    let mut client = Client::builder()
+        .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
+        .http2_adaptive_window(true);
+    if let Some(proxy) = &network.proxy {
+        client = client.proxy(Proxy::all(proxy).map_err(|e| SourceError::new("config", e))?);
+    }
+    client.build().map_err(|e| SourceError::new("config", e))
 }
 
 /// `request` with `headers`.

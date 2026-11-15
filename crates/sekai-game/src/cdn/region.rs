@@ -2,6 +2,7 @@
 //!
 //! The configuration comes from the deployer; the exporter ships no addresses.
 
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -91,6 +92,10 @@ pub struct Network {
     pub proxy: Option<String>,
     /// The number of bundles downloaded at the same time. Without one, the thread count applies.
     pub concurrency: Option<usize>,
+    /// The connection pools, which requests take in turn. A host that speaks HTTP/2 gets one
+    /// connection from each pool and carries its requests side by side, so with one pool every
+    /// download from such a host shares a connection.
+    pub connections: NonZeroUsize,
     /// The most requests started per second.
     pub rate_limit: Option<f64>,
     /// How many times a failed request is tried again.
@@ -104,6 +109,7 @@ impl Default for Network {
         Self {
             proxy: None,
             concurrency: None,
+            connections: NonZeroUsize::MIN,
             rate_limit: None,
             retries: 4,
             back_off_ms: 500,
@@ -214,7 +220,14 @@ mod tests {
         assert_eq!(region.client.application_version.unwrap(), "1.2.3");
         assert_eq!(region.network.retries, 1);
         assert_eq!(region.network.back_off_ms, 500);
+        assert_eq!(region.network.connections.get(), 1);
         assert_eq!(region.secrets.hca.as_deref(), Some("H"));
+    }
+
+    #[test]
+    fn a_region_without_connections_is_an_error() {
+        let config = CONFIG.replace(r#""retries": 1"#, r#""connections": 0"#);
+        assert_eq!(Region::load("a", &config).unwrap_err().code, "config");
     }
 
     #[test]

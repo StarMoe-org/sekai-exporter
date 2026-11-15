@@ -847,7 +847,7 @@ fn a_material_without_a_shader_has_no_shader_keys() {
 }
 
 #[test]
-fn the_model_keeps_its_texture_coordinates_and_names_its_images() {
+fn the_model_flips_its_texture_coordinates_and_names_its_images() {
     let asset = piece().convert().expect("the piece converts");
     let roles: Vec<&str> = asset.members.iter().map(|m| m.role.as_str()).collect();
     assert_eq!(roles, ["model", "texture/0", "attach-points"]);
@@ -866,7 +866,7 @@ fn the_model_keeps_its_texture_coordinates_and_names_its_images() {
     let uv = glb.json["meshes"][0]["primitives"][0]["attributes"]["TEXCOORD_0"]
         .as_u64()
         .expect("the mesh has texture coordinates") as usize;
-    assert_eq!(float_values(&glb, uv), [0.25, 0.75, 0.0, 1.0, 1.5, -0.25]);
+    assert_eq!(float_values(&glb, uv), [0.25, 0.25, 0.0, 0.0, 1.5, 1.25]);
 }
 
 /// The `attach-points` member of `asset`.

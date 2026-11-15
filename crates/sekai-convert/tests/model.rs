@@ -353,7 +353,6 @@ fn part() -> File {
 
 fn base_config() -> ModelConfig<'static> {
     ModelConfig {
-        flip_uv: true,
         node_keys: None,
         material_keys: None,
     }
@@ -441,20 +440,11 @@ fn texture_properties(config: &ModelConfig<'_>) -> Json {
 }
 
 #[test]
-fn texture_coordinates_are_flipped_by_default() {
+fn texture_coordinates_are_flipped() {
     assert_eq!(
         part_uvs(&base_config()),
         [[0.25, 0.25], [0.0, 0.0], [1.5, 1.25]]
     );
-}
-
-#[test]
-fn unflipped_texture_coordinates_are_stored_as_they_are() {
-    let config = ModelConfig {
-        flip_uv: false,
-        ..base_config()
-    };
-    assert_eq!(part_uvs(&config), UVS);
 }
 
 #[test]

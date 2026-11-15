@@ -32,7 +32,7 @@ impl Converter for FixtureModel {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn encoders(&self) -> sekai_convert::Encoders {
@@ -54,8 +54,6 @@ impl Converter for FixtureModel {
         let collision = Collision::read(&prefab, cx)?;
         let node_keys = PieceNodes::read(&prefab, &collision, cx)?;
         let config = ModelConfig {
-            // Texture coordinates keep their `v`, which the runtime flips when it samples an image.
-            flip_uv: false,
             node_keys: Some(&node_keys),
             material_keys: Some(&ShaderKeys),
         };

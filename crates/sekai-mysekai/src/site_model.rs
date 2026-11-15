@@ -32,7 +32,7 @@ impl Converter for SiteModel {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn encoders(&self) -> sekai_convert::Encoders {
@@ -67,8 +67,6 @@ impl Converter for SiteModel {
             collision: &collision,
         };
         let config = ModelConfig {
-            // Texture coordinates keep their `v`, which the runtime flips when it samples an image.
-            flip_uv: false,
             node_keys: Some(&node_keys),
             material_keys: Some(&ShaderKeys),
         };

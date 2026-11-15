@@ -4,6 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use sekai_format::publication::VERSION;
+
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma")
 }
@@ -93,6 +95,27 @@ fn an_update_publishes_the_version_and_a_second_one_finds_it_unchanged() {
     let again = succeeded(&scratch.update(&[]));
     assert!(again.contains("unchanged"), "{again}");
     assert_eq!(scratch.pointer(), pointer);
+}
+
+#[test]
+fn a_version_published_in_an_earlier_format_is_published_again() {
+    let scratch = Scratch::new("update-earlier-format");
+    succeeded(&scratch.update(&[]));
+    let current = scratch
+        .output()
+        .join("published/local/canonical/current.json");
+    let mut earlier = scratch.pointer();
+    earlier["version"] = serde_json::json!(VERSION - 1);
+    earlier.as_object_mut().unwrap().remove("tree");
+    std::fs::write(&current, earlier.to_string()).unwrap();
+
+    let checked = changed(&scratch.update(&["--check"]));
+    assert!(checked.contains("earlier format"), "{checked}");
+    let again = succeeded(&scratch.update(&[]));
+    assert!(!again.contains("unchanged"), "{again}");
+    let pointer = scratch.pointer();
+    assert_eq!(pointer["version"], VERSION);
+    assert!(pointer["tree"]["sha256"].is_string(), "{pointer}");
 }
 
 #[test]

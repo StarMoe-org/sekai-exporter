@@ -218,10 +218,11 @@ mod bucket {
             assert!(updated.is_some() && updated == fresh, "{view}");
         }
 
-        // A machine that finds the version unchanged reads only the last version from the bucket.
+        // A machine that finds the version unchanged reads only the last version and the pointers
+        // of the two views from the bucket.
         let (third, requests) = answered(&bucket, || scratch.update("third", Some(&bucket)));
         assert!(third.contains("unchanged"), "{third}");
-        assert_eq!(requests.len(), 1, "{requests:?}");
+        assert_eq!(requests.len(), 3, "{requests:?}");
     }
 
     #[test]

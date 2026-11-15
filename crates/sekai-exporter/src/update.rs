@@ -13,7 +13,7 @@ use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects, Store};
 use sekai_convert::Converter;
 use sekai_format::AssetDocument;
 use sekai_format::identity::VersionIdentity;
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{self, Pointer};
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_pipeline::claims::Claims;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
@@ -301,14 +301,34 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
         previous.as_ref(),
         &NoRecorder,
     )?;
-    let change = match previous {
-        Some(previous) if previous.same_content(&identity) => None,
-        Some(previous) => Some(format!("changed from {}", previous.name())),
-        None => Some("changed".to_owned()),
-    };
+    let change = change(&site, name, previous.as_ref(), &identity)?;
     let described = change.as_deref().unwrap_or("unchanged");
     println!("{name} {} {described}", identity.name());
     Ok(change.is_none())
+}
+
+/// What a run of the version `identity` would change at `site` after the `previous` one of
+/// `region`, or `None` when it has the same content and both views are published in the current
+/// publication format.
+fn change(
+    site: &Site<'_>,
+    region: &str,
+    previous: Option<&VersionIdentity>,
+    identity: &VersionIdentity,
+) -> Result<Option<String>, String> {
+    let Some(previous) = previous else {
+        return Ok(Some("changed".to_owned()));
+    };
+    if !previous.same_content(identity) {
+        return Ok(Some(format!("changed from {}", previous.name())));
+    }
+    for target in [canonical_target(region), storage_target(region)] {
+        let current = site.current(&target)?;
+        if current.is_none_or(|pointer| pointer.version != publication::VERSION) {
+            return Ok(Some(format!("changed: {target} is in an earlier format")));
+        }
+    }
+    Ok(None)
 }
 
 /// What a run made of the current version.
@@ -381,7 +401,9 @@ fn export_version(
         previous.as_ref(),
         monitor,
     )?;
-    if !(options.force || options.verify) && previous.is_some_and(|p| p.same_content(&identity)) {
+    if !(options.force || options.verify)
+        && change(site, region_name, previous.as_ref(), &identity)?.is_none()
+    {
         println!("{region_name} {} unchanged", identity.name());
         return Ok(Outcome::Unchanged(identity));
     }

@@ -488,3 +488,19 @@ fn a_failed_upload_in_parts_is_aborted() {
     assert_eq!(server.object("out/state/regions/jp.json"), None);
     assert!(server.uploads_in_progress() == 0);
 }
+
+#[test]
+fn an_upload_the_server_timed_out_or_saw_closed_is_sent_again() {
+    let server = Server::start();
+    let s3 = client(&server, SECRET_KEY);
+    server.fail_uploads(&[499, 408]);
+
+    s3.write_state("records/a.json", &[7; 64]).unwrap();
+    assert_eq!(server.object("out/state/records/a.json"), Some(vec![7; 64]));
+    let statuses: Vec<_> = server
+        .requests()
+        .iter()
+        .map(|logged| logged.status)
+        .collect();
+    assert_eq!(statuses, [499, 408, 200]);
+}

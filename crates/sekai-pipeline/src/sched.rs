@@ -404,7 +404,10 @@ mod tests {
                 pause();
             }
         });
-        assert_eq!(started.into_inner().unwrap(), [0, 2, 1]);
+        // The two jobs that fit start in either order, and the one that waits for memory last.
+        let started = started.into_inner().unwrap();
+        assert_eq!(started.len(), 3);
+        assert_eq!(started.last(), Some(&1));
     }
 
     #[test]

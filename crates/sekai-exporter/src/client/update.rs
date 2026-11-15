@@ -3,12 +3,12 @@
 
 use sekai_format::identity::{AssetIdentity, ClientIdentity, VersionIdentity};
 use sekai_game::cdn::{BundleEntry, Source, SourceError};
-use sekai_game::client::PLAYER_BUNDLE;
 use sekai_game::sink::Sink;
 use sekai_unity::index::{FileLayouts, OpenFile};
 use sekai_unity::{Bundle, ClassLayouts, NoBlockCache, SerializedFile};
+use sha2::{Digest, Sha256};
 
-use super::{Package, Player};
+use super::{Bundles, Held, Package};
 
 /// The class ID of `PlayerSettings`.
 const PLAYER_SETTINGS: i32 = 129;
@@ -20,12 +20,13 @@ pub(crate) fn update_source(
     package: &sekai_game::cdn::Package,
 ) -> Result<crate::update::Supply, String> {
     let scripts = package.script_table.as_deref();
-    let Package { player, layouts } = Package::open(&package.path, &package.class_table, scripts)?;
+    let Package { bundles, layouts } = Package::open(&package.path, &package.class_table, scripts)?;
+    let player = bundles.player();
     let bundle = Bundle::open(player.bytes.clone(), player.sha256)
         .map_err(|e| format!("the player data: {e}"))?;
     let application_version = application_version(&bundle, &layouts)?;
     let source = ClientSource {
-        player,
+        bundles,
         application_version,
     };
     Ok(crate::update::Supply {
@@ -34,21 +35,20 @@ pub(crate) fn update_source(
     })
 }
 
-/// A client package as the source of an update: its player data, as one bundle of a version named
-/// by the version of the application.
+/// A client package as the source of an update: its bundles, as a version named by the version
+/// of the application.
 struct ClientSource {
-    player: Player,
+    bundles: Bundles,
     application_version: String,
 }
 
 impl ClientSource {
-    /// The SHA-256 of the player data, as lowercase hexadecimal.
+    /// The content of the package: the SHA-256 of a line `<name> <SHA-256>` for each of its
+    /// bundles, as lowercase hexadecimal.
     fn content(&self) -> String {
-        self.player
-            .sha256
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        let line = |bundle: &Held| format!("{} {}\n", bundle.name, bundle.content());
+        let lines: String = self.bundles.0.iter().map(line).collect();
+        hex(&Sha256::digest(lines.as_bytes()))
     }
 }
 
@@ -72,22 +72,27 @@ impl Source for ClientSource {
     }
 
     fn manifest(&self, _identity: &VersionIdentity) -> Result<Vec<BundleEntry>, SourceError> {
-        Ok(vec![BundleEntry {
-            name: PLAYER_BUNDLE.to_owned(),
-            declared: self.content(),
+        let entry = |bundle: &Held| BundleEntry {
+            name: bundle.name.to_owned(),
+            declared: bundle.content(),
             download_path: None,
-            size: self.player.bytes.len() as u64,
+            size: bundle.bytes.len() as u64,
             dependencies: Vec::new(),
-        }])
+        };
+        Ok(self.bundles.0.iter().map(entry).collect())
     }
 
     fn fetch(
         &self,
         _identity: &VersionIdentity,
-        _entry: &BundleEntry,
+        entry: &BundleEntry,
         sink: &mut dyn Sink,
     ) -> Result<u64, SourceError> {
-        let bytes = self.player.bytes.as_slice();
+        let bundle = self.bundles.get(&entry.name).ok_or_else(|| {
+            let message = format!("the package has no bundle {}", entry.name);
+            SourceError::new("missing_bundle", message)
+        })?;
+        let bytes = bundle.bytes.as_slice();
         sink.write_all(bytes)
             .map_err(|e| SourceError::new("sink", e))?;
         Ok(bytes.len() as u64)
@@ -122,4 +127,23 @@ fn application_version(bundle: &Bundle, classes: &dyn ClassLayouts) -> Result<St
     version
         .map(str::to_owned)
         .ok_or_else(|| failed(&"bundleVersion is missing or is not a string"))
+}
+
+impl Held {
+    /// The SHA-256 of the bundle, as lowercase hexadecimal.
+    fn content(&self) -> String {
+        hex(&self.sha256)
+    }
+}
+
+impl Bundles {
+    /// The bundle of the player data.
+    fn player(&self) -> &Held {
+        &self.0[0]
+    }
+}
+
+/// `bytes` as lowercase hexadecimal.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

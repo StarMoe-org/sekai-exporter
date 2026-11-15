@@ -47,7 +47,7 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 
 ## The client view
 
-The `client` view holds the assets of the player data of a client package, which the client loads from the package instead of downloading them: images, fonts and the prefabs of the interface it shows around the scenes of a story. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
+The `client` view holds the assets of a client package, which the client loads from the package instead of downloading them: from its player data, images, fonts and the prefabs of the interface it shows around the scenes of a story; from its streaming assets, cue sheets such as the sounds of its menus and the music of its title screen. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
 
 ## The publication protocol
 

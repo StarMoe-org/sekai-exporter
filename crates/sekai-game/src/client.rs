@@ -1,9 +1,14 @@
-//! The `apk` source, which reads the player data of a client package.
+//! The `apk` source, which reads the bundles of a client package.
 //!
 //! A client package is an APK, or an XAPK that holds several APKs. Player data lies under
 //! `assets/bin/Data/`, as a UnityFS container or as loose files, and a large loose file is stored
 //! in the parts `<name>.split0`, `<name>.split1` and so on. Either way it becomes one UnityFS
 //! container, a bundle like any other, whose entries the files name each other by.
+//!
+//! The streaming assets lie directly under `assets/`. The cue sheets among them, which hold the
+//! sounds the client plays from the package, become a second container whose entries are named by
+//! their paths under `assets/`. They are the only streaming assets a form reads: a cue sheet is
+//! converted from its own bytes, so the other CRI files beside it are left out.
 
 use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read, Seek};
@@ -15,8 +20,13 @@ use zip::ZipArchive;
 
 /// The name of the bundle that holds the player data.
 pub const PLAYER_BUNDLE: &str = "player";
+/// The name of the bundle that holds the cue sheets of the streaming assets.
+pub const STREAMING_ASSETS_BUNDLE: &str = "streamingassets";
 
 const DATA_DIRECTORY: &str = "assets/bin/Data/";
+const STREAMING_ASSETS_DIRECTORY: &str = "assets/";
+/// The extension of a cue sheet.
+const CUE_SHEET_EXTENSION: &str = ".acb";
 const APK_EXTENSION: &str = ".apk";
 /// The marker of a part of a file, followed by the number of the part.
 const SPLIT_MARKER: &str = ".split";
@@ -30,16 +40,50 @@ const MAX_UNPACKED_BYTES: u64 = 8 << 30;
 /// The parts of each file under the data directory, by the path under it and the part number.
 type Parts = BTreeMap<String, BTreeMap<usize, Vec<u8>>>;
 
-/// The player data of the client package `package`, as the bytes of one UnityFS container.
-pub fn player_bundle(package: &[u8]) -> io::Result<Vec<u8>> {
-    player_bundle_from(Cursor::new(package))
+/// A bundle of a client package: its name and the bytes of its UnityFS container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageBundle {
+    /// [`PLAYER_BUNDLE`] or [`STREAMING_ASSETS_BUNDLE`].
+    pub name: &'static str,
+    /// The UnityFS container.
+    pub bytes: Vec<u8>,
 }
 
-/// Streams the player data from a seekable client package `reader` into one UnityFS container.
-pub fn player_bundle_from<R: Read + Seek>(reader: R) -> io::Result<Vec<u8>> {
-    let mut parts = Parts::new();
+/// The files of a client package that become bundles.
+#[derive(Default)]
+struct Members {
+    /// The parts of the player data.
+    data: Parts,
+    /// The cue sheets of the streaming assets, by their paths under the streaming assets.
+    streaming: BTreeMap<String, Vec<u8>>,
+}
+
+/// The bundles of the client package `package`: the player data, then the cue sheets of the
+/// streaming assets when it has any.
+pub fn bundles(package: &[u8]) -> io::Result<Vec<PackageBundle>> {
+    bundles_from(Cursor::new(package))
+}
+
+/// The bundles of a seekable client package `reader`, as [`bundles`] gives them.
+pub fn bundles_from<R: Read + Seek>(reader: R) -> io::Result<Vec<PackageBundle>> {
+    let mut members = Members::default();
     let mut remaining = MAX_UNPACKED_BYTES;
-    add_package(reader, 0, &mut remaining, &mut parts)?;
+    add_package(reader, 0, &mut remaining, &mut members)?;
+    let mut bundles = vec![PackageBundle {
+        name: PLAYER_BUNDLE,
+        bytes: player_data(members.data)?,
+    }];
+    if !members.streaming.is_empty() {
+        bundles.push(PackageBundle {
+            name: STREAMING_ASSETS_BUNDLE,
+            bytes: streaming_assets(members.streaming)?,
+        });
+    }
+    Ok(bundles)
+}
+
+/// The player data as one UnityFS container.
+fn player_data(parts: Parts) -> io::Result<Vec<u8>> {
     let mut files = Vec::new();
     for (path, parts) in parts {
         add_file(&path, joined(&path, parts)?, &mut files)?;
@@ -50,12 +94,32 @@ pub fn player_bundle_from<R: Read + Seek>(reader: R) -> io::Result<Vec<u8>> {
     store_files(&files).map_err(io::Error::other)
 }
 
-/// Adds the data files of an APK, or of each APK of an XAPK, to `parts`.
+/// The cue sheets of the streaming assets as one UnityFS container.
+fn streaming_assets(files: BTreeMap<String, Vec<u8>>) -> io::Result<Vec<u8>> {
+    let files: Vec<StoredFile> = files
+        .into_iter()
+        .map(|(path, bytes)| StoredFile {
+            path,
+            bytes,
+            serialized: false,
+        })
+        .collect();
+    store_files(&files).map_err(io::Error::other)
+}
+
+/// Whether the file at `path` is a cue sheet, by its extension in any case.
+fn is_cue_sheet(path: &str) -> bool {
+    let start = path.len().saturating_sub(CUE_SHEET_EXTENSION.len());
+    path.get(start..)
+        .is_some_and(|ending| ending.eq_ignore_ascii_case(CUE_SHEET_EXTENSION))
+}
+
+/// Adds the files of an APK, or of each APK of an XAPK, that become bundles to `members`.
 fn add_package<R: Read + Seek>(
     reader: R,
     depth: usize,
     remaining: &mut u64,
-    parts: &mut Parts,
+    members: &mut Members,
 ) -> io::Result<()> {
     let mut archive = ZipArchive::new(reader)?;
     for index in 0..archive.len() {
@@ -72,20 +136,28 @@ fn add_package<R: Read + Seek>(
                 ));
             }
             let nested = contents(&mut member, remaining)?;
-            add_package(Cursor::new(nested), depth + 1, remaining, parts)?;
+            add_package(Cursor::new(nested), depth + 1, remaining, members)?;
         } else if let Some(path) = name.strip_prefix(DATA_DIRECTORY) {
             let (file, part) = file_and_part(path);
             let bytes = contents(&mut member, remaining)?;
-            let added = parts
-                .entry(file.to_owned())
-                .or_default()
-                .insert(part, bytes);
-            if added.is_some() {
-                return Err(io::Error::other(format!("{path} is in two packages")));
+            let parts = members.data.entry(file.to_owned()).or_default();
+            if parts.insert(part, bytes).is_some() {
+                return Err(in_two_packages(path));
+            }
+        } else if let Some(path) = name.strip_prefix(STREAMING_ASSETS_DIRECTORY)
+            && is_cue_sheet(path)
+        {
+            let bytes = contents(&mut member, remaining)?;
+            if members.streaming.insert(path.to_owned(), bytes).is_some() {
+                return Err(in_two_packages(path));
             }
         }
     }
     Ok(())
+}
+
+fn in_two_packages(path: &str) -> io::Error {
+    io::Error::other(format!("{path} is in two packages"))
 }
 
 fn contents(member: &mut impl Read, remaining: &mut u64) -> io::Result<Vec<u8>> {

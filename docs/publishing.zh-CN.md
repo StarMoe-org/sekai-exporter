@@ -47,7 +47,7 @@
 
 ## client 视图
 
-`client` 视图包含客户端安装包中 player data 的资产，即客户端从安装包加载、不经下载的资产：图片、字体，以及剧情在场景之间显示的界面预制体。`update --client` 以规范布局发布它，指针位于 `<region>/client`，版本取[安装包](sources.zh-CN.md#区服配置)给出的版本；其状态保存在 `<region>-client` 下，与该区服资产的状态分开。
+`client` 视图包含客户端安装包的资产，即客户端从安装包加载、不经下载的资产：player data 中的图片、字体，以及剧情在场景之间显示的界面预制体；streaming assets 中的 cue sheet，例如菜单音效与标题画面音乐。`update --client` 以规范布局发布它，指针位于 `<region>/client`，版本取[安装包](sources.zh-CN.md#区服配置)给出的版本；其状态保存在 `<region>-client` 下，与该区服资产的状态分开。
 
 ## 发布协议
 

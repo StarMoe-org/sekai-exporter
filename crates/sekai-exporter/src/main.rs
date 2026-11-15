@@ -103,7 +103,8 @@ commands:
       with / separators, to canonical assets in <output>/store, and list them in
       <output>/assets.tsv. With --class-table, a TPK file of engine class
       layouts, <input> is instead a client package (APK or XAPK): its player
-      data is one bundle named player, and its assets are named by load path.
+      data is one bundle named player, the cue sheets of its streaming assets
+      a second named streamingassets, and its assets are named by load path.
       --script-table is a gzipped JSON lines file of script layouts, so that
       MonoBehaviour objects can be read too.
       Each bundle is evaluated with the bundles that hold
@@ -148,8 +149,9 @@ commands:
       writes nothing, and cannot be combined with --force, --verify,
       --rebuild-tables or --only. --client publishes the client package that
       the region's package entry names instead of its assets: its player data
-      is one bundle, read with the class and script tables of the entry, and
-      its assets are published in the canonical layout at <region>/client,
+      and the cue sheets of its streaming assets are read as bundles, with the
+      class and script tables of the entry, and its assets are published in
+      the canonical layout at <region>/client,
       under the version <application version>-<content hash>. Its state is
       kept apart from the region's, under <region>-client.
   account <region> --config <file> --secrets <dir>

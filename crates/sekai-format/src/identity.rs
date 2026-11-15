@@ -29,11 +29,12 @@ pub enum AssetIdentity {
         /// The hash of the names and bytes of the files.
         value: String,
     },
-    /// The player data of a client package.
+    /// A client package: its player data and the cue sheets of its streaming assets.
     Client {
         /// The version of the application, as its player settings give it.
         application_version: String,
-        /// The SHA-256 of the player data, as lowercase hexadecimal.
+        /// The content of the package: the SHA-256 of a line `<bundle> <SHA-256 of the bundle>`
+        /// for each of its bundles, as lowercase hexadecimal.
         value: String,
     },
 }

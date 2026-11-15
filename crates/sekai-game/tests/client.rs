@@ -6,7 +6,7 @@ use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::Arc;
 
-use sekai_game::client::player_bundle;
+use sekai_game::client::{PLAYER_BUNDLE, STREAMING_ASSETS_BUNDLE, bundles, bundles_from};
 use sekai_unity::{Bundle, ByteSource, NoBlockCache};
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
@@ -64,10 +64,17 @@ fn data(name: &str) -> String {
     format!("{DATA}{name}")
 }
 
+/// The player data of `package`, the first of its bundles.
+fn player(package: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut bundles = bundles(package)?;
+    assert_eq!(bundles[0].name, PLAYER_BUNDLE);
+    Ok(bundles.swap_remove(0).bytes)
+}
+
 #[test]
 fn a_container_gives_the_entries_of_the_player_bundle() {
     let apk = archive(&[(&data("data.unity3d"), &fixture())]);
-    assert_eq!(entries(player_bundle(&apk).unwrap()), entries(fixture()));
+    assert_eq!(entries(player(&apk).unwrap()), entries(fixture()));
 }
 
 #[test]
@@ -92,13 +99,13 @@ fn loose_files_are_joined_across_the_apks_of_a_package() {
         ("level0.resS", false, b"large data".to_vec()),
     ]
     .map(|(path, serialized, bytes)| (path.to_owned(), serialized, bytes));
-    assert_eq!(entries(player_bundle(&package).unwrap()), expected);
+    assert_eq!(entries(player(&package).unwrap()), expected);
 }
 
 #[test]
 fn a_file_without_all_its_parts_is_an_error() {
     let apk = archive(&[(&data("level0.split1"), &serialized_file())]);
-    let error = player_bundle(&apk).unwrap_err();
+    let error = player(&apk).unwrap_err();
     assert!(error.to_string().contains("level0"), "{error}");
 }
 
@@ -107,19 +114,17 @@ fn a_file_in_two_packages_is_an_error() {
     let file = serialized_file();
     let apk = archive(&[(&data("level0"), &file)]);
     let package = archive(&[("base.apk", &apk), ("pack.apk", &apk)]);
-    assert!(player_bundle(&package).is_err());
+    assert!(player(&package).is_err());
 }
 
 #[test]
 fn a_package_without_player_data_is_an_error() {
     let apk = archive(&[("res/icon.png", b"image")]);
-    assert!(player_bundle(&apk).is_err());
+    assert!(player(&apk).is_err());
 }
 
 #[test]
 fn nested_apks_in_subdirectories_and_uppercase_extensions_are_unpacked() {
-    use sekai_game::client::player_bundle_from;
-
     let file = serialized_file();
     let base = archive(&[(&data("level0"), &file)]);
     let pack = archive(&[(&data("level0.resS"), b"streamed")]);
@@ -131,7 +136,12 @@ fn nested_apks_in_subdirectories_and_uppercase_extensions_are_unpacked() {
     ]
     .map(|(path, serialized, bytes)| (path.to_owned(), serialized, bytes));
     assert_eq!(
-        entries(player_bundle_from(std::io::Cursor::new(&xapk)).unwrap()),
+        entries(
+            bundles_from(std::io::Cursor::new(&xapk))
+                .unwrap()
+                .remove(0)
+                .bytes
+        ),
         expected
     );
 }
@@ -141,6 +151,41 @@ fn deeply_nested_apks_are_rejected() {
     let inner = archive(&[(&data("level0"), &serialized_file())]);
     let mid = archive(&[("inner.apk", &inner)]);
     let outer = archive(&[("mid.apk", &mid)]);
-    let err = player_bundle(&outer).unwrap_err();
+    let err = player(&outer).unwrap_err();
     assert!(err.to_string().contains("depth"), "{err}");
+}
+
+#[test]
+fn the_cue_sheets_of_the_streaming_assets_are_a_second_bundle() {
+    let base = archive(&[
+        (&data("level0"), &serialized_file()),
+        ("assets/dic", b"dictionary"),
+        ("assets/ad/index.js", b"script"),
+    ]);
+    let pack = archive(&[
+        ("assets/Menu.acb", b"cue sheet"),
+        ("assets/Menu.awb", b"wave bank"),
+        ("assets/Project.acf", b"project"),
+        ("assets/sub/Movie.usm", b"movie"),
+        ("assets/sub/Title.ACB", b"title"),
+    ]);
+    let package = archive(&[("base.apk", &base), ("pack.apk", &pack)]);
+
+    let mut bundles = bundles(&package).unwrap();
+    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name).collect();
+    assert_eq!(names, [PLAYER_BUNDLE, STREAMING_ASSETS_BUNDLE]);
+    let expected = [
+        ("Menu.acb", b"cue sheet".as_slice()),
+        ("sub/Title.ACB", b"title"),
+    ]
+    .map(|(path, bytes)| (path.to_owned(), false, bytes.to_vec()));
+    assert_eq!(entries(bundles.pop().unwrap().bytes), expected);
+}
+
+#[test]
+fn a_package_without_cue_sheets_has_only_the_player_data() {
+    let apk = archive(&[(&data("level0"), &serialized_file())]);
+    let bundles = bundles(&apk).unwrap();
+    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name).collect();
+    assert_eq!(names, [PLAYER_BUNDLE]);
 }

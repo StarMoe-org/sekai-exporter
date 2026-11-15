@@ -1,10 +1,10 @@
-//! The player data of a client package as the source of an export or of an update.
+//! The bundles of a client package as the source of an export or of an update.
 
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
-use sekai_game::client::{PLAYER_BUNDLE, player_bundle_from};
+use sekai_game::client::{PackageBundle, bundles_from};
 use sekai_layouts::{PlayerLayouts, ScriptTable, TableError, VersionTable};
 use sekai_pipeline::BundleInput;
 use sekai_pipeline::stream::{Entry, Inputs};
@@ -12,24 +12,60 @@ use sha2::{Digest, Sha256};
 
 use crate::export::Source;
 
-/// A client package as one bundle, its player data, with the layouts its files are read with.
+/// A client package as its bundles, with the layouts their files are read with.
 pub(crate) struct Package {
-    player: Player,
+    bundles: Bundles,
     layouts: PlayerLayouts,
 }
 
-/// The one bundle of a client package.
-struct Player {
+/// The bundles of a client package, the player data first, as [`bundles_from`] gives them.
+struct Bundles(Vec<Held>);
+
+/// A bundle of a client package.
+struct Held {
+    name: &'static str,
     bytes: Arc<Vec<u8>>,
     sha256: [u8; 32],
 }
 
-impl Inputs for Player {
+impl Held {
+    fn new(bundle: PackageBundle) -> Self {
+        Self {
+            name: bundle.name,
+            sha256: Sha256::digest(&bundle.bytes).into(),
+            bytes: Arc::new(bundle.bytes),
+        }
+    }
+}
+
+impl Bundles {
+    /// The bundle named `name`.
+    fn get(&self, name: &str) -> Option<&Held> {
+        self.0.iter().find(|bundle| bundle.name == name)
+    }
+
+    /// The manifest of the package: each of its bundles.
+    fn manifest(&self) -> Vec<Entry> {
+        let entry = |bundle: &Held| Entry {
+            name: bundle.name.to_owned(),
+            size: bundle.bytes.len() as u64,
+            content: None,
+            dependencies: Vec::new(),
+        };
+        self.0.iter().map(entry).collect()
+    }
+}
+
+impl Inputs for Bundles {
     fn open(&self, name: &str) -> io::Result<BundleInput> {
+        let bundle = self.get(name).ok_or_else(|| {
+            let message = format!("the package has no bundle {name}");
+            io::Error::new(io::ErrorKind::NotFound, message)
+        })?;
         Ok(BundleInput {
             name: name.to_owned(),
-            source: self.bytes.clone(),
-            sha256: self.sha256,
+            source: bundle.bytes.clone(),
+            sha256: bundle.sha256,
         })
     }
 }
@@ -56,34 +92,20 @@ impl Package {
         let scripts = scripts
             .map(|path| read_table(path, ScriptTable::from_jsonl_gz))
             .transpose()?;
-        let bundle = std::fs::File::open(package)
-            .and_then(player_bundle_from)
+        let bundles = std::fs::File::open(package)
+            .and_then(bundles_from)
             .map_err(|e| format!("{}: {e}", package.display()))?;
-        let player = Player {
-            sha256: Sha256::digest(&bundle).into(),
-            bytes: Arc::new(bundle),
-        };
         Ok(Self {
-            player,
+            bundles: Bundles(bundles.into_iter().map(Held::new).collect()),
             layouts: PlayerLayouts::new(classes, scripts),
         })
-    }
-
-    /// The manifest of the package: its one bundle.
-    fn manifest(&self) -> Vec<Entry> {
-        vec![Entry {
-            name: PLAYER_BUNDLE.to_owned(),
-            size: self.player.bytes.len() as u64,
-            content: None,
-            dependencies: Vec::new(),
-        }]
     }
 
     /// The package as the source of an export.
     pub(crate) fn into_source(self) -> Source<'static> {
         Source {
-            manifest: self.manifest(),
-            inputs: Box::new(self.player),
+            manifest: self.bundles.manifest(),
+            inputs: Box::new(self.bundles),
             classes: Box::new(self.layouts),
         }
     }

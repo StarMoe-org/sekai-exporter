@@ -13,7 +13,7 @@ const DEFAULT_MAX_AGE: u64 = 60;
 /// name of a pointer, so a longer one names nothing.
 const MAX_NAME_BYTES: usize = 200;
 
-/// A file of a view that a request names.
+/// A file or a directory of a view that a request names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// The region.
@@ -22,11 +22,17 @@ pub struct Target {
     pub view: String,
     /// The published version, or `None` for the current one.
     pub version: Option<String>,
-    /// The path of the file in the view.
+    /// The path in the view: of a file, or of a directory when it is empty, for the root, or ends
+    /// with `/`.
     pub path: String,
 }
 
 impl Target {
+    /// Whether the target is a directory rather than a file.
+    pub fn is_directory(&self) -> bool {
+        self.path.is_empty() || self.path.ends_with('/')
+    }
+
     /// The path of the pointer that publishes the target, relative to the published root:
     /// `<region>/<view>/current.json`, or `<region>/<view>/versions/<version>.json`.
     pub fn pointer(&self) -> String {
@@ -196,7 +202,7 @@ impl Routes {
         self.max_age
     }
 
-    /// The file that the URL path `path` names, by the first route that matches it.
+    /// The file or directory that the URL path `path` names, by the first route that matches it.
     pub fn resolve(&self, path: &str) -> Option<Target> {
         let rest = path.strip_prefix('/')?;
         self.routes.iter().find_map(|route| route.resolve(rest))
@@ -235,7 +241,7 @@ impl Route {
             capture(pieces, segment, &mut captures)?;
             rest = after;
         }
-        let path = percent_decode(rest).filter(|path| !path.is_empty())?;
+        let path = percent_decode(rest)?;
         Some(Target {
             region: captures.region.or(self.region.as_deref())?.to_owned(),
             view: captures.view.or(self.view.as_deref())?.to_owned(),

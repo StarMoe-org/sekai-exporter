@@ -1,10 +1,12 @@
-//! Responses: what a request is answered with, given the file it names.
+//! Responses: what a request is answered with, given the file or directory it names.
 
 use std::fmt;
+use std::sync::Arc;
 
 use sekai_format::paths::ChunkFile;
 use sekai_format::publication::is_name;
 
+use crate::listing::Listed;
 use crate::routes::{Delivery, Routes, Target, is_header_value};
 
 /// The methods the resolver answers.
@@ -53,6 +55,9 @@ pub enum Body {
     Empty,
     /// A short text.
     Text(&'static str),
+    /// A document the resolver made, such as the listing of a directory, shared with the
+    /// resolver, which keeps it for later requests.
+    Bytes(Arc<[u8]>),
     /// A byte range of an object of the store.
     Object(Slice),
 }
@@ -169,6 +174,21 @@ impl Routes {
                 self.finish(302, headers, Body::Empty)
             }
         })
+    }
+
+    /// The response to `request` with `listed`, the listing of a directory.
+    pub(crate) fn listing(&self, request: &Request<'_>, listed: &Listed) -> Response {
+        let etag = &listed.etag;
+        let cache_control = format!("public, max-age={}", self.max_age);
+        let mut headers = vec![("etag", etag.clone()), ("cache-control", cache_control)];
+        if request.if_none_match.is_some_and(|tags| lists(tags, etag)) {
+            return self.finish(304, headers, Body::Empty);
+        }
+        headers.extend([
+            ("content-type", "application/json".to_owned()),
+            ("content-length", listed.document.len().to_string()),
+        ]);
+        self.finish(200, headers, Body::Bytes(Arc::clone(&listed.document)))
     }
 
     /// The response when the publication cannot be read.

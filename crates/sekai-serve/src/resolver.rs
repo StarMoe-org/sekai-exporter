@@ -1,8 +1,9 @@
 //! Lookups: the reads that answer a request, and what a resolver remembers between requests.
 //!
 //! A lookup is a short sequence of reads that the host makes: the pointer of the view, the root
-//! of the path index the pointer names, and the chunk of the index that holds the path. The
-//! resolver remembers what the reads gave, within fixed limits, so most lookups read nothing.
+//! of the path index the pointer names, and the chunk of the index that holds the path, or, for a
+//! directory, each chunk in which a file or a subdirectory of it starts. The resolver remembers
+//! what the reads gave, within fixed limits, so most lookups read nothing.
 
 use std::fmt;
 use std::mem::size_of;
@@ -14,6 +15,7 @@ use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 
 use crate::cache::Lru;
+use crate::listing::{self, Listed, Listing};
 use crate::response::{ObjectId, Request, Response};
 use crate::routes::{Routes, Target};
 
@@ -137,7 +139,7 @@ pub struct Pending<'a> {
 /// The resolver of the paths of published views: it answers requests from what its host reads.
 ///
 /// The resolver does no I/O and reads no clock. A host starts a lookup for each request, makes
-/// the reads the lookup asks for, at most three, and writes the response:
+/// the reads the lookup asks for, at most three for a file, and writes the response:
 ///
 /// ```
 /// # use std::time::Duration;
@@ -196,11 +198,13 @@ impl Pointed {
     }
 }
 
-/// A decoded object of a path index.
+/// What the resolver keeps of path indexes: a decoded object, named by its hash, or a listing
+/// made from one, named by [`listing::key`].
 #[derive(Debug, Clone)]
 enum Indexed {
     Root(Arc<PathIndex>),
     Chunk(Arc<Chunk>),
+    Listing(Arc<Listed>),
 }
 
 impl Resolver {
@@ -256,6 +260,7 @@ impl Resolver {
             request: *request,
             target,
             started: now,
+            gathering: None,
         };
         asked.pointer(now)
     }
@@ -300,7 +305,7 @@ fn shaped(request: &Request<'_>, response: Response) -> Response {
     }
 }
 
-/// A request and the file it names.
+/// A request and the file or directory it names.
 #[derive(Debug)]
 struct Asked<'a> {
     resolver: &'a Resolver,
@@ -308,6 +313,18 @@ struct Asked<'a> {
     target: Target,
     /// When the lookup started.
     started: Duration,
+    /// The listing of the directory the target names, while it is gathered. It is boxed, as it
+    /// grows with the directory while a lookup is moved from read to read.
+    gathering: Option<Box<Gathering>>,
+}
+
+/// The listing of a directory, and the path index it is gathered from.
+#[derive(Debug)]
+struct Gathering {
+    /// The hash of the root of the index.
+    root: [u8; 32],
+    index: Arc<PathIndex>,
+    listing: Listing,
 }
 
 impl<'a> Asked<'a> {
@@ -352,27 +369,76 @@ impl<'a> Asked<'a> {
     /// Goes on from the root of the path index: a decoded one, or by reading it.
     fn root(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
-            Some(Indexed::Root(index)) => self.indexed(sha256, &index),
+            Some(Indexed::Root(index)) => self.indexed(sha256, index),
             _ => self.read(Read::Root(ObjectId::root(sha256))),
         }
     }
 
-    /// Goes on from the chunk of `index` whose range holds the path: a decoded one, or by
-    /// reading it.
-    fn indexed(self, root: [u8; 32], index: &PathIndex) -> Lookup<'a> {
-        let Some(at) = index.chunk_of(&self.target.path) else {
-            return self.not_found();
-        };
-        match parse_sha256(&index.chunks[at].sha256) {
-            Some(sha256) => self.chunk(sha256),
-            None => {
-                let reason = format!("chunk {at} is not named by a SHA-256");
-                self.failed(Read::Root(ObjectId::root(root)), reason)
+    /// Goes on from `index`, the path index with the root `root`: to the chunk whose range holds
+    /// the path of a file, or to the listing of a directory.
+    fn indexed(self, root: [u8; 32], index: Arc<PathIndex>) -> Lookup<'a> {
+        if self.target.is_directory() {
+            let key = listing::key(&root, &self.target.path);
+            if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
+                return self.listed(&listed);
             }
+            let listing = Listing::new(&self.target.path);
+            return self.gather(Box::new(Gathering {
+                root,
+                index,
+                listing,
+            }));
+        }
+        match index.chunk_of(&self.target.path) {
+            Some(at) => self.named_chunk(root, chunk_sha256(&index, at)),
+            None => self.not_found(),
         }
     }
 
-    /// Goes on from the chunk that holds the path: a decoded one, or by reading it.
+    /// Goes on from the chunk that the root `root` names by `named`, or fails when the root names
+    /// it by something other than a hash.
+    fn named_chunk(self, root: [u8; 32], named: Result<[u8; 32], String>) -> Lookup<'a> {
+        match named {
+            Ok(sha256) => self.chunk(sha256),
+            Err(reason) => self.failed(Read::Root(ObjectId::root(root)), reason),
+        }
+    }
+
+    /// Goes on with the listing of `gathering`: to the chunk it reads next, or to the response
+    /// once it has looked at every path under the directory.
+    fn gather(mut self, gathering: Box<Gathering>) -> Lookup<'a> {
+        let Gathering {
+            root,
+            index,
+            listing,
+        } = &*gathering;
+        if let Some(at) = listing.wanted(index) {
+            let (root, named) = (*root, chunk_sha256(index, at));
+            self.gathering = Some(gathering);
+            return self.named_chunk(root, named);
+        }
+        if !listing.is_found() {
+            return self.not_found();
+        }
+        match listing.listed(index) {
+            Ok(listed) => {
+                let listed = Arc::new(listed);
+                let key = listing::key(root, &self.target.path);
+                let weight = listed.weight();
+                self.resolver
+                    .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+                self.listed(&listed)
+            }
+            Err(reason) => self.failed(Read::Root(ObjectId::root(*root)), reason),
+        }
+    }
+
+    /// Answers with `listed`, the listing of the directory.
+    fn listed(&self, listed: &Listed) -> Lookup<'a> {
+        self.done(self.resolver.routes.listing(&self.request, listed))
+    }
+
+    /// Goes on from a chunk of the path index: a decoded one, or by reading it.
     fn chunk(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
             Some(Indexed::Chunk(chunk)) => self.found(sha256, &chunk),
@@ -380,8 +446,13 @@ impl<'a> Asked<'a> {
         }
     }
 
-    /// Answers with the file of the path in `chunk`, if it has one.
-    fn found(self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
+    /// Goes on from `chunk`: with the listing that reads it, or by answering with the file of the
+    /// path in it, if it has one.
+    fn found(mut self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
+        if let Some(mut gathering) = self.gathering.take() {
+            gathering.listing.gather(&gathering.index, chunk);
+            return self.gather(gathering);
+        }
         let file = chunk.get(&self.target.path);
         match self
             .resolver
@@ -455,7 +526,7 @@ impl<'a> Pending<'a> {
                     let sha256 = *object.sha256();
                     let weight = root_weight(&index);
                     resolver.keep(sha256, Indexed::Root(Arc::clone(&index)), weight);
-                    asked.indexed(sha256, &index)
+                    asked.indexed(sha256, index)
                 }
                 Err(reason) => asked.failed(Read::Root(object), reason),
             },
@@ -504,6 +575,12 @@ fn decoded_root(object: &ObjectId, bytes: &[u8]) -> Result<PathIndex, String> {
 fn decoded_chunk(object: &ObjectId, bytes: &[u8]) -> Result<Chunk, String> {
     verified(object, bytes)?;
     Chunk::decode(bytes).map_err(|e| e.to_string())
+}
+
+/// The hash of the chunk at `at` of `index`.
+fn chunk_sha256(index: &PathIndex, at: usize) -> Result<[u8; 32], String> {
+    parse_sha256(&index.chunks[at].sha256)
+        .ok_or_else(|| format!("chunk {at} is not named by a SHA-256"))
 }
 
 /// The 32 bytes that `text` gives as 64 lowercase hexadecimal digits.

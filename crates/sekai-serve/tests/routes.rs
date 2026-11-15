@@ -77,13 +77,33 @@ fn paths_are_percent_decoded() {
 }
 
 #[test]
+fn a_path_that_is_empty_or_ends_with_a_slash_names_a_directory() {
+    let routes = sample();
+    let cases = [
+        ("/jp/", ""),
+        ("/jp/sprite/", "sprite/"),
+        ("/jp/sprite%2F", "sprite/"),
+        ("/jp/sprite/a.png", "sprite/a.png"),
+    ];
+    for (path, expected) in cases {
+        let resolved = routes.resolve(path);
+        assert_eq!(
+            resolved,
+            target("jp", "canonical", None, expected),
+            "{path}"
+        );
+        let directory = expected.is_empty() || expected.ends_with('/');
+        assert_eq!(resolved.unwrap().is_directory(), directory, "{path}");
+    }
+}
+
+#[test]
 fn names_that_cannot_name_a_file_match_nothing() {
     let routes = sample();
     for path in [
         "",
         "jp/a.png",
         "/jp",
-        "/jp/",
         "/../a.png",
         "/./a.png",
         "/j p/a.png",

@@ -398,6 +398,9 @@ fn fixed_body(body: &Body) -> ResponseBody {
         Body::Text(text) => Full::new(Bytes::from_static(text.as_bytes()))
             .map_err(never)
             .boxed(),
+        Body::Bytes(bytes) => Full::new(Bytes::from_owner(Arc::clone(bytes)))
+            .map_err(never)
+            .boxed(),
         Body::Empty | Body::Object(_) => Empty::new().map_err(never).boxed(),
     }
 }

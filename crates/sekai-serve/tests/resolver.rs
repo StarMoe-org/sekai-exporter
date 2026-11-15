@@ -1007,3 +1007,172 @@ mod lookups {
         assert!(matches!(lookup, Lookup::Done(response) if response.status == 200));
     }
 }
+
+mod directories {
+    use super::*;
+    use serde_json::Value;
+
+    /// The listing that `response` carries.
+    fn listing(response: &Response) -> Value {
+        let Body::Bytes(bytes) = &response.body else {
+            panic!("a listing is a document: {response:?}")
+        };
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    /// The subdirectories and file names of the listing of `path`.
+    fn names(resolver: &Resolver, published: &Published, path: &str) -> (Vec<String>, Vec<String>) {
+        let listed = listing(&answer(resolver, published, &get(path)));
+        let strings = |values: &Value, key: Option<&str>| {
+            let values = values.as_array().unwrap().iter();
+            let names = values.map(|value| key.map_or(value, |key| &value[key]));
+            names
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect()
+        };
+        (
+            strings(&listed["directories"], None),
+            strings(&listed["files"], Some("name")),
+        )
+    }
+
+    fn published() -> Published {
+        let mut published = Published::default();
+        let paths = [
+            "a.txt",
+            "b/c.txt",
+            "b/d/e.txt",
+            "b/d/f.txt",
+            "b/g.txt",
+            "b/g/h.txt",
+            "i/j.txt",
+        ];
+        published.publish("jp/storage", "1", &files(&paths), 2);
+        published
+    }
+
+    #[test]
+    fn a_directory_lists_what_is_right_under_it() {
+        let (resolver, published) = (resolver(""), published());
+        let list = |path| names(&resolver, &published, path);
+        let strings =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            list("/jp/storage/"),
+            (strings(&["b", "i"]), strings(&["a.txt"]))
+        );
+        assert_eq!(
+            list("/jp/storage/b/"),
+            (strings(&["d", "g"]), strings(&["c.txt", "g.txt"]))
+        );
+        assert_eq!(
+            list("/jp@1/storage/b/d/"),
+            (strings(&[]), strings(&["e.txt", "f.txt"]))
+        );
+        for missing in ["/jp/storage/x/", "/jp/storage/b/c.txt/", "/jp/storage/b//"] {
+            assert_eq!(answer(&resolver, &published, &get(missing)).status, 404);
+        }
+        // Without its `/`, a directory is a path that names no file.
+        assert_eq!(
+            answer(&resolver, &published, &get("/jp/storage/b")).status,
+            404
+        );
+    }
+
+    #[test]
+    fn a_listing_is_a_document_of_the_publication() {
+        let (resolver, published) = (resolver(r#", "max_age": 5"#), published());
+        let response = answer(&resolver, &published, &get("/jp/storage/b/d/"));
+        assert_eq!(response.status, 200);
+        assert_eq!(header(&response, "content-type"), Some("application/json"));
+        assert_eq!(
+            header(&response, "cache-control"),
+            Some("public, max-age=5")
+        );
+        let Body::Bytes(bytes) = &response.body else {
+            panic!("a listing is a document")
+        };
+        let etag = format!("\"{}\"", hex(&sha256(bytes)));
+        assert_eq!(header(&response, "etag"), Some(etag.as_str()));
+        let length = bytes.len().to_string();
+        assert_eq!(header(&response, "content-length"), Some(length.as_str()));
+
+        let e = file("b/d/e.txt");
+        assert_eq!(
+            listing(&response),
+            serde_json::json!({
+                "format": "directory-listing",
+                "version": 1,
+                "view": "storage",
+                "published_version": "1",
+                "revision": "00000000",
+                "path": "b/d/",
+                "directories": [],
+                "files": [
+                    { "name": "e.txt", "sha256": hex(&e.sha256), "extension": "txt",
+                      "size": e.size, "media_type": "test/txt" },
+                    { "name": "f.txt", "sha256": hex(&file("b/d/f.txt").sha256),
+                      "extension": "txt", "size": 9, "media_type": "test/txt" },
+                ],
+            })
+        );
+
+        let again = Request {
+            if_none_match: Some(&etag),
+            ..get("/jp/storage/b/d/")
+        };
+        let unchanged = answer(&resolver, &published, &again);
+        assert_eq!((unchanged.status, &unchanged.body), (304, &Body::Empty));
+        let head = Request {
+            method: "HEAD",
+            ..get("/jp/storage/b/d/")
+        };
+        let headers = answer(&resolver, &published, &head);
+        assert_eq!(headers.body, Body::Empty);
+        assert_eq!(header(&headers, "content-length"), Some(length.as_str()));
+    }
+
+    #[test]
+    fn a_listing_reads_only_the_chunks_where_its_entries_start() {
+        let mut published = Published::default();
+        let mut paths = vec!["a/0.txt".to_owned()];
+        paths.extend((0..100).map(|n| format!("a/big/{n:03}.txt")));
+        paths.extend([
+            "a/big.txt".to_owned(),
+            "a/z.txt".to_owned(),
+            "b.txt".to_owned(),
+        ]);
+        paths.sort();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (_, chunks) = published.publish("jp/storage", "1", &files(&paths), 10);
+        assert!(chunks.len() > 10);
+        let resolver = resolver("");
+        assert_eq!(
+            names(&resolver, &published, "/jp/storage/a/"),
+            (
+                vec!["big".to_owned()],
+                vec!["0.txt".to_owned(), "big.txt".to_owned(), "z.txt".to_owned()]
+            )
+        );
+        // The chunk of `a/0.txt` and `a/big.txt`, which starts the subdirectory, and the last
+        // chunk, which holds the paths past it.
+        assert_eq!(published.reads(), ["pointer", "root", "chunk", "chunk"]);
+        names(&resolver, &published, "/jp/storage/a/");
+        assert_eq!(published.reads(), [""; 0]);
+    }
+
+    #[test]
+    fn the_root_of_a_view_without_files_is_listed() {
+        let mut published = Published::default();
+        published.publish("jp/storage", "1", &[], 2);
+        let resolver = resolver("");
+        assert_eq!(
+            names(&resolver, &published, "/jp/storage/"),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            answer(&resolver, &published, &get("/en/storage/")).status,
+            404
+        );
+    }
+}

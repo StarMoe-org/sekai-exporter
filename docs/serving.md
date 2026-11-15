@@ -46,7 +46,7 @@ A pattern starts with `/` and is a sequence of `/`-separated segments. A segment
 | `{region}` | The region. Either a placeholder or the route's `region` key gives it, never both |
 | `{view}` | The view. Either a placeholder or the route's `view` key gives it, never both |
 | `{version}` | Optional. A published version: the path is resolved in that version instead of the current one |
-| `{path}` | Required, and the last segment. The rest of the URL path, percent-decoded, is the path in the view |
+| `{path}` | Required, and the last segment. The rest of the URL path, percent-decoded, is the path in the view. A path that is empty or ends with `/` names a [directory](#directories) |
 
 A region, view or version without a publication is not found.
 
@@ -84,6 +84,23 @@ The pointer of a view is read again at most every `max_age` seconds, so a new pu
 
 The pointer of a named version is read again as often, because a version can be published again under its name: `export` publishes `local` on every run, and `update --force` publishes the version it finds once more, with other files when the converters have changed since. The resolver answers with the new files within `max_age`, and a response for a named version may be cached no longer than one for the current version, so a client or a cache gets the new files within twice `max_age`. A file that has not changed keeps its `ETag`, the hash of the file, so asking for it again with `If-None-Match` is `304` without a body.
 
+## Directories
+
+A path that is empty, for the root, or ends with `/`, such as `/storage/jp/character/member/`, names a directory of the view under the same routes, in the current version or a named one. The directory is `200` with a JSON document, `application/json`, that lists what is right under it:
+
+| Key | Value |
+|---|---|
+| `format` | `"directory-listing"` |
+| `version` | `1` |
+| `view`, `published_version`, `revision` | Those of the publication, from its path index |
+| `path` | The directory: empty for the root, and otherwise ending with `/` |
+| `directories` | The names of the subdirectories, in byte order |
+| `files` | `{ "name", "sha256", "extension", "size", "media_type" }` for each file right under the directory, in byte order of the names |
+
+A directory exists when a file of the view is under it; the root of a published view always exists. Any other directory is `404`, and so is a directory asked for without its `/`, which names no file. The `ETag` of a listing is `"<sha256>"` of the document, with `Cache-Control` and `If-None-Match` as for a file; the answer to `HEAD` gives the length of the document.
+
+A listing is made from the path index alone. The paths under a directory are one range of the index, in byte order. The resolver reads that range from its start and, at the first path of a subdirectory, goes on past every path under it, so a listing reads only the chunks in which a file or a subdirectory of the directory starts, and the chunks it reads are remembered as for files. Every published version of every view can therefore be listed, and nothing is published for it.
+
 ## What the resolver checks
 
 The resolver takes neither a request nor a publication at its word.
@@ -107,7 +124,7 @@ What the resolver remembers does not grow with what requests name. When a limit 
 | Remembered | Limit |
 |---|---|
 | Pointers, whether they exist or not | 1024 |
-| Decoded roots and chunks of path indexes | 512 MiB, set by `--cache` |
+| Decoded roots and chunks of path indexes, and the directory listings made from them | 512 MiB, set by `--cache` |
 
 A decoded path index takes 72 bytes and the length of its path for each file, so a view of a million files whose paths are 60 bytes long takes about 126 MiB. A cache that holds the indexes of the views that are asked for answers every lookup without a read; a smaller one reads the chunks it dropped again.
 
@@ -141,4 +158,4 @@ docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/rou
 
 ## Other hosts
 
-The core is a `Resolver`: the routes, the checks, what is remembered, and the responses. A host starts a lookup for each request (`Resolver::lookup`) with the time of its own clock, and makes the reads the lookup asks for, at most three: the pointer of a view, the root of its path index and a chunk, each with the most bytes it may give. The lookup ends with a response: a status, headers, and either no body, a short text, or a byte range of an object with the size the object must have. A host supplies the reads and the clock and writes the response, so every host checks, remembers and answers alike. The server of `sekai-exporter serve` is one host, `sekai_serve::server` behind the `server` feature of the crate, which another program can run as well. An edge worker in front of a bucket reads from the bucket and caches objects by their hash, so every path of every view that names one object shares one cached copy.
+The core is a `Resolver`: the routes, the checks, what is remembered, and the responses. A host starts a lookup for each request (`Resolver::lookup`) with the time of its own clock, and makes the reads the lookup asks for: the pointer of a view, the root of its path index and a chunk for a file, or the chunks of a [listing](#directories) for a directory, each with the most bytes it may give. The lookup ends with a response: a status, headers, and either no body, a short text, a document such as a listing, or a byte range of an object with the size the object must have. A host supplies the reads and the clock and writes the response, so every host checks, remembers and answers alike. The server of `sekai-exporter serve` is one host, `sekai_serve::server` behind the `server` feature of the crate, which another program can run as well. An edge worker in front of a bucket reads from the bucket and caches objects by their hash, so every path of every view that names one object shares one cached copy.

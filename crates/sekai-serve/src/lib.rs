@@ -9,6 +9,7 @@
 //! `sekai-exporter serve`, which reads from an output directory.
 
 mod cache;
+mod listing;
 mod resolver;
 mod response;
 mod routes;

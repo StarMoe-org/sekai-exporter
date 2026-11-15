@@ -50,6 +50,7 @@
 | WebAssembly 核心，持续集成中与原生构建比对 | 已完成 | |
 | 惰性求值器（作为库） | 已完成 | [架构](architecture.zh-CN.md) |
 | 路径索引与 `serve` 解析器 | 已完成 | [服务](serving.zh-CN.md)、[路径索引](spec/path-index.zh-CN.md) |
+| 目录列表，以及每次发布一份供文件浏览器使用的目录树 | 已完成 | [服务](serving.zh-CN.md#目录树)、[目录树](spec/directory-tree.zh-CN.md) |
 | 桶前的边缘 worker 解析器 | 计划中 | `sekai-serve` 核心不做 I/O，读取由 worker 提供 |
 
 ## 通用形式

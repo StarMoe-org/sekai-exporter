@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::chunks::{self, Row};
 
 /// The version of these document formats.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// A chunk of a table of the index root ends after a row whose key hashes to a multiple of this,
 /// so chunks hold this many rows on average.
@@ -168,6 +168,18 @@ pub struct Pointer {
     /// hexadecimal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<String>,
+    /// The [directory tree](crate::directory_tree) of the publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree: Option<TreeReference>,
+}
+
+/// A directory tree, as a pointer names it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TreeReference {
+    /// The SHA-256 of the tree (`store/<aa>/<sha256>.json.gz`), as lowercase hexadecimal.
+    pub sha256: String,
+    /// The size of the tree in the store, in bytes.
+    pub size: u64,
 }
 
 /// One file of a path tree.

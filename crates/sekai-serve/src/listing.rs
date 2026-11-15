@@ -115,6 +115,11 @@ impl Listing {
         }
     }
 
+    /// The directory: empty for the root, and otherwise ending with `/`.
+    pub(crate) fn directory(&self) -> &str {
+        &self.directory
+    }
+
     /// The position of the chunk of `index` that the listing reads next, or `None` once it has
     /// looked at every path under the directory.
     pub(crate) fn wanted(&self, index: &PathIndex) -> Option<usize> {

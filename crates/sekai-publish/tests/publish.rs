@@ -358,11 +358,28 @@ fn a_change_gives_the_publication_of_the_new_assets() {
         let before = before.unwrap();
         let previous = Previous::read(&store, &before.pointer).unwrap();
         let change = change(&old, &new, &store, 2).unwrap();
-        let patched =
-            patch::apply(&store, &store, "canonical", "v2", layout, &previous, change).unwrap();
+        let apply = |previous: &Previous| {
+            patch::apply(
+                &store,
+                &store,
+                "canonical",
+                "v2",
+                layout,
+                previous,
+                change.clone(),
+            )
+        };
+        let patched = apply(&previous).unwrap();
         let whole = plan("v2", &new, &store, 2).unwrap();
         let whole = documents(&store, "jp/canonical", &whole, layout).unwrap();
         assert_eq!(patched.pointer, whole.pointer, "{layout:?}");
+        // Without the directory tree of the previous publication, the new one is made from every
+        // file of its path index, and is the same.
+        let without_tree = apply(&Previous {
+            tree: None,
+            ..previous.clone()
+        });
+        assert_eq!(without_tree.unwrap().pointer, whole.pointer, "{layout:?}");
         assert!(
             patched.objects.len() * 20 < whole.objects.len(),
             "{layout:?}: {} of {}",

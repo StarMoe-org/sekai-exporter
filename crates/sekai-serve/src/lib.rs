@@ -18,4 +18,4 @@ pub mod server;
 
 pub use resolver::{Fault, Fetched, Limits, Lookup, Pending, Read, Resolver, Usage};
 pub use response::{Body, ObjectId, Request, Response, Slice};
-pub use routes::{Routes, RoutesError, Target};
+pub use routes::{Entry, Routes, RoutesError, Target};

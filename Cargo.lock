@@ -1426,6 +1426,7 @@ dependencies = [
 name = "sekai-publish"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "sekai-catalog",
  "sekai-format",
  "sekai-testkit",

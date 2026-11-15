@@ -57,6 +57,8 @@ A region, view or version without a publication is not found.
 | `max_age` | How many seconds a response may be cached, for the current version and for a named one. Default 60 |
 | `cors` | When present, the value of `Access-Control-Allow-Origin` |
 
+A route with `"tree": true` names the [directory tree](#directory-trees) of a view instead of its paths. Its pattern has no `{path}`, and a URL path matches it only when nothing follows its last segment, such as `{ "pattern": "/trees/{region}/{view}", "tree": true }` for `/trees/jp/storage`.
+
 A routes file with another key, an invalid pattern, or a route that gives the region or the view twice or not at all is refused when the resolver starts.
 
 ## Responses
@@ -101,6 +103,12 @@ A directory exists when a file of the view is under it; the root of a published 
 
 A listing is made from the path index alone. The paths under a directory are one range of the index, in byte order. The resolver reads that range from its start and, at the first path of a subdirectory, goes on past every path under it, so a listing reads only the chunks in which a file or a subdirectory of the directory starts, and the chunks it reads are remembered as for files. Every published version of every view can therefore be listed, and nothing is published for it.
 
+## Directory trees
+
+Every publication of a view also has a [directory tree](spec/directory-tree.md): one gzip-compressed JSON document with every directory and file of the view, by name, size and media type. A page that browses a whole view reads the tree once and then reads each file by its path in the same published version, so the tree and the files never come from two versions.
+
+A route to the tree answers it as a file: the object that the pointer of the view names under `tree`, with `Content-Type: application/gzip`, `ETag` the hash of the object, the file name `directory-tree.json.gz`, ranges and `If-None-Match` as for a file, or a redirect to the object with `"redirect"`. The answer needs only the pointer. A client that keeps the tree asks for it again with `If-None-Match` and gets `304` until a new version is published, and then the new tree. A publication whose pointer names no tree has none, and its tree is `404`.
+
 ## What the resolver checks
 
 The resolver takes neither a request nor a publication at its word.
@@ -109,7 +117,7 @@ A request names files only through the routes. Its region, view and version are 
 
 A publication is used only as far as it is what it says. A request is `500`, and the host logs the reason, when:
 
-- the pointer cannot be read, is not a pointer document, or names its path index by something other than a SHA-256;
+- the pointer cannot be read, is not a pointer document, or names its path index or its directory tree by something other than a SHA-256;
 - the root or a chunk of the path index is missing or cannot be read, does not have the hash it is named by, or does not follow its format;
 - a pointer is longer than 64 KiB, or a root or a chunk is longer than 64 MiB;
 - the index gives the file an extension that is not a name, or a media type that cannot be the value of a header;

@@ -13,7 +13,7 @@ const DEFAULT_MAX_AGE: u64 = 60;
 /// name of a pointer, so a longer one names nothing.
 const MAX_NAME_BYTES: usize = 200;
 
-/// A file or a directory of a view that a request names.
+/// What a request names in a published version of a view.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     /// The region.
@@ -22,17 +22,28 @@ pub struct Target {
     pub view: String,
     /// The published version, or `None` for the current one.
     pub version: Option<String>,
-    /// The path in the view: of a file, or of a directory when it is empty, for the root, or ends
-    /// with `/`.
-    pub path: String,
+    /// What the request names in it.
+    pub entry: Entry,
+}
+
+/// A file, a directory or the whole tree of a view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Entry {
+    /// The path in the view: of a file, or of a directory when it is empty, for the root, or
+    /// ends with `/`.
+    Path(String),
+    /// The directory tree of the view.
+    Tree,
+}
+
+impl Entry {
+    /// Whether the entry is a directory rather than a file or the tree.
+    pub fn is_directory(&self) -> bool {
+        matches!(self, Self::Path(path) if path.is_empty() || path.ends_with('/'))
+    }
 }
 
 impl Target {
-    /// Whether the target is a directory rather than a file.
-    pub fn is_directory(&self) -> bool {
-        self.path.is_empty() || self.path.ends_with('/')
-    }
-
     /// The path of the pointer that publishes the target, relative to the published root:
     /// `<region>/<view>/current.json`, or `<region>/<view>/versions/<version>.json`.
     pub fn pointer(&self) -> String {
@@ -93,11 +104,21 @@ enum Piece {
     Name(Field),
 }
 
+/// What the URL paths of a route name after its segments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// A path in the view, which the rest of the URL path gives.
+    Path,
+    /// The directory tree of the view, after which the URL path ends.
+    Tree,
+}
+
 /// A pattern and the names it fixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Route {
-    /// The segments before `{path}`.
+    /// The segments before `{path}`, or all of them in a route to the directory tree.
     segments: Vec<Vec<Piece>>,
+    ending: Ending,
     region: Option<String>,
     view: Option<String>,
 }
@@ -139,6 +160,9 @@ struct RouteFile {
     pattern: String,
     region: Option<String>,
     view: Option<String>,
+    /// Whether the route names the directory tree of the view, with a pattern without `{path}`.
+    #[serde(default)]
+    tree: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -202,7 +226,7 @@ impl Routes {
         self.max_age
     }
 
-    /// The file or directory that the URL path `path` names, by the first route that matches it.
+    /// What the URL path `path` names, by the first route that matches it.
     pub fn resolve(&self, path: &str) -> Option<Target> {
         let rest = path.strip_prefix('/')?;
         self.routes.iter().find_map(|route| route.resolve(rest))
@@ -218,8 +242,11 @@ impl Route {
             .ok_or_else(|| error("it does not start with /"))?
             .split('/')
             .collect();
-        let Some((&"{path}", before)) = texts.split_last() else {
-            return Err(error("its last segment is not {path}"));
+        let (before, ending) = match (texts.split_last(), file.tree) {
+            (Some((&"{path}", _)), true) => return Err(error("a route to the tree has no {path}")),
+            (Some((&"{path}", before)), false) => (before, Ending::Path),
+            (_, false) => return Err(error("its last segment is not {path}")),
+            (_, true) => (texts.as_slice(), Ending::Tree),
         };
         let segments = before
             .iter()
@@ -228,25 +255,29 @@ impl Route {
         check_names(&segments, &file).map_err(|message| error(&message))?;
         Ok(Self {
             segments,
+            ending,
             region: file.region,
             view: file.view,
         })
     }
 
     /// The target that `rest`, a URL path without its leading `/`, names by this route.
-    fn resolve(&self, mut rest: &str) -> Option<Target> {
+    fn resolve(&self, rest: &str) -> Option<Target> {
+        let mut parts = rest.splitn(self.segments.len() + 1, '/');
         let mut captures = Captures::default();
         for pieces in &self.segments {
-            let (segment, after) = rest.split_once('/')?;
-            capture(pieces, segment, &mut captures)?;
-            rest = after;
+            capture(pieces, parts.next()?, &mut captures)?;
         }
-        let path = percent_decode(rest)?;
+        let entry = match (self.ending, parts.next()) {
+            (Ending::Path, Some(path)) => Entry::Path(percent_decode(path)?),
+            (Ending::Tree, None) => Entry::Tree,
+            _ => return None,
+        };
         Some(Target {
             region: captures.region.or(self.region.as_deref())?.to_owned(),
             view: captures.view.or(self.view.as_deref())?.to_owned(),
             version: captures.version.map(str::to_owned),
-            path,
+            entry,
         })
     }
 }
@@ -280,7 +311,7 @@ fn check_names(segments: &[Vec<Piece>], file: &RouteFile) -> Result<(), String> 
     Ok(())
 }
 
-/// The pieces of one segment of a pattern before `{path}`.
+/// The pieces of one segment of a pattern other than `{path}`.
 fn pieces(segment: &str) -> Result<Vec<Piece>, String> {
     let mut pieces = Vec::new();
     let mut rest = segment;

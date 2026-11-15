@@ -7,14 +7,19 @@
 //! the same code and give the same documents.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use sekai_catalog::{Key, LocalStore, Store};
 use sekai_format::chunks::{self, Patched, Row};
+use sekai_format::directory_tree::{self, DirectoryTree, TreeFile};
 use sekai_format::paths::{self, Chunk, ChunkReference, PathFile, PathIndex};
 use sekai_format::publication::{
     AssetFailure, IndexChunk, IndexEntry, IndexRoot, IndexShard, ListingEntry, ListingTable,
-    Pointer, ShardReference, TableChunk, VERSION,
+    Pointer, ShardReference, TableChunk, TreeReference, VERSION,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -145,6 +150,8 @@ pub struct Previous {
     pub index: Option<IndexRoot>,
     /// The root of the path index.
     pub paths: Option<PathIndex>,
+    /// The directory tree, which is read when a change needs it.
+    pub tree: Option<TreeReference>,
 }
 
 impl Previous {
@@ -165,7 +172,8 @@ impl Previous {
                 PathIndex::from_bytes(&read(root)?).map_err(|e| PublishError::new("previous", e))
             })
             .transpose()?;
-        Ok(Self { index, paths })
+        let tree = pointer.tree.clone();
+        Ok(Self { index, paths, tree })
     }
 
     /// The files of the publication, looked up in the chunks of its path index, which are read
@@ -278,6 +286,23 @@ impl Written<'_> {
         let bytes = serde_json::to_vec(document).map_err(|e| PublishError::new("documents", e))?;
         self.put(&bytes, "json", JSON)
     }
+
+    /// Stores `tree` gzip-compressed and returns the reference a pointer names it by.
+    fn put_tree(&mut self, tree: &DirectoryTree) -> Result<TreeReference, PublishError> {
+        let json = serde_json::to_vec(tree).map_err(|e| PublishError::new("documents", e))?;
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        let bytes = gzip
+            .write_all(&json)
+            .and_then(|()| gzip.finish())
+            .map_err(PublishError::wrap("documents"))?;
+        let sha256 = self.put(
+            &bytes,
+            directory_tree::EXTENSION,
+            directory_tree::MEDIA_TYPE,
+        )?;
+        let size = bytes.len() as u64;
+        Ok(TreeReference { sha256, size })
+    }
 }
 
 /// Reads the rows of the chunk object named by a SHA-256 from a store.
@@ -380,9 +405,14 @@ pub fn apply(
             Some(index_tables(store, &mut written, previous, edits)?)
         }
     };
-    let (paths, files) = path_chunks(store, &mut written, previous.paths.as_ref(), &edits)?;
+    let changes = PathChanges::new(store, previous.paths.as_ref(), &edits)?;
+    let tree_files = changes.tree_files(previous.tree.as_ref())?;
+    let (paths, files) = changes.chunks(&mut written)?;
     let failures = tables.as_ref().map_or(&[][..], |t| &t.failures);
     let revision = revision(version, &paths, failures);
+    let tree = DirectoryTree::new(view, version, &revision, tree_files)
+        .map_err(|e| PublishError::new("documents", e))?;
+    let tree = written.put_tree(&tree)?;
 
     let paths = written.put_json(&PathIndex {
         format: "path-index".to_owned(),
@@ -423,6 +453,7 @@ pub fn apply(
             revision,
             root,
             paths: Some(paths),
+            tree: Some(tree),
         },
         objects,
     })
@@ -441,36 +472,96 @@ fn revision(version: &str, paths: &[ChunkReference], failures: &[TableChunk]) ->
     hex(&Sha256::digest(text.as_bytes()))
 }
 
-/// The chunks of the path index after `change`, and the number of paths.
-fn path_chunks(
-    store: &dyn Store,
-    written: &mut Written<'_>,
-    previous: Option<&PathIndex>,
-    edits: &BTreeMap<String, PathEdit>,
-) -> Result<(Vec<ChunkReference>, u64), PublishError> {
-    let old = previous.map_or(&[][..], |index| index.chunks.as_slice());
-    let firsts = old.iter().map(|c| (c.first.clone(), c.sha256.clone()));
-    let table = Table::new(store, firsts, read_paths);
-    let mut rows = BTreeMap::new();
-    for (path, edit) in edits {
-        if edit.removed.is_none() && edit.added.is_some() && table.get(path)?.is_some() {
-            return Err(two_files(path));
+/// The path index of the previous publication and what a change does to its paths.
+struct PathChanges<'a> {
+    store: &'a dyn Store,
+    /// The chunks of the previous index.
+    old: &'a [ChunkReference],
+    table: Table<'a, PathFile>,
+    /// The file at each path the change edits, or `None` where it removes the file.
+    rows: BTreeMap<String, Option<PathFile>>,
+}
+
+impl<'a> PathChanges<'a> {
+    /// The changes that `edits` make to `previous`, the path index of the previous publication.
+    /// Fails if a file is added at a path that the change does not free.
+    fn new(
+        store: &'a dyn Store,
+        previous: Option<&'a PathIndex>,
+        edits: &BTreeMap<String, PathEdit>,
+    ) -> Result<Self, PublishError> {
+        let old = previous.map_or(&[][..], |index| index.chunks.as_slice());
+        let firsts = old.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        let table = Table::new(store, firsts, read_paths);
+        let mut rows = BTreeMap::new();
+        for (path, edit) in edits {
+            if edit.removed.is_none() && edit.added.is_some() && table.get(path)?.is_some() {
+                return Err(two_files(path));
+            }
+            rows.insert(path.clone(), edit.added.as_ref().map(path_file));
         }
-        rows.insert(path.clone(), edit.added.as_ref().map(path_file));
+        Ok(Self {
+            store,
+            old,
+            table,
+            rows,
+        })
     }
-    let mut chunks = Vec::new();
-    for chunk in table.patch(rows)? {
-        chunks.push(match chunk {
-            Patched::Kept(position) => old[position].clone(),
-            Patched::New(files) => ChunkReference {
-                first: files[0].path.clone(),
-                sha256: written.put(&Chunk::encode(&files), "paths", CHUNK_MEDIA_TYPE)?,
-                files: files.len() as u64,
-            },
-        });
+
+    /// The files of the publication after the change, in path order: those of `previous`, the
+    /// directory tree of the previous publication, with the edits applied. Without a tree, they
+    /// are read from every chunk of the previous path index.
+    fn tree_files(&self, previous: Option<&TreeReference>) -> Result<Vec<TreeFile>, PublishError> {
+        let before = match previous {
+            Some(tree) => read_tree(self.store, tree)?,
+            None => self.files()?,
+        };
+        let kept = before
+            .into_iter()
+            .filter(|file| !self.rows.contains_key(&file.path));
+        let added = self.rows.values().flatten().map(TreeFile::from);
+        let mut files: Vec<TreeFile> = kept.chain(added).collect();
+        files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
     }
-    let files = chunks.iter().map(|chunk| chunk.files).sum();
-    Ok((chunks, files))
+
+    /// Every file of the previous path index.
+    fn files(&self) -> Result<Vec<TreeFile>, PublishError> {
+        let mut files = Vec::new();
+        for position in 0..self.old.len() {
+            files.extend(self.table.rows(position)?.iter().map(TreeFile::from));
+        }
+        Ok(files)
+    }
+
+    /// The chunks of the path index after the change, and the number of paths.
+    fn chunks(self, written: &mut Written<'_>) -> Result<(Vec<ChunkReference>, u64), PublishError> {
+        let mut chunks = Vec::new();
+        for chunk in self.table.patch(self.rows)? {
+            chunks.push(match chunk {
+                Patched::Kept(position) => self.old[position].clone(),
+                Patched::New(files) => ChunkReference {
+                    first: files[0].path.clone(),
+                    sha256: written.put(&Chunk::encode(&files), "paths", CHUNK_MEDIA_TYPE)?,
+                    files: files.len() as u64,
+                },
+            });
+        }
+        let files = chunks.iter().map(|chunk| chunk.files).sum();
+        Ok((chunks, files))
+    }
+}
+
+/// The files of the directory tree `tree`, read from `store`.
+fn read_tree(store: &dyn Store, tree: &TreeReference) -> Result<Vec<TreeFile>, PublishError> {
+    let bytes = read_object(store, &tree.sha256, directory_tree::EXTENSION)?;
+    let mut json = Vec::new();
+    GzDecoder::new(bytes.as_slice())
+        .read_to_end(&mut json)
+        .map_err(PublishError::wrap("previous"))?;
+    DirectoryTree::from_json(&json)
+        .and_then(|tree| tree.files())
+        .map_err(|e| PublishError::new("previous", e))
 }
 
 fn read_paths(store: &dyn Store, sha256: &str) -> Result<Vec<PathFile>, PublishError> {

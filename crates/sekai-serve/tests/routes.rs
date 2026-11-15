@@ -1,7 +1,7 @@
 //! Routes files: valid ones resolve URL paths to the files they name, and invalid ones are
 //! refused.
 
-use sekai_serve::{Routes, Target};
+use sekai_serve::{Entry, Routes, Target};
 
 fn routes(json: &str) -> Routes {
     Routes::from_json(json.as_bytes()).unwrap()
@@ -11,6 +11,8 @@ fn sample() -> Routes {
     routes(
         r#"{
             "routes": [
+                { "pattern": "/trees/{region}/{view}", "tree": true },
+                { "pattern": "/trees/{region}@{version}/{view}", "tree": true },
                 { "pattern": "/files/{region}-{view}/{path}" },
                 { "pattern": "/jp-storage/{path}", "region": "jp", "view": "storage" },
                 { "pattern": "/{region}@{version}/{path}", "view": "canonical" },
@@ -20,13 +22,17 @@ fn sample() -> Routes {
     )
 }
 
-fn target(region: &str, view: &str, version: Option<&str>, path: &str) -> Option<Target> {
+fn named(region: &str, view: &str, version: Option<&str>, entry: Entry) -> Option<Target> {
     Some(Target {
         region: region.to_owned(),
         view: view.to_owned(),
         version: version.map(str::to_owned),
-        path: path.to_owned(),
+        entry,
     })
+}
+
+fn target(region: &str, view: &str, version: Option<&str>, path: &str) -> Option<Target> {
+    named(region, view, version, Entry::Path(path.to_owned()))
 }
 
 #[test]
@@ -93,8 +99,33 @@ fn a_path_that_is_empty_or_ends_with_a_slash_names_a_directory() {
             "{path}"
         );
         let directory = expected.is_empty() || expected.ends_with('/');
-        assert_eq!(resolved.unwrap().is_directory(), directory, "{path}");
+        assert_eq!(resolved.unwrap().entry.is_directory(), directory, "{path}");
     }
+}
+
+#[test]
+fn a_route_to_the_tree_names_the_directory_tree_of_a_view() {
+    let routes = sample();
+    let cases = [
+        (
+            "/trees/jp/storage",
+            named("jp", "storage", None, Entry::Tree),
+        ),
+        (
+            "/trees/jp@6.1.0/canonical",
+            named("jp", "canonical", Some("6.1.0"), Entry::Tree),
+        ),
+        // Nothing may follow the tree, and the later routes do not take what it does not.
+        (
+            "/trees/jp/storage/",
+            target("trees", "canonical", None, "jp/storage/"),
+        ),
+        ("/trees/jp", target("trees", "canonical", None, "jp")),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(routes.resolve(path), expected, "{path}");
+    }
+    assert!(!Entry::Tree.is_directory());
 }
 
 #[test]
@@ -179,6 +210,9 @@ fn invalid_routes_are_refused() {
         one(r#"{ "pattern": "/{path}", "region": "jp", "view": ".." }"#),
         one(r#"{ "pattern": "/{path}", "region": "nul", "view": "storage" }"#),
         one(r#"{ "pattern": "/{region}/{view}/{path}", "shard": "x" }"#),
+        one(r#"{ "pattern": "/{region}/{view}/{path}", "tree": true }"#),
+        one(r#"{ "pattern": "/", "region": "jp", "view": "storage", "tree": true }"#),
+        one(r#"{ "pattern": "/trees/{region}", "tree": true }"#),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "delivery": "redirect" }"#
             .to_owned(),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "store_url": "https://a" }"#

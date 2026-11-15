@@ -564,6 +564,57 @@ fn tables_are_read_at_the_current_revision() {
     assert_eq!(tables.read("events").unwrap_err().code, "status");
 }
 
+/// Answers every request with `body` on a local port, keeping each connection open, and returns
+/// `host:port` with the number of connections accepted so far.
+fn serve_kept_alive(body: &'static str) -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            counter.fetch_add(1, Ordering::SeqCst);
+            std::thread::spawn(move || answer_each(stream, body));
+        }
+    });
+    (address, accepted)
+}
+
+/// Answers the requests of `stream`, which carry no body, one after another until it closes.
+fn answer_each(mut stream: std::net::TcpStream, body: &str) -> io::Result<()> {
+    loop {
+        let mut head = Vec::new();
+        let mut byte = [0];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte)?;
+            head.push(byte[0]);
+        }
+        let length = body.len();
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {length}\r\n\r\n{body}"
+        )?;
+    }
+}
+
+#[test]
+fn requests_take_the_connection_pools_in_turn() {
+    for connections in [1, 3] {
+        let (base, accepted) = serve_kept_alive(r#"{"sha": "abc123"}"#);
+        let source = TableSource::Git {
+            revision: format!("http://{base}/commits/HEAD"),
+            revision_field: "sha".to_owned(),
+            table: format!("http://{base}/{{name}}"),
+        };
+        let network: Network = serde_json::from_value(json!({"connections": connections})).unwrap();
+        let tables = Tables::open(&source, &network).unwrap();
+        for name in ["a", "b", "c", "d", "e"] {
+            tables.read(name).unwrap();
+        }
+        assert_eq!(accepted.load(Ordering::SeqCst), connections);
+    }
+}
+
 #[test]
 fn a_revision_document_without_the_field_is_an_error() {
     let base = serve(|_| reply(200, "{}"));

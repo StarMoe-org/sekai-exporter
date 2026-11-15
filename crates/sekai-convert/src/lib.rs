@@ -105,6 +105,31 @@ pub trait Converter: Send + Sync {
         let _ = (root, cx);
         Cost::light(u64::from(object.size))
     }
+
+    /// The converter of the files of this form, when assets of the form also start from files.
+    /// The default is none.
+    fn files(&self) -> Option<&dyn FileConverter> {
+        None
+    }
+}
+
+/// The part of a [`Converter`] whose assets start from files of a bundle that are not serialized
+/// files, such as the cue sheets a client keeps as they are among its streaming assets. Such an
+/// asset reads only the bytes of its file.
+pub trait FileConverter: Sync {
+    /// Whether the file at `path` in its bundle is the root of an asset of this form. Like
+    /// [`Converter::is_root`], the rule belongs to the form (see [`roots`]).
+    fn is_file_root(&self, path: &str) -> bool;
+
+    /// Produces the asset whose root is a file with the bytes `bytes`. `Ok(None)` means, as for
+    /// [`Converter::convert`], that the file holds no asset of this form.
+    fn convert_file(&self, bytes: &[u8]) -> Result<Option<Asset>, ConvertError>;
+
+    /// What converting a file of `size` bytes is expected to need, which only guides scheduling,
+    /// as [`Converter::cost`] does. The default is [`Cost::light`] for `size`.
+    fn file_cost(&self, size: u64) -> Cost {
+        Cost::light(size)
+    }
 }
 
 /// Which canonical media encoders a [`Converter`] may rely on when encoding its members.

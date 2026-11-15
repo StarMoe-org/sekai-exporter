@@ -98,3 +98,23 @@ fn a_later_segment_of_a_video_is_not_a_root() {
     assert!(!roots::video(&object, None, &paths("a/b-002.usm.bytes")));
     assert!(!roots::video(&object, None, &paths("a/b-002.USM.BYTES")));
 }
+
+#[test]
+fn the_files_of_the_audio_form_are_cue_sheets() {
+    assert!(roots::audio_file("MenuCommon.acb"));
+    assert!(roots::audio_file("sub/Title.ACB"));
+    assert!(!roots::audio_file("ProjectSekai.acf"));
+    assert!(!roots::audio_file("a.acb.bytes"));
+    assert!(!roots::audio_file("CAB-0.resS"));
+    assert!(!roots::audio_file("音音"));
+}
+
+#[test]
+fn an_absent_converter_selects_the_files_of_its_form() {
+    let converter = Absent::with_files("audio", roots::audio, roots::audio_file);
+    let files = converter.files().expect("the form starts from files");
+    assert!(files.is_file_root("a.acb"));
+    assert!(!files.is_file_root("a.awb"));
+    assert_eq!(files.convert_file(b"").unwrap_err().code, "not_compiled");
+    assert!(Absent::boxed("texture", roots::texture).files().is_none());
+}

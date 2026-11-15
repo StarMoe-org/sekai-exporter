@@ -72,9 +72,13 @@
 
 ## 3. 来源
 
-**根对象：** 容器路径以 `.acb.bytes` 结尾的每个 `TextAsset`（类 49），比较时不区分大小写。形式不读取游戏数据表。
+**根对象：** 容器路径以 `.acb.bytes` 结尾的每个 `TextAsset`（类 49），比较时不区分大小写。
 
-**读取的字段：** `m_Script`，其中保存 cue sheet。
+**根文件：** 资源包中不是序列化文件、路径以 `.acb` 结尾的每个条目，比较时不区分大小写，例如[客户端安装包 streaming assets](../sources.zh-CN.md#区服配置) 中的 cue sheet。资产以资源包下文件的路径命名，包含扩展名。
+
+形式不读取游戏数据表。
+
+**读取的字段：** 根对象的 `m_Script`，其中保存 cue sheet。根文件的字节即 cue sheet。
 
 **Cue sheet。** 表从其 `Header` 表读取：`CueTable`、`CueNameTable`、`WaveformTable`、`WaveformExtensionDataTable`，以及 cue 的引用所到达的表（`SynthTable`、`SequenceTable`、`BlockSequenceTable`、`BlockTable`、`TrackTable`、`TrackEventTable`）。每个波形是表内存库（`AwbFile`，一个 AFS2 归档）中的 HCA 流，以其 `MemoryAwbId` 找到。`WaveformTable` 为空的表没有波形。
 

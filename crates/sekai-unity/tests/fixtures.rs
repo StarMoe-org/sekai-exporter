@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
-use sekai_unity::index::{BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file};
+use sekai_unity::index::{
+    BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file, index_resources,
+};
 use sekai_unity::{
     BlockCache, BoundedBlockCache, Bundle, ByteSource, NoBlockCache, SerializedFile, StoredFile,
     store_files,
@@ -108,6 +110,7 @@ fn documents(variant: &str, cache: &dyn BlockCache) -> (Vec<Vec<u8>>, Collected)
             files: l.with_files(cache, |files| {
                 files.iter().map(|f| index_file(f).unwrap()).collect()
             }),
+            resources: index_resources(&l.bundle, cache),
         })
         .collect();
     let version = VersionIndex::new(indexes);

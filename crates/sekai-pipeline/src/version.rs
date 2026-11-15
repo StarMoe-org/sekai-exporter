@@ -7,7 +7,8 @@ use std::sync::{Arc, Mutex};
 use sekai_catalog::{BundleIndexes, NoBundleIndexes};
 use sekai_convert::{Chunk, Context, ConvertError, EngineObject, Object, ObjectId, PPtr};
 use sekai_unity::index::{
-    BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, VersionIndex, index_file,
+    BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, ResourceFile, VersionIndex,
+    index_file, index_resources,
 };
 use sekai_unity::{
     BlockCache, Bundle, ByteSource, ClassLayouts, Field, Flights, NoClasses, Scalar,
@@ -72,7 +73,7 @@ impl Opened {
         }
         Ok(IndexRecord {
             files,
-            resources: self.resource_hashes(cache),
+            resources: index_resources(&self.bundle, cache),
             streams,
         })
     }
@@ -116,22 +117,6 @@ impl Opened {
         let source = self.bundle.entry(entry, cache);
         let chunk = source.read(offset, len).ok()?;
         Some(Sha256::digest(&*chunk).into())
-    }
-
-    /// The SHA-256 of each resource entry that can be read, in directory order.
-    fn resource_hashes(&self, cache: &dyn BlockCache) -> Vec<[u8; 32]> {
-        self.bundle
-            .entries()
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| !entry.is_serialized())
-            .filter_map(|(i, entry)| {
-                let size = usize::try_from(entry.size).ok()?;
-                let source = self.bundle.entry(i, cache);
-                let chunk = source.read(0, size).ok()?;
-                Some(Sha256::digest(&*chunk).into())
-            })
-            .collect()
     }
 }
 
@@ -285,6 +270,7 @@ pub fn indexed_bundle(
     Ok(record.map(|record| BundleIndex {
         name: name.to_owned(),
         files: record.files,
+        resources: record.resources,
     }))
 }
 
@@ -435,8 +421,6 @@ pub struct BundleError {
 pub struct Version<'c> {
     /// The bytes and hash of each bundle, in the order of [`VersionIndex::bundles`].
     bundles: Vec<(Arc<dyn ByteSource>, [u8; 32])>,
-    /// The hashes of the resource entries of each bundle.
-    resources: Vec<Vec<[u8; 32]>>,
     /// The streamed resource slices of each serialized file of each bundle.
     streams: Vec<Vec<Vec<StreamDigest>>>,
     parsed: Arc<Parsed>,
@@ -497,7 +481,6 @@ impl<'c> Version<'c> {
         });
         indexes.flush()?;
         let mut bundles = Vec::new();
-        let mut resources = Vec::new();
         let mut streams = Vec::new();
         let mut bundle_indexes = Vec::new();
         let mut errors = Vec::new();
@@ -520,8 +503,8 @@ impl<'c> Version<'c> {
                     bundle_indexes.push(BundleIndex {
                         name: input.name,
                         files: record.files,
+                        resources: record.resources,
                     });
-                    resources.push(record.resources);
                     streams.push(record.streams);
                     bundles.push((input.source, input.sha256));
                 }
@@ -530,7 +513,6 @@ impl<'c> Version<'c> {
         }
         let version = Self {
             bundles,
-            resources,
             streams,
             parsed: Arc::new(Parsed::new(PARSED_BYTES)),
             index: VersionIndex::new(bundle_indexes),
@@ -560,6 +542,48 @@ impl<'c> Version<'c> {
         })
     }
 
+    /// `size` bytes at `offset` of the entry `name` of bundle `bundle`, or `None` when the bundle
+    /// has no such entry.
+    fn read_entry(
+        &self,
+        bundle: usize,
+        name: &str,
+        offset: u64,
+        size: u64,
+    ) -> Result<Option<Chunk<'static>>, ConvertError> {
+        let opened = self.opened(bundle)?;
+        let entries = opened.bundle.entries();
+        let Some(entry) = entries.iter().position(|e| e.path == name) else {
+            return Ok(None);
+        };
+        let size = usize::try_from(size)
+            .map_err(|_| ConvertError::new("malformed", format!("a resource of {size} bytes")))?;
+        let source = opened.bundle.entry(entry, self.cache);
+        let chunk = source.read(offset, size)?;
+        // The chunk borrows the entry source made for this read; keep only what outlives it.
+        Ok(Some(match chunk {
+            Chunk::Borrowed(bytes) => Chunk::Owned(bytes.to_vec()),
+            Chunk::Shared { block, start, end } => Chunk::Shared { block, start, end },
+            Chunk::Owned(bytes) => Chunk::Owned(bytes),
+        }))
+    }
+
+    /// The bytes of the resource file `file` of bundle `bundle`.
+    pub(crate) fn resource_file(
+        &self,
+        bundle: usize,
+        file: &ResourceFile,
+    ) -> Result<Chunk<'static>, ConvertError> {
+        self.read_entry(bundle, &file.path, 0, file.size)?
+            .ok_or_else(|| self.missing_resource(bundle, &file.path))
+    }
+
+    fn missing_resource(&self, bundle: usize, path: &str) -> ConvertError {
+        let bundle = &self.index.bundles()[bundle].name;
+        let message = format!("{path} is not an entry of {bundle}");
+        ConvertError::new("missing_resource", message)
+    }
+
     fn missing(&self, id: ObjectId) -> ConvertError {
         let bundle = &self.index.bundles()[id.bundle];
         ConvertError::new(
@@ -569,11 +593,6 @@ impl<'c> Version<'c> {
                 id.path_id, bundle.files[id.file].path, bundle.name
             ),
         )
-    }
-
-    /// The SHA-256 of each resource entry of a bundle that can be read, in directory order.
-    pub fn resource_hashes(&self, bundle: usize) -> Vec<[u8; 32]> {
-        self.resources[bundle].clone()
     }
 
     /// The streamed resource slice digests of every bundle of the version.
@@ -658,34 +677,11 @@ impl Context for Version<'_> {
         offset: u64,
         size: u64,
     ) -> Result<Chunk<'_>, ConvertError> {
-        let opened = self.opened(from.bundle)?;
-        let bundle = &opened.bundle;
         // A stored path has the form `archive:/<file>/<resource file>`; the resource file is an
         // entry of the object's own bundle.
         let name = path.rsplit('/').next().unwrap_or(path);
-        let entry = bundle
-            .entries()
-            .iter()
-            .position(|e| e.path == name)
-            .ok_or_else(|| {
-                ConvertError::new(
-                    "missing_resource",
-                    format!(
-                        "{path} is not an entry of {}",
-                        self.index.bundles()[from.bundle].name
-                    ),
-                )
-            })?;
-        let size = usize::try_from(size)
-            .map_err(|_| ConvertError::new("malformed", format!("a resource of {size} bytes")))?;
-        let source = bundle.entry(entry, self.cache);
-        let chunk = source.read(offset, size)?;
-        // The chunk borrows the entry source made for this read; keep only what outlives it.
-        Ok(match chunk {
-            Chunk::Borrowed(bytes) => Chunk::Owned(bytes.to_vec()),
-            Chunk::Shared { block, start, end } => Chunk::Shared { block, start, end },
-            Chunk::Owned(bytes) => Chunk::Owned(bytes),
-        })
+        self.read_entry(from.bundle, name, offset, size)?
+            .ok_or_else(|| self.missing_resource(from.bundle, path))
     }
 
     fn container(&self, from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {

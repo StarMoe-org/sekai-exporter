@@ -16,6 +16,7 @@
 //! stays inside its own window, the result depends neither on how units are grouped into segments
 //! nor on the number of threads, and publishing is a step after the last unit.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque, btree_map};
 use std::fmt;
 use std::io;
@@ -25,16 +26,19 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, ScopedJoinHandle};
 
 use sekai_catalog::{BundleIndexes, Derivations, Key, Store};
-use sekai_convert::{Converter, ObjectId};
+use sekai_convert::{Converter, FileConverter, ObjectId};
 use sekai_format::{AssetDocument, AssetError};
-use sekai_unity::index::{Resolved, VersionIndex};
+use sekai_unity::index::{ObjectIndex, Resolved, ResourceFile, VersionIndex};
 use sekai_unity::{BlockCache, ByteSource, ClassLayouts};
 use serde::{Deserialize, Serialize};
 
-use crate::eval::{self, Evaluation, Fusion, Options, Output, Planned, Produced, Runner};
+use crate::eval::{
+    self, Evaluation, FileRoot, Fusion, Options, Output, Planned, Produced, RootKey, Runner,
+    Subject,
+};
 use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
-use crate::naming::{Candidate, assign, logical_path, path_in_bundle};
+use crate::naming::{Candidate, Origin, assign, logical_path, path_in_bundle};
 use crate::sched::Scheduler;
 use crate::version::{BundleError, BundleFiles, BundleInput, Parsed, Version, bundle_files};
 
@@ -428,10 +432,8 @@ struct Held {
 /// An asset of a unit, before it runs.
 pub(crate) struct Root<'a> {
     pub(crate) planned: Planned<'a>,
-    /// The logical path of the root object.
+    /// The logical path of the root.
     pub(crate) logical: String,
-    /// The path ID of the root object.
-    pub(crate) path_id: i64,
     /// The first reference that leaves the window, and how many do.
     outside: Option<(Outside, usize)>,
 }
@@ -462,10 +464,10 @@ impl Root<'_> {
 /// Everything gathered over the segments.
 #[derive(Default)]
 pub(crate) struct Gathered {
-    /// Each asset with the logical path and path ID of its root.
-    pub(crate) outputs: Vec<(Output, String, i64)>,
-    /// Each root left unnamed, as its unit, logical path and path ID.
-    pub(crate) unnamed: Vec<(String, String, i64)>,
+    /// Each asset with the logical path and key of its root.
+    pub(crate) outputs: Vec<(Output, String, RootKey)>,
+    /// Each root left unnamed, as its unit, logical path and key.
+    pub(crate) unnamed: Vec<(String, String, RootKey)>,
     /// The forms of the named roots of each unit that has any, by unit name.
     pub(crate) forms: BTreeMap<String, BTreeSet<&'static str>>,
     converted: usize,
@@ -793,7 +795,7 @@ fn run_segment(
             gathered.unnamed.extend(
                 unnamed
                     .into_iter()
-                    .map(|(logical, path_id)| (name.clone(), logical, path_id)),
+                    .map(|(logical, key)| (name.clone(), logical, key)),
             );
             let forms: BTreeSet<&'static str> = roots[planned..]
                 .iter()
@@ -820,17 +822,17 @@ fn run_segment(
                 gathered.outputs.push((
                     Output {
                         name: root.planned.name.clone(),
-                        bundle: index.bundles()[root.planned.closure[0].bundle].name.clone(),
+                        bundle: index.bundles()[root.planned.subject.bundle()].name.clone(),
                         form: root.planned.converter.name(),
                         error: stored.error(),
                         document: stored.key,
                     },
                     root.logical,
-                    root.path_id,
+                    root.planned.subject.key(),
                 ));
             }
             None => {
-                kept_roots.push((root.logical, root.path_id));
+                kept_roots.push((root.logical, root.planned.subject.key()));
                 runnable.push(root.planned);
             }
         }
@@ -847,11 +849,11 @@ fn run_segment(
             }
         }
     }
-    for (produced, (logical, path_id)) in ran.outputs.into_iter().zip(kept_roots) {
+    for (produced, (logical, key)) in ran.outputs.into_iter().zip(kept_roots) {
         let Some(Produced { output, .. }) = produced else {
             continue;
         };
-        gathered.outputs.push((output, logical, path_id));
+        gathered.outputs.push((output, logical, key));
     }
     Ok(gathered)
 }
@@ -903,7 +905,7 @@ fn count_reads(tallies: &mut BTreeMap<usize, Tally>, units: &Units<'_>, document
 
 /// Whether one of `converters` has a root in the unit of `bundle`, whose window holds the bundles
 /// `window` of `index`: an object of `bundle` with a container path that the converter takes as
-/// a root, as [`plan_unit`] finds them.
+/// a root, or a file of `bundle` that it takes as a root, as [`plan_unit`] finds them.
 pub(crate) fn has_roots(
     index: &VersionIndex,
     bundle: usize,
@@ -912,7 +914,7 @@ pub(crate) fn has_roots(
 ) -> bool {
     let unit = &index.bundles()[bundle].name;
     let mut files = index.bundles()[bundle].files.iter().enumerate();
-    files.any(|(f, file)| {
+    let object_root = files.any(|(f, file)| {
         file.objects.iter().enumerate().any(|(o, object)| {
             let paths = index.container_paths(bundle, f, object.path_id);
             if paths.is_empty() {
@@ -922,7 +924,60 @@ pub(crate) fn has_roots(
             let root = |converter: &&dyn Converter| converter.is_root(object, script, paths);
             converters.iter().any(root)
         })
-    })
+    });
+    let file_root = |file: &ResourceFile| {
+        let root = |converter: &&dyn Converter| file_converter(*converter, file).is_some();
+        converters.iter().any(root)
+    };
+    object_root || index.bundles()[bundle].resources.iter().any(file_root)
+}
+
+/// The converter of the files of `converter`, when it takes `file` as a root.
+fn file_converter<'a>(
+    converter: &'a dyn Converter,
+    file: &ResourceFile,
+) -> Option<&'a dyn FileConverter> {
+    converter
+        .files()
+        .filter(|files| files.is_file_root(&file.path))
+}
+
+/// A root of a unit, before it is named.
+struct Found<'a, 'i> {
+    converter: &'a dyn Converter,
+    root: FoundRoot<'a, 'i>,
+    /// The logical path of the root.
+    logical: Cow<'i, str>,
+}
+
+/// What a root of a unit is.
+enum FoundRoot<'a, 'i> {
+    /// An object, with its index.
+    Object(ObjectId, &'i ObjectIndex),
+    /// A file of the bundle of the unit, with the converter of the files of its form.
+    File(&'a dyn FileConverter, &'i ResourceFile),
+}
+
+impl FoundRoot<'_, '_> {
+    fn origin(&self) -> Origin<'_> {
+        match self {
+            Self::Object(id, object) => Origin::Object {
+                class_id: object.class_id,
+                class: &object.class,
+                path_id: id.path_id,
+            },
+            Self::File(..) => Origin::File,
+        }
+    }
+
+    fn key(&self) -> RootKey {
+        match self {
+            Self::Object(id, _) => RootKey::Object(id.path_id),
+            Self::File(_, file) => RootKey::File {
+                file: file.path.clone(),
+            },
+        }
+    }
 }
 
 /// Finds, names and fingerprints the roots of the unit of `bundle`, whose window holds the
@@ -937,12 +992,12 @@ pub(crate) fn plan_unit<'a>(
     mut tally: Option<(&mut Tally, &[&str])>,
     roots: &mut Vec<Root<'a>>,
     outside: &mut BTreeSet<Outside>,
-    unnamed: &mut Vec<(String, i64)>,
+    unnamed: &mut Vec<(String, RootKey)>,
 ) {
     let index = version.index();
     let unit = &index.bundles()[bundle].name;
     if let Some((tally, _)) = &mut tally {
-        tally.open(unit, version.resource_hashes(bundle).len() as u64);
+        tally.open(unit, index.bundles()[bundle].resources.len() as u64);
     }
     let mut found = Vec::new();
     for (f, file) in index.bundles()[bundle].files.iter().enumerate() {
@@ -971,8 +1026,11 @@ pub(crate) fn plan_unit<'a>(
                             file: f,
                             path_id: object.path_id,
                         };
-                        let logical = path_in_bundle(unit, logical_path(path));
-                        found.push((converter.as_ref(), id, object, logical));
+                        found.push(Found {
+                            converter: converter.as_ref(),
+                            root: FoundRoot::Object(id, object),
+                            logical: path_in_bundle(unit, logical_path(path)),
+                        });
                     }
                 }
             }
@@ -981,47 +1039,82 @@ pub(crate) fn plan_unit<'a>(
             }
         }
     }
+    for file in &index.bundles()[bundle].resources {
+        for converter in stream.converters {
+            if let Some(files) = file_converter(converter.as_ref(), file) {
+                found.push(Found {
+                    converter: converter.as_ref(),
+                    root: FoundRoot::File(files, file),
+                    logical: path_in_bundle(unit, &file.path),
+                });
+            }
+        }
+    }
     let candidates: Vec<Candidate<'_>> = found
         .iter()
-        .map(|(converter, id, object, logical)| Candidate {
-            logical: logical.as_ref(),
-            form: converter.name(),
-            class_id: object.class_id,
-            class: &object.class,
+        .map(|found| Candidate {
+            logical: found.logical.as_ref(),
+            form: found.converter.name(),
+            origin: found.root.origin(),
             bundle: unit,
-            path_id: id.path_id,
         })
         .collect();
     let names = stream.naming.names(&candidates);
-    for ((converter, id, _, logical), name) in found.iter().zip(names) {
-        let Some(name) = name else {
-            unnamed.push((logical.to_string(), id.path_id));
-            continue;
-        };
-        let mut leaving = BTreeSet::new();
-        let declared = converter.inputs(*id, version);
-        let closure = closure(index, unit, *id, &declared, window, &mut leaving);
-        let fingerprint = eval::fingerprint(
-            *converter,
-            &name,
-            index,
-            &closure,
-            version.all_streams(),
-            stream.classes,
-        );
-        let first = leaving.first().cloned().map(|first| (first, leaving.len()));
-        outside.extend(leaving);
-        roots.push(Root {
-            planned: Planned {
-                converter: *converter,
-                name,
-                closure,
-                fingerprint,
-            },
-            logical: logical.to_string(),
-            path_id: id.path_id,
-            outside: first,
-        });
+    for (found, name) in found.into_iter().zip(names) {
+        match name {
+            Some(name) => roots.push(plan_root(
+                found, name, version, bundle, window, stream, outside,
+            )),
+            None => unnamed.push((found.logical.into_owned(), found.root.key())),
+        }
+    }
+}
+
+/// The plan of the root `found` of the unit of `bundle`, named `name`, whose window holds the
+/// bundles `window` of `version`. The references of its closure that leave the window are added
+/// to `outside`.
+fn plan_root<'a>(
+    found: Found<'a, '_>,
+    name: String,
+    version: &Version<'_>,
+    bundle: usize,
+    window: &BTreeSet<usize>,
+    stream: &Stream<'a>,
+    outside: &mut BTreeSet<Outside>,
+) -> Root<'a> {
+    let index = version.index();
+    let unit = &index.bundles()[bundle].name;
+    let mut leaving = BTreeSet::new();
+    let subject = match found.root {
+        FoundRoot::Object(id, _) => {
+            let declared = found.converter.inputs(id, version);
+            Subject::Object(closure(index, unit, id, &declared, window, &mut leaving))
+        }
+        FoundRoot::File(converter, file) => Subject::File(FileRoot {
+            converter,
+            bundle,
+            file: file.clone(),
+        }),
+    };
+    let fingerprint = eval::fingerprint(
+        found.converter,
+        &name,
+        index,
+        &subject,
+        version.all_streams(),
+        stream.classes,
+    );
+    let first = leaving.first().cloned().map(|first| (first, leaving.len()));
+    outside.extend(leaving);
+    Root {
+        planned: Planned {
+            converter: found.converter,
+            name,
+            subject,
+            fingerprint,
+        },
+        logical: found.logical.into_owned(),
+        outside: first,
     }
 }
 
@@ -1150,9 +1243,9 @@ pub(crate) fn finish(gathered: Gathered) -> Streamed {
         tallies: _,
         mut ledgers,
     } = gathered;
-    let mut unnamed: Vec<(String, i64)> = roots
+    let mut unnamed: Vec<(String, RootKey)> = roots
         .into_iter()
-        .map(|(_, logical, path_id)| (logical, path_id))
+        .map(|(_, logical, key)| (logical, key))
         .collect();
     outputs.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     let mut kept = Vec::with_capacity(outputs.len());
@@ -1163,7 +1256,7 @@ pub(crate) fn finish(gathered: Gathered) -> Streamed {
             unnamed.extend(
                 group
                     .iter()
-                    .map(|(_, logical, path_id)| (logical.clone(), *path_id)),
+                    .map(|(_, logical, key)| (logical.clone(), key.clone())),
             );
         }
     }

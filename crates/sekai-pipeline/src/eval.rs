@@ -5,12 +5,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
 use sekai_catalog::{Derivations, Derived, Key, Store};
-use sekai_convert::{Asset, Content, ConvertError, Converter, Cost, CostClass, ObjectId};
+use sekai_convert::{
+    Asset, Content, ConvertError, Converter, Cost, CostClass, FileConverter, ObjectId,
+};
 use sekai_encode::mp4;
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
 use sekai_unity::ClassLayouts;
-use sekai_unity::index::VersionIndex;
+use sekai_unity::index::{ResourceFile, VersionIndex};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::canonical::Files;
@@ -41,8 +44,9 @@ pub struct Output {
 pub struct Evaluation {
     /// The assets, in name order.
     pub outputs: Vec<Output>,
-    /// Roots that cannot be told apart from another root by name, as `(logical path, path ID)`.
-    pub unnamed: Vec<(String, i64)>,
+    /// Roots that cannot be told apart from another root by name, as their logical paths and
+    /// keys.
+    pub unnamed: Vec<(String, RootKey)>,
     /// The derivations that ran.
     pub converted: usize,
     /// The derivations whose output already existed.
@@ -95,23 +99,105 @@ pub trait Fusion: Sync {
     fn extra(&self, asset: &Asset, document: &AssetDocument) -> io::Result<()>;
 }
 
+/// Where an asset starts in its bundle: an object, by its path ID, or a file, by its path.
+///
+/// Stored, an object root is its path ID alone and a file root is `{"file": <path>}`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RootKey {
+    /// An object, by its path ID.
+    Object(i64),
+    /// A file that is not a serialized file.
+    File {
+        /// The path of the file in its bundle.
+        file: String,
+    },
+}
+
 /// A derivation to evaluate.
 pub(crate) struct Planned<'a> {
     /// The converter of the asset form.
     pub(crate) converter: &'a dyn Converter,
     /// The name of the asset.
     pub(crate) name: String,
-    /// The root and every object it reaches, root first.
-    pub(crate) closure: Vec<ObjectId>,
+    /// What the asset starts from.
+    pub(crate) subject: Subject<'a>,
     /// The fingerprint of the derivation.
     pub(crate) fingerprint: [u8; 32],
 }
 
+/// What an asset starts from, with everything its conversion may read.
+pub(crate) enum Subject<'a> {
+    /// An object and every object it reaches, the object first.
+    Object(Vec<ObjectId>),
+    /// A file of a bundle, which the conversion reads alone.
+    File(FileRoot<'a>),
+}
+
+/// A file of a bundle that an asset starts from.
+pub(crate) struct FileRoot<'a> {
+    /// The converter of the files of the form.
+    pub(crate) converter: &'a dyn FileConverter,
+    /// The bundle that holds the file.
+    pub(crate) bundle: usize,
+    /// The file.
+    pub(crate) file: ResourceFile,
+}
+
+impl FileRoot<'_> {
+    /// The estimated cost of converting the file, from its size.
+    fn cost(&self) -> Cost {
+        self.converter.file_cost(self.file.size)
+    }
+
+    /// The asset of the file, whose bytes are read from `version`.
+    fn convert(&self, version: &Version<'_>) -> Result<Option<Asset>, ConvertError> {
+        let bytes = version.resource_file(self.bundle, &self.file)?;
+        self.converter.convert_file(&bytes)
+    }
+}
+
+impl Subject<'_> {
+    /// The bundle of the root.
+    pub(crate) fn bundle(&self) -> usize {
+        match self {
+            Self::Object(closure) => closure[0].bundle,
+            Self::File(root) => root.bundle,
+        }
+    }
+
+    /// The key of the root in its bundle.
+    pub(crate) fn key(&self) -> RootKey {
+        match self {
+            Self::Object(closure) => RootKey::Object(closure[0].path_id),
+            Self::File(root) => RootKey::File {
+                file: root.file.path.clone(),
+            },
+        }
+    }
+
+    /// What reading the root alone reads: the root object, or the file.
+    fn root_reads(&self) -> (Vec<ObjectId>, Vec<(usize, String)>) {
+        match self {
+            Self::Object(closure) => (vec![closure[0]], Vec::new()),
+            Self::File(root) => (Vec::new(), vec![(root.bundle, root.file.path.clone())]),
+        }
+    }
+}
+
 impl Planned<'_> {
-    /// The estimated cost of evaluating this derivation, from the object headers of its root.
+    /// The estimated cost of evaluating this derivation, from the object headers of its root or
+    /// the size of its file.
     pub(crate) fn cost(&self, version: &Version<'_>) -> Cost {
+        match &self.subject {
+            Subject::Object(closure) => self.object_cost(closure[0], version),
+            Subject::File(root) => root.cost(),
+        }
+    }
+
+    /// The estimated cost of converting the root object `root`, from its header.
+    fn object_cost(&self, root: ObjectId, version: &Version<'_>) -> Cost {
         let index = version.index();
-        let root = self.closure[0];
         match index.position(root) {
             Some(position) => {
                 let object = &index.bundles()[root.bundle].files[root.file].objects[position];
@@ -121,10 +207,15 @@ impl Planned<'_> {
         }
     }
 
-    /// The bundles the closure reads from, in order.
+    /// The bundles the derivation reads from, in order.
     fn bundles(&self) -> Vec<usize> {
-        let bundles: BTreeSet<usize> = self.closure.iter().map(|id| id.bundle).collect();
-        bundles.into_iter().collect()
+        match &self.subject {
+            Subject::Object(closure) => {
+                let bundles: BTreeSet<usize> = closure.iter().map(|id| id.bundle).collect();
+                bundles.into_iter().collect()
+            }
+            Subject::File(root) => vec![root.bundle],
+        }
     }
 }
 
@@ -147,7 +238,7 @@ pub(crate) fn fingerprint(
     converter: &dyn Converter,
     name: &str,
     index: &VersionIndex,
-    closure: &[ObjectId],
+    subject: &Subject<'_>,
     streams: &[Vec<Vec<StreamDigest>>],
     classes: &dyn ClassLayouts,
 ) -> [u8; 32] {
@@ -160,6 +251,21 @@ pub(crate) fn fingerprint(
     if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", hex(&identity)));
     }
+    match subject {
+        Subject::Object(closure) => push_objects(&mut text, index, closure, streams),
+        Subject::File(root) => text.push_str(&format!("file {}\n", hex(&root.file.sha256))),
+    }
+    Sha256::digest(text.as_bytes()).into()
+}
+
+/// Adds to `text` the lines of a fingerprint for the objects `closure`: the hash of each object
+/// and of the data it streams.
+fn push_objects(
+    text: &mut String,
+    index: &VersionIndex,
+    closure: &[ObjectId],
+    streams: &[Vec<Vec<StreamDigest>>],
+) {
     for id in closure {
         if let Some(position) = index.position(*id) {
             let object = &index.bundles()[id.bundle].files[id.file].objects[position];
@@ -180,7 +286,6 @@ pub(crate) fn fingerprint(
             }
         }
     }
-    Sha256::digest(text.as_bytes()).into()
 }
 
 pub(crate) fn asset_error(e: &ConvertError) -> AssetError {
@@ -273,11 +378,13 @@ pub(crate) fn derive_within(
     files: Files<'_>,
     fusion: Option<&dyn Fusion>,
 ) -> io::Result<Option<Stored>> {
-    let reads = Reads::new(version, &plan.closure, Some(version.all_streams()));
     let cpu = slots.hold(1);
-    let converted = convert(plan, cost, &reads, files.recorder);
-    let (objects, resources) = reads.finish();
-    let Some(asset) = converted.transpose() else {
+    let Converted {
+        asset,
+        objects,
+        resources,
+    } = convert(plan, cost, version, files.recorder);
+    let Some(asset) = asset.transpose() else {
         return Ok(None);
     };
     // The slot is returned when the members are encoded, or at once when there are none to
@@ -320,17 +427,47 @@ pub(crate) fn derive_within(
     Ok(Some(stored))
 }
 
+/// The conversion of the root of a plan, with what it read.
+struct Converted {
+    asset: Result<Option<Asset>, ConvertError>,
+    /// The objects read, the root first.
+    objects: Vec<ObjectId>,
+    /// The resource files read, as their bundles and paths, in order.
+    resources: Vec<(usize, String)>,
+}
+
 /// Converts the root of `plan` and reports the conversion to `recorder`.
 fn convert(
     plan: &Planned<'_>,
     cost: Cost,
-    reads: &Reads<'_>,
+    version: &Version<'_>,
     recorder: &dyn Recorder,
-) -> Result<Option<Asset>, ConvertError> {
+) -> Converted {
     let mut span = recorder.span("convert", plan.converter.name(), &plan.name);
-    let converted = isolated(|| plan.converter.convert(plan.closure[0], reads))
-        .unwrap_or_else(|message| Err(ConvertError::new(PANICKED, message)));
-    if let Ok(Some(asset)) = &converted {
+    let settled = |converted: Result<_, String>| {
+        converted.unwrap_or_else(|message| Err(ConvertError::new(PANICKED, message)))
+    };
+    let converted = match &plan.subject {
+        Subject::Object(closure) => {
+            let reads = Reads::new(version, closure, Some(version.all_streams()));
+            let asset = settled(isolated(|| plan.converter.convert(closure[0], &reads)));
+            let (objects, resources) = reads.finish();
+            Converted {
+                asset,
+                objects,
+                resources,
+            }
+        }
+        Subject::File(root) => {
+            let (objects, resources) = plan.subject.root_reads();
+            Converted {
+                asset: settled(isolated(|| root.convert(version))),
+                objects,
+                resources,
+            }
+        }
+    };
+    if let Ok(Some(asset)) = &converted.asset {
         span.memory(cost.memory, decoded_size(asset));
     }
     converted
@@ -344,8 +481,8 @@ pub(crate) fn document(
     members: Vec<MemberFile>,
     error: AssetError,
 ) -> io::Result<Stored> {
-    let root = &plan.closure[..1];
-    let document = build_document(plan, version, root, &[], members, Some(error));
+    let (objects, resources) = plan.subject.root_reads();
+    let document = build_document(plan, version, &objects, &resources, members, Some(error));
     Stored::put(store, document)
 }
 
@@ -569,7 +706,7 @@ fn produced(
     document: Key,
     stored: Option<AssetDocument>,
 ) -> Produced {
-    let bundle = &version.index().bundles()[plan.closure[0].bundle];
+    let bundle = &version.index().bundles()[plan.subject.bundle()];
     Produced {
         output: Output {
             name: plan.name.clone(),
@@ -629,7 +766,16 @@ mod tests {
     #[test]
     fn the_fingerprint_follows_the_table_of_class_layouts() {
         let index = VersionIndex::new(Vec::new());
-        let of = |classes: &dyn ClassLayouts| fingerprint(&Form, "name", &index, &[], &[], classes);
+        let of = |classes: &dyn ClassLayouts| {
+            fingerprint(
+                &Form,
+                "name",
+                &index,
+                &Subject::Object(Vec::new()),
+                &[],
+                classes,
+            )
+        };
         assert_eq!(of(&Table([1; 32])), of(&Table([1; 32])));
         assert_ne!(of(&Table([1; 32])), of(&Table([2; 32])));
         assert_ne!(of(&Table([1; 32])), of(&NoClasses));
@@ -691,6 +837,7 @@ mod tests {
                 objects: vec![obj_a, obj_b],
                 container: Vec::new(),
             }],
+            resources: Vec::new(),
         }]);
 
         let id_text = ObjectId {
@@ -720,8 +867,22 @@ mod tests {
 
         // Sibling TextAsset in the same bundle is unaffected when Texture2D's `.resS` slice changes.
         assert_eq!(
-            fingerprint(&Form, "txt", &index, &[id_text], &streams_v1, &NoClasses),
-            fingerprint(&Form, "txt", &index, &[id_text], &streams_v2, &NoClasses),
+            fingerprint(
+                &Form,
+                "txt",
+                &index,
+                &Subject::Object(vec![id_text]),
+                &streams_v1,
+                &NoClasses
+            ),
+            fingerprint(
+                &Form,
+                "txt",
+                &index,
+                &Subject::Object(vec![id_text]),
+                &streams_v2,
+                &NoClasses
+            ),
         );
         // Texture2D itself tracks its own `.resS` slice digest.
         assert_ne!(
@@ -729,7 +890,7 @@ mod tests {
                 &WithEnc(Encoders::IMAGE),
                 "tex",
                 &index,
-                &[id_tex],
+                &Subject::Object(vec![id_tex]),
                 &streams_v1,
                 &NoClasses
             ),
@@ -737,7 +898,7 @@ mod tests {
                 &WithEnc(Encoders::IMAGE),
                 "tex",
                 &index,
-                &[id_tex],
+                &Subject::Object(vec![id_tex]),
                 &streams_v2,
                 &NoClasses
             ),
@@ -748,7 +909,7 @@ mod tests {
                 &WithEnc(encoders),
                 "x",
                 &index,
-                &[id_text],
+                &Subject::Object(vec![id_text]),
                 &streams_v1,
                 &NoClasses,
             )

@@ -43,7 +43,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::claims::Claimant;
-use crate::eval::{self, Evaluation, Output};
+use crate::eval::{self, Evaluation, Output, RootKey};
 use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Units};
 
 /// The revision of how units are evaluated and recorded, which is part of every unit key. It also
@@ -521,12 +521,12 @@ pub struct Record {
     /// The identity of each converter the unit has roots of.
     forms: BTreeSet<String>,
     assets: Vec<RecordedAsset>,
-    /// The logical path and path ID of each root left unnamed.
-    unnamed: Vec<(String, i64)>,
+    /// The logical path and key of each root left unnamed.
+    unnamed: Vec<(String, RootKey)>,
     outside: Vec<Outside>,
 }
 
-/// An asset of a unit, with the logical path and path ID of its root.
+/// An asset of a unit, with the logical path and key of its root.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RecordedAsset {
     name: String,
@@ -534,7 +534,8 @@ struct RecordedAsset {
     document: String,
     error: Option<String>,
     logical: String,
-    path_id: i64,
+    #[serde(rename = "path_id")]
+    root: RootKey,
 }
 
 impl RecordedAsset {
@@ -615,7 +616,7 @@ impl Record {
             };
             records.entry(unit).or_insert_with(empty).forms = forms.iter().map(identity).collect();
         }
-        for (output, logical, path_id) in &gathered.outputs {
+        for (output, logical, root) in &gathered.outputs {
             records
                 .entry(&output.bundle)
                 .or_insert_with(empty)
@@ -626,11 +627,11 @@ impl Record {
                     document: output.document.to_string(),
                     error: output.error.clone(),
                     logical: logical.clone(),
-                    path_id: *path_id,
+                    root: root.clone(),
                 });
         }
-        for (unit, logical, path_id) in &gathered.unnamed {
-            let unnamed = (logical.clone(), *path_id);
+        for (unit, logical, root) in &gathered.unnamed {
+            let unnamed = (logical.clone(), root.clone());
             records
                 .entry(unit)
                 .or_insert_with(empty)
@@ -668,13 +669,57 @@ impl Record {
                 error: asset.error.clone(),
             };
             let logical = asset.logical.clone();
-            gathered.outputs.push((output, logical, asset.path_id));
+            gathered.outputs.push((output, logical, asset.root.clone()));
         }
         let unnamed = self.unnamed.iter();
         let unnamed =
-            unnamed.map(|(logical, path_id)| (unit.to_owned(), logical.clone(), *path_id));
+            unnamed.map(|(logical, root)| (unit.to_owned(), logical.clone(), root.clone()));
         gathered.unnamed.extend(unnamed);
         gathered.outside.extend(self.outside.iter().cloned());
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A record of a unit whose roots are objects, as it is stored.
+    const OBJECT_RECORD: &str = concat!(
+        r#"{"scanned":["audio"],"forms":["audio 5"],"assets":[{"name":"a/b","form":"audio","#,
+        r#""document":"d","error":null,"logical":"a/b","path_id":-7}],"unnamed":[["a/c",9]],"#,
+        r#""outside":[]}"#,
+    );
+
+    #[test]
+    fn a_record_of_object_roots_reads_and_writes_as_it_is_stored() {
+        let record = Record::read(OBJECT_RECORD.as_bytes()).unwrap();
+        assert_eq!(record.assets[0].root, RootKey::Object(-7));
+        assert_eq!(record.unnamed, [("a/c".to_owned(), RootKey::Object(9))]);
+        assert_eq!(record.bytes().unwrap(), OBJECT_RECORD.as_bytes());
+    }
+
+    #[test]
+    fn a_file_root_is_stored_by_its_path() {
+        let root = RootKey::File {
+            file: "x.acb".to_owned(),
+        };
+        let record = Record {
+            assets: vec![RecordedAsset {
+                name: "b/x.acb".to_owned(),
+                form: "audio".to_owned(),
+                document: "d".to_owned(),
+                error: None,
+                logical: "b/x.acb".to_owned(),
+                root: root.clone(),
+            }],
+            unnamed: vec![("b/y.acb".to_owned(), root)],
+            ..Record::default()
+        };
+        let bytes = record.bytes().unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains(r#""path_id":{"file":"x.acb"}"#), "{text}");
+        assert!(text.contains(r#"["b/y.acb",{"file":"x.acb"}]"#), "{text}");
+        assert_eq!(Record::read(&bytes), Some(record));
     }
 }

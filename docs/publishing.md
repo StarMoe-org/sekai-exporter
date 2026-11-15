@@ -104,6 +104,8 @@ A run knows which objects the bucket holds from the records it reads and the upl
 | `records/units/<aa>/<key>.json` | What a unit gave, under the key of its bundles' content and the evaluation, for any region whose unit has the same key |
 | `records/derivations/<aa>/<fingerprint>.json` | The object a derivation made, with its size |
 
+A unit record lists each asset of the unit with the logical path of its root and `path_id`, which is the path ID of the root object, or `{"file": "<path>"}` for an asset whose root is a file of the bundle; each root left unnamed is a pair of its logical path and the same value.
+
 The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. A run writes, in this order, every new object, the records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
 
 ## Evaluation and publishing together

@@ -475,6 +475,38 @@ pub struct BundleIndex {
     pub name: String,
     /// The index of each serialized file, in directory order.
     pub files: Vec<FileIndex>,
+    /// Each other entry that can be read, in directory order: the resource files that hold the
+    /// large data of serialized files, and files stored as they are.
+    pub resources: Vec<ResourceFile>,
+}
+
+/// An entry of a bundle that is not a serialized file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceFile {
+    /// The entry path.
+    pub path: String,
+    /// The size in bytes.
+    pub size: u64,
+    /// The SHA-256 of the bytes.
+    pub sha256: [u8; 32],
+}
+
+/// Each entry of `bundle` that is not a serialized file and can be read, in directory order.
+pub fn index_resources(bundle: &Bundle, cache: &dyn BlockCache) -> Vec<ResourceFile> {
+    let entries = bundle.entries().iter().enumerate();
+    let resources = entries.filter(|(_, entry)| !entry.is_serialized());
+    resources
+        .filter_map(|(i, entry)| {
+            let size = usize::try_from(entry.size).ok()?;
+            let source = bundle.entry(i, cache);
+            let bytes = source.read(0, size).ok()?;
+            Some(ResourceFile {
+                path: entry.path.clone(),
+                size: entry.size,
+                sha256: Sha256::digest(&*bytes).into(),
+            })
+        })
+        .collect()
 }
 
 /// Where a reference points.

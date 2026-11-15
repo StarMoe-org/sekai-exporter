@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use flate2::Compression;
@@ -97,9 +98,10 @@ impl StateFiles for DirectoryFiles {
         if let Some(directory) = path.parent() {
             std::fs::create_dir_all(directory)?;
         }
-        let digest = hex(&Sha256::digest(bytes));
-        let partial =
-            path.with_file_name(format!(".{}.{}.part", &digest[..16], std::process::id()));
+        // Every write has a partial file of its own, even when two write the same bytes to one name.
+        static WRITES: AtomicU64 = AtomicU64::new(0);
+        let write = WRITES.fetch_add(1, Ordering::Relaxed);
+        let partial = path.with_file_name(format!(".{}-{write}.part", std::process::id()));
         std::fs::write(&partial, bytes)?;
         std::fs::rename(&partial, &path)
     }
@@ -636,6 +638,27 @@ mod tests {
         let (read, _) = RegionState::read(&files, "jp", 2).unwrap().unwrap();
         assert_eq!(read, written);
         assert_eq!(files.read("regions/tw.json").unwrap(), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn writes_of_the_same_bytes_to_one_name_at_once_all_succeed() {
+        let root = std::env::temp_dir().join(format!("sekai-same-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let files = DirectoryFiles::new(&root);
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                scope.spawn(|| {
+                    for _ in 0..50 {
+                        files.write("records/nothing.json", b"{}").unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            files.read("records/nothing.json").unwrap().as_deref(),
+            Some(&b"{}"[..])
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

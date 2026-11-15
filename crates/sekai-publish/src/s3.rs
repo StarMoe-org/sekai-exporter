@@ -19,7 +19,6 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
-use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -211,13 +210,9 @@ impl S3 {
         format!("{}state/{file}", self.bucket.prefix)
     }
 
-    /// What `read` makes of the state file `file` of the bucket, or `None` when it keeps none.
-    pub fn read_state<T>(
-        &self,
-        file: &str,
-        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
-    ) -> Result<Option<T>, PublishError> {
-        self.get_with(&self.state(file), read)
+    /// The bytes of the state file `file` of the bucket, or `None` when it keeps none.
+    pub fn read_state(&self, file: &str) -> Result<Option<Vec<u8>>, PublishError> {
+        self.get(&self.state(file))
             .map_err(|e| PublishError::new("state", e))
     }
 
@@ -280,9 +275,9 @@ impl S3 {
     }
 
     /// Sends a request for `name` with the canonical query string `query` until it gets a
-    /// response that trying again cannot change. Each attempt waits for a free slot, which the
-    /// response holds until it is dropped, so that no more requests are in flight than the bucket
-    /// has connections.
+    /// response that trying again cannot change, and returns it with its body read. An attempt
+    /// fails when the connection fails before the last byte of the body, so a response cut off
+    /// midway is asked for again.
     fn send(
         &self,
         method: &'static str,
@@ -290,7 +285,7 @@ impl S3 {
         query: &str,
         payload: &str,
         request: impl Fn(&str, Vec<(&'static str, String)>) -> Result<Response<Body>, ureq::Error>,
-    ) -> Result<Sent<'_>, String> {
+    ) -> Result<Reply, String> {
         let uri = format!("{}/{}", self.path, encode(name));
         let url = match query {
             "" => format!("{}{uri}", self.origin),
@@ -299,21 +294,17 @@ impl S3 {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let slot = self.slots.take();
-            let failure = match request(&url, self.headers(method, &uri, query, payload)) {
-                Ok(response) => {
-                    let status = response.status().as_u16();
+            let reply = self.exchange(|| request(&url, self.headers(method, &uri, query, payload)));
+            let failure = match reply {
+                Ok(reply) => {
+                    let status = reply.status().as_u16();
                     if !(status == 429 || status >= 500) || attempt >= ATTEMPTS {
-                        return Ok(Sent {
-                            response,
-                            _slot: slot,
-                        });
+                        return Ok(reply);
                     }
                     format!("{method} {name}: HTTP {status}")
                 }
                 Err(e) => format!("{method} {name}: {e}"),
             };
-            drop(slot);
             if attempt >= ATTEMPTS {
                 return Err(failure);
             }
@@ -321,29 +312,27 @@ impl S3 {
         }
     }
 
-    /// The bytes of `name`, or `None` when the bucket does not hold it.
-    fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
-        self.get_with(name, |body| {
-            let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
+    /// One attempt of a request: waits for a free slot, so that no more requests are in flight
+    /// than the bucket has connections, sends the request that `request` makes and reads the
+    /// whole response.
+    fn exchange(
+        &self,
+        request: impl FnOnce() -> Result<Response<Body>, ureq::Error>,
+    ) -> Result<Reply, ureq::Error> {
+        let _slot = self.slots.take();
+        let (head, mut body) = request()?.into_parts();
+        let mut bytes = Vec::new();
+        body.as_reader().read_to_end(&mut bytes)?;
+        Ok(Response::from_parts(head, bytes))
     }
 
-    /// What `read` makes of the bytes of `name`, or `None` when the bucket does not hold it.
-    /// The request holds its slot while `read` runs, so `read` sends no request to the bucket.
-    fn get_with<T>(
-        &self,
-        name: &str,
-        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
-    ) -> Result<Option<T>, String> {
-        let mut response = self.send("GET", name, "", EMPTY, |url, headers| {
+    /// The bytes of `name`, or `None` when the bucket does not hold it.
+    fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let reply = self.send("GET", name, "", EMPTY, |url, headers| {
             signed(self.agent.get(url), headers).call()
         })?;
-        match response.status().as_u16() {
-            200 => read(&mut response.body_mut().as_reader())
-                .map(Some)
-                .map_err(|e| format!("GET {name}: {e}")),
+        match reply.status().as_u16() {
+            200 => Ok(Some(reply.into_body())),
             404 => Ok(None),
             status => Err(format!("GET {name}: HTTP {status}")),
         }
@@ -362,17 +351,10 @@ impl S3 {
                 .map(|(name, value)| format!("{name}={}", encode_component(value)))
                 .collect::<Vec<_>>()
                 .join("&");
-            let mut response = self.send("GET", "", &query, EMPTY, |url, headers| {
+            let reply = self.send("GET", "", &query, EMPTY, |url, headers| {
                 signed(self.agent.get(url), headers).call()
             })?;
-            let status = response.status().as_u16();
-            if status != 200 {
-                return Err(format!("LIST {prefix}: HTTP {status}"));
-            }
-            let body = response
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("LIST {prefix}: {e}"))?;
+            let body = success_text("LIST", prefix, reply)?;
             let page = Page::parse(&body).map_err(|e| format!("LIST {prefix}: {e}"))?;
             names.extend(page.names);
             match page.next {
@@ -613,25 +595,8 @@ impl Drop for Slot<'_> {
     }
 }
 
-/// A response, which holds the slot of its request.
-struct Sent<'s> {
-    response: Response<Body>,
-    _slot: Slot<'s>,
-}
-
-impl Deref for Sent<'_> {
-    type Target = Response<Body>;
-
-    fn deref(&self) -> &Response<Body> {
-        &self.response
-    }
-}
-
-impl DerefMut for Sent<'_> {
-    fn deref_mut(&mut self) -> &mut Response<Body> {
-        &mut self.response
-    }
-}
+/// A response with its whole body.
+type Reply = Response<Vec<u8>>;
 
 /// `request` with the signed `headers`.
 fn signed<B>(
@@ -643,13 +608,10 @@ fn signed<B>(
     })
 }
 
-/// The body of `response` to `method` on `name` as text, when the response is a success.
-fn success_text(method: &str, name: &str, mut response: Sent<'_>) -> Result<String, String> {
-    match response.status().as_u16() {
-        200 => response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("{method} {name}: {e}")),
+/// The body of `reply` to `method` on `name` as text, when the reply is a success.
+fn success_text(method: &str, name: &str, reply: Reply) -> Result<String, String> {
+    match reply.status().as_u16() {
+        200 => String::from_utf8(reply.into_body()).map_err(|e| format!("{method} {name}: {e}")),
         status => Err(format!("{method} {name}: HTTP {status}")),
     }
 }

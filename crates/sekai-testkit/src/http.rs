@@ -21,6 +21,8 @@ pub(crate) struct Response {
     pub(crate) status: u16,
     pub(crate) headers: String,
     pub(crate) body: Vec<u8>,
+    /// Whether the connection is closed halfway through the body, as when it drops.
+    pub(crate) cut: bool,
 }
 
 impl Response {
@@ -29,6 +31,7 @@ impl Response {
             status,
             headers: String::new(),
             body: body.into(),
+            cut: false,
         }
     }
 }
@@ -61,7 +64,11 @@ fn respond(mut stream: TcpStream, answer: &dyn Fn(&Request) -> Response) {
     )
     .into_bytes();
     if request.method != "HEAD" {
-        bytes.extend_from_slice(&response.body);
+        let sent = match response.cut {
+            true => response.body.len() / 2,
+            false => response.body.len(),
+        };
+        bytes.extend_from_slice(&response.body[..sent]);
     }
     let _ = stream.write_all(&bytes);
 }

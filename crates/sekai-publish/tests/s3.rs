@@ -433,21 +433,25 @@ fn an_object_larger_than_ten_megabytes_is_read_back() {
 }
 
 #[test]
+fn a_response_cut_off_midway_is_asked_for_again() {
+    let server = Server::start();
+    let s3 = client(&server, SECRET_KEY);
+    s3.write_state("records/a.json", &[7; 64]).unwrap();
+    server.cut_gets(2);
+    let read = s3.read_state("records/a.json").unwrap();
+    assert_eq!(read.as_deref(), Some(&[7; 64][..]));
+    assert_eq!(server.count(Operation::Get), 3);
+}
+
+#[test]
 fn the_bucket_keeps_state_files_outside_its_publications() {
     let server = Server::start();
     let s3 = client(&server, SECRET_KEY);
-    let read_to_end = |body: &mut dyn std::io::Read| {
-        let mut bytes = Vec::new();
-        body.read_to_end(&mut bytes).map(|_| bytes)
-    };
-    assert_eq!(
-        s3.read_state("versions/jp.json", read_to_end).unwrap(),
-        None
-    );
+    assert_eq!(s3.read_state("versions/jp.json").unwrap(), None);
     s3.write_state("versions/jp.json", b"{}").unwrap();
     let name = "out/state/versions/jp.json";
     assert_eq!(server.object(name).as_deref(), Some(&b"{}"[..]));
-    let read = s3.read_state("versions/jp.json", read_to_end).unwrap();
+    let read = s3.read_state("versions/jp.json").unwrap();
     assert_eq!(read.as_deref(), Some(&b"{}"[..]));
     let cache_control = server.cache_control(name).unwrap();
     assert_eq!(cache_control, "private, no-store");

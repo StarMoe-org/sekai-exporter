@@ -97,6 +97,8 @@ struct State {
     accepted: AtomicUsize,
     /// Uploads of objects other than pointers are refused once this many have been accepted.
     refuse_after: Mutex<Option<usize>>,
+    /// How many of the next answers to `GET` of an object end halfway through the object.
+    cut_gets: AtomicUsize,
     /// The multipart uploads in progress, by upload ID.
     uploads: Mutex<BTreeMap<String, Upload>>,
     log: Mutex<Vec<Logged>>,
@@ -176,6 +178,12 @@ impl Server {
         *lock(&self.state.refuse_after) = uploads;
     }
 
+    /// Ends the next `gets` answers to `GET` of an object halfway through the object, as when the
+    /// connection drops.
+    pub fn cut_gets(&self, gets: usize) {
+        self.state.cut_gets.store(gets, Ordering::SeqCst);
+    }
+
     /// The `Cache-Control` the object `name` was uploaded with.
     pub fn cache_control(&self, name: &str) -> Option<String> {
         lock(&self.state.cache_controls).get(name).cloned()
@@ -234,7 +242,10 @@ impl State {
         let id = request.query.get("uploadId").map(String::as_str);
         match (operation, id) {
             (Operation::Head | Operation::Get, _) => match lock(&self.objects).get(name) {
-                Some(bytes) => Response::new(200, bytes.clone()),
+                Some(bytes) => Response {
+                    cut: operation == Operation::Get && self.cuts(),
+                    ..Response::new(200, bytes.clone())
+                },
                 None => Response::new(404, ""),
             },
             (Operation::List, _) => {
@@ -272,6 +283,15 @@ impl State {
             }
             _ => Response::new(400, ""),
         }
+    }
+
+    /// Whether this answer to `GET` of an object is cut off, which uses up one of the cuts.
+    fn cuts(&self) -> bool {
+        self.cut_gets
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
     }
 
     /// Whether an upload to `name` is refused.

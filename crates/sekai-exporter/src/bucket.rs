@@ -3,8 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::io;
-#[cfg(feature = "s3")]
-use std::io::Read;
 use std::path::Path;
 
 use sekai_catalog::{Key, Objects, Remote};
@@ -148,12 +146,7 @@ impl Bucket {
 #[cfg(feature = "s3")]
 impl StateFiles for Bucket {
     fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
-        let read = |body: &mut dyn Read| {
-            let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        };
-        self.s3.read_state(name, read).map_err(io::Error::other)
+        self.s3.read_state(name).map_err(io::Error::other)
     }
 
     fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {

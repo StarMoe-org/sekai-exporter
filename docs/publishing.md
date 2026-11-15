@@ -45,6 +45,10 @@ A `tree`, such as the one `export --tree` writes, cannot be switched atomically.
 
 The consistency this gives is bounded as follows. Each file is replaced atomically. While a version is being written, a reader can see files of the previous and the new version side by side. Running the publication again after an interruption converges to the new version. A file whose asset has an error keeps its previous bytes until a conversion succeeds.
 
+## The client view
+
+The `client` view holds the assets of the player data of a client package, which the client loads from the package instead of downloading them: images, fonts and the prefabs of the interface it shows around the scenes of a story. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
+
 ## The publication protocol
 
 1. A version is published only when its run completed without a run failure: a failed download, a failed write or a crash. Asset errors do not stop publication; they are listed with the version.

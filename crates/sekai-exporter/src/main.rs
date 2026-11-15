@@ -24,6 +24,14 @@ mod client {
     ) -> Result<Source<'static>, lexopt::Error> {
         Err("this build has no client source: enable the client feature".into())
     }
+
+    /// Refuses the client package of a region, which this build cannot read.
+    #[cfg(feature = "cdn")]
+    pub(crate) fn update_source(
+        _package: &sekai_game::cdn::Package,
+    ) -> Result<crate::update::Supply, String> {
+        Err("this build has no client source: enable the client feature".to_owned())
+    }
 }
 mod export;
 mod monitor;
@@ -105,7 +113,7 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
          [--threads <n>] [--memory <bytes>] [--plain] [--force] [--verify]
-         [--rebuild-tables] [--check]
+         [--rebuild-tables] [--check] [--client]
       Bring the site of a region of the configuration up to its current
       version. The site is the bucket of the configuration, or else <output>.
       Bundles go to <output>/inputs, which holds game data and must stay
@@ -138,7 +146,12 @@ commands:
       prints whether it differs from the last one the site recorded. It exits
       with 0 when the version is unchanged and 1 when it changed, downloads and
       writes nothing, and cannot be combined with --force, --verify,
-      --rebuild-tables or --only.
+      --rebuild-tables or --only. --client publishes the client package that
+      the region's package entry names instead of its assets: its player data
+      is one bundle, read with the class and script tables of the entry, and
+      its assets are published in the canonical layout at <region>/client,
+      under the version <application version>-<content hash>. Its state is
+      kept apart from the region's, under <region>-client.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

@@ -29,6 +29,13 @@ pub enum AssetIdentity {
         /// The hash of the names and bytes of the files.
         value: String,
     },
+    /// The player data of a client package.
+    Client {
+        /// The version of the application, as its player settings give it.
+        application_version: String,
+        /// The SHA-256 of the player data, as lowercase hexadecimal.
+        value: String,
+    },
 }
 
 impl AssetIdentity {
@@ -45,6 +52,13 @@ impl AssetIdentity {
                 value,
             } => format!("{application_version}-{value}"),
             AssetIdentity::Dir { value } => value.clone(),
+            AssetIdentity::Client {
+                application_version,
+                value,
+            } => {
+                let start: String = value.chars().take(12).collect();
+                format!("{application_version}-{start}")
+            }
         }
     }
 }
@@ -118,5 +132,17 @@ mod tests {
             serde_json::from_str::<VersionIdentity>(&text).unwrap(),
             identity
         );
+    }
+
+    #[test]
+    fn a_client_package_is_named_by_its_version_and_its_content() {
+        let asset = AssetIdentity::Client {
+            application_version: "7.0.0".to_owned(),
+            value: "3fa9c1d2e4b5f60718293a4b5c6d7e8f".to_owned(),
+        };
+        assert_eq!(asset.name(), "7.0.0-3fa9c1d2e4b5");
+        let text = serde_json::to_string(&asset).unwrap();
+        assert!(text.contains(r#""kind":"client""#), "{text}");
+        assert_eq!(serde_json::from_str::<AssetIdentity>(&text).unwrap(), asset);
     }
 }

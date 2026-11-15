@@ -298,7 +298,7 @@ impl S3 {
             let failure = match reply {
                 Ok(reply) => {
                     let status = reply.status().as_u16();
-                    if !(status == 429 || status >= 500) || attempt >= ATTEMPTS {
+                    if !transient(status) || attempt >= ATTEMPTS {
                         return Ok(reply);
                     }
                     format!("{method} {name}: HTTP {status}")
@@ -606,6 +606,13 @@ fn signed<B>(
     headers.into_iter().fold(request, |request, (name, value)| {
         request.header(name, value)
     })
+}
+
+/// Whether a response with `status` may be different when the request is sent again: the server
+/// timed out waiting for the request (408), is busy (429), saw the connection close before it
+/// answered (499), or failed (5xx).
+fn transient(status: u16) -> bool {
+    matches!(status, 408 | 429 | 499) || status >= 500
 }
 
 /// The body of `reply` to `method` on `name` as text, when the reply is a success.

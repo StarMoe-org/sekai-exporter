@@ -5,7 +5,7 @@
 //! [`ACCESS_KEY`] with the secret [`SECRET_KEY`], signed for [`REGION`]. It knows `HEAD`, `GET`,
 //! `ListObjectsV2` in pages of two names, `PUT` and multipart uploads.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -99,6 +99,8 @@ struct State {
     refuse_after: Mutex<Option<usize>>,
     /// How many of the next answers to `GET` of an object end halfway through the object.
     cut_gets: AtomicUsize,
+    /// The statuses that the next uploads are answered with instead of being taken, in order.
+    failed_uploads: Mutex<VecDeque<u16>>,
     /// The multipart uploads in progress, by upload ID.
     uploads: Mutex<BTreeMap<String, Upload>>,
     log: Mutex<Vec<Logged>>,
@@ -184,6 +186,11 @@ impl Server {
         self.state.cut_gets.store(gets, Ordering::SeqCst);
     }
 
+    /// Answers the next uploads with `statuses`, one each in order, without taking them.
+    pub fn fail_uploads(&self, statuses: &[u16]) {
+        lock(&self.state.failed_uploads).extend(statuses);
+    }
+
     /// The `Cache-Control` the object `name` was uploaded with.
     pub fn cache_control(&self, name: &str) -> Option<String> {
         lock(&self.state.cache_controls).get(name).cloned()
@@ -235,6 +242,9 @@ impl State {
         let uploading = matches!(operation, Operation::Put | Operation::PutPart);
         if uploading && self.refuses(name) {
             return Response::new(403, "");
+        }
+        if uploading && let Some(status) = lock(&self.failed_uploads).pop_front() {
+            return Response::new(status, "");
         }
         if uploading && digest.is_none_or(|digest| *digest != sha256(&request.body)) {
             return Response::new(400, "");

@@ -96,7 +96,7 @@ The classes of [furniture models](fixture-model.md#32-unity-classes-read), witho
 
 ## 4. Container
 
-The container of [furniture models](fixture-model.md#4-container): GLB with one binary chunk; images outside the file as `texture/<n>.png`, named directly by their textures; `KHR_texture_transform` only for a base colour texture with a tiling or an offset; texture coordinates not flipped; the change of basis of model files, applied to the scenes and the collision alike. The file has the scenes of 2.1.
+The container of [furniture models](fixture-model.md#4-container): GLB with one binary chunk; images outside the file as `texture/<n>.png`, named directly by their textures; `KHR_texture_transform` only for a base colour texture with a tiling or an offset; texture coordinates as model files write them; the change of basis of model files, applied to the scenes and the collision alike. The file has the scenes of 2.1.
 
 **Version.** Format version: 1.
 
@@ -118,4 +118,4 @@ A file is correct for the runtime when each of these holds:
 
 ## 6. Version
 
-Form version: 2. Version 2 follows version 2 of model files. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table), changes the version of every asset of the form.
+Form version: 3. Version 2 follows version 2 of model files; version 3 writes texture coordinates as model files do. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table), changes the version of every asset of the form.

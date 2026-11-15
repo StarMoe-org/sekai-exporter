@@ -132,7 +132,7 @@ The keys this form adds to the same table:
 
 A material whose state writes no colour (`_ColorMask` 0 and `_ZWrite` 0 in `floats`) draws nothing, and its meshes are hidden. A material of any other program, or with a `null` shader, keeps the placeholder material of the scene.
 
-Materials whose program is the character program draw with the character's texture conventions, including its UV flip, while the furniture programs flip v themselves (4). The texture coordinates are written unflipped for all of them (4); only the flip each program applies differs.
+Every program reads the texture coordinates as [model files](model.md) write them, with v counted from the top of the image.
 
 ### 2.5 Animations
 
@@ -225,10 +225,9 @@ GLB: glTF 2.0 with one binary chunk, holding the scene of 2.1, its nodes, its me
 - **Images are outside the file.** `images[].uri` is `texture/<n>.png`, and `texture/<n>` is the member of the same asset with that role. Every image is an 8-bit RGBA PNG in row order from the top of the image. No image is embedded.
 - **Textures name their images directly.** `texture.source` names the image, and no extension is listed in `extensionsUsed` or `extensionsRequired` for the images.
 - **`KHR_texture_transform` is used only for a base colour texture** whose slot has a scale other than 1 in either axis or an offset other than 0 in either axis. It is listed in `extensionsUsed` only when written. Its scale is the slot's scale and its offset is `(ox, 1 - sy - oy)` for the slot's scale `(sx, sy)` and offset `(ox, oy)`. Every other texture property keeps its scale and offset in `textures` only, and the runtime applies them itself.
-- **Texture coordinates are not flipped.** `TEXCOORD_n` is the source component pair unchanged (u, v), with v counted from the bottom of the image, and rows are written in the image from the top. The runtime flips v when it samples. This is the one difference from the UV rule of model files, and it is why this form does not use the model file's flip.
 - **The change of basis is model files' change of basis:** right-handed, Y up, X reflected (`S = diag(-1, 1, 1)`) applied to positions, rotations, normals, tangents, triangles, bind poses and the collision geometry, so that the scene and the collision are in one space.
 - Memory layout, accessors, index width, joints and weights are those of model files. `POSITION` accessors have `min` and `max`.
-- `asset.generator` names the converter and the form version. The `asset` carries no `extras`.
+- The `asset` carries no `extras`. Its `generator` is `sekai-exporter`; the form and its version are in the asset document.
 
 **Version.** Format version: 1.
 
@@ -254,7 +253,7 @@ A file is correct for the runtime when each of these holds:
 
 ## 6. Version
 
-Form version: 3. Version 2 adds the `attach-points` member; version 3 follows version 2 of model files. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
+Form version: 4. Version 2 adds the `attach-points` member; version 3 follows version 2 of model files; version 4 writes texture coordinates as model files do. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
 
 ## 7. Naming nodes
 

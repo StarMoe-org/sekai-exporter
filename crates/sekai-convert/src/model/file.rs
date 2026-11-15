@@ -191,18 +191,16 @@ struct Geometry {
 /// skinned, the joint of each bone slot.
 type MeshKey = (ObjectId, Vec<Option<usize>>, Option<Vec<u16>>);
 
-/// The mesh `mesh` with its accessors, read when first used. `flip_uv` says whether its texture
-/// coordinates are written with `v` flipped.
+/// The mesh `mesh` with its accessors, read when first used.
 fn load<'g>(
     geometry: &'g mut BTreeMap<ObjectId, Geometry>,
     mesh: ObjectId,
-    flip_uv: bool,
     cx: &dyn Context,
     buffers: &mut Buffers,
 ) -> Result<&'g mut Geometry, ConvertError> {
     Ok(match geometry.entry(mesh) {
         Entry::Occupied(known) => known.into_mut(),
-        Entry::Vacant(slot) => slot.insert(Geometry::new(mesh::read(mesh, cx)?, flip_uv, buffers)?),
+        Entry::Vacant(slot) => slot.insert(Geometry::new(mesh::read(mesh, cx)?, buffers)?),
     })
 }
 
@@ -366,7 +364,7 @@ impl Builder<'_> {
             None
         };
         if let Some(read) = read {
-            let geometry = Geometry::new(read, self.config.flip_uv, &mut self.buffers)?;
+            let geometry = Geometry::new(read, &mut self.buffers)?;
             self.geometry.insert(mesh, geometry);
         }
         let mut materials = Vec::new();
@@ -405,13 +403,7 @@ impl Builder<'_> {
         if let Some(&known) = self.mesh_index.get(&key) {
             return Ok(known);
         }
-        let geometry = load(
-            &mut self.geometry,
-            mesh,
-            self.config.flip_uv,
-            self.cx,
-            &mut self.buffers,
-        )?;
+        let geometry = load(&mut self.geometry, mesh, self.cx, &mut self.buffers)?;
         let (_, materials, slot_joints) = &key;
         let mut attributes = geometry.attributes.clone();
         if let Some(slot_joints) = slot_joints {
@@ -517,7 +509,7 @@ impl Builder<'_> {
 
 impl Geometry {
     /// Adds the vertex attributes, indices and morph targets of `mesh`.
-    fn new(mesh: Mesh, flip_uv: bool, buffers: &mut Buffers) -> Result<Self, ConvertError> {
+    fn new(mesh: Mesh, buffers: &mut Buffers) -> Result<Self, ConvertError> {
         if mesh.positions.is_empty() {
             return Err(unsupported("the mesh has no vertices"));
         }
@@ -543,7 +535,7 @@ impl Geometry {
             None => {}
         }
         for (set, uvs) in mesh.uvs.iter().enumerate() {
-            let uvs = written_uvs(uvs, flip_uv);
+            let uvs = written_uvs(uvs);
             attributes.insert(
                 format!("TEXCOORD_{set}"),
                 buffers.floats(&uvs, vertex, false),
@@ -628,14 +620,9 @@ impl Geometry {
     }
 }
 
-/// Texture coordinates as written: with `v` flipped, for images stored top row first, when
-/// `flip_uv` is set, and as stored otherwise.
-fn written_uvs(uvs: &[[f32; 2]], flip_uv: bool) -> Vec<[f32; 2]> {
-    if flip_uv {
-        uvs.iter().map(|&[u, v]| [u, 1.0 - v]).collect()
-    } else {
-        uvs.to_vec()
-    }
+/// Texture coordinates as written: with `v` flipped, for images stored top row first.
+fn written_uvs(uvs: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    uvs.iter().map(|&[u, v]| [u, 1.0 - v]).collect()
 }
 
 /// The morph target weights of a skinned renderer: each channel's stored weight, 0 when the

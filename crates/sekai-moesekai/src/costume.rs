@@ -92,7 +92,6 @@ impl Converter for CostumeModel {
 
 /// How a part's model file is written.
 const PART: ModelConfig<'static> = ModelConfig {
-    flip_uv: true,
     node_keys: None,
     material_keys: None,
 };

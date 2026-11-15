@@ -9,6 +9,7 @@
 //! `sekai-exporter serve`, which reads from an output directory.
 
 mod cache;
+mod listing;
 mod resolver;
 mod response;
 mod routes;
@@ -17,4 +18,4 @@ pub mod server;
 
 pub use resolver::{Fault, Fetched, Limits, Lookup, Pending, Read, Resolver, Usage};
 pub use response::{Body, ObjectId, Request, Response, Slice};
-pub use routes::{Routes, RoutesError, Target};
+pub use routes::{Entry, Routes, RoutesError, Target};

@@ -20,6 +20,10 @@ required-features = ["serve"]
 name = "update"
 required-features = ["cdn"]
 
+[[test]]
+name = "increment"
+required-features = ["cdn"]
+
 [dependencies]
 sekai-unity.workspace = true
 sekai-format.workspace = true
@@ -40,7 +44,9 @@ sysinfo = { version = "0.40.1", default-features = false, features = ["system"] 
 cpu-time = "1.0.0"
 mimalloc = { version = "0.1", default-features = false }
 sekai-serve = { workspace = true, optional = true }
-flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"], optional = true }
+
+[dev-dependencies]
+sekai-testkit.workspace = true
 
 [features]
 image = ["sekai-convert/image"]
@@ -61,7 +67,7 @@ storage-view = ["sekai-moesekai/storage-view"]
 webp = ["sekai-encode/webp"]
 cdn = ["sekai-game/cdn", "catalog-db"]
 client = ["sekai-game/client", "dep:sekai-layouts"]
-s3 = ["sekai-publish/s3", "dep:flate2"]
+s3 = ["sekai-publish/s3"]
 catalog-db = ["sekai-catalog/catalog-db"]
 mysekai = ["sekai-mysekai/forms"]
 serve = ["dep:sekai-serve", "sekai-serve/server"]

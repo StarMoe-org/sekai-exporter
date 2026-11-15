@@ -101,4 +101,4 @@ Each source can be configured with a proxy (HTTP or SOCKS), a concurrency limit,
 
 ## The input store
 
-`update` records the bundles it fetches in `<output>/inputs`, a content-addressed store named by the SHA-256 of each bundle, and reads them from there when a bundle is needed again. The record of the bundles of a version is kept in the catalog, `<output>/catalog.redb`, so a bundle whose declared hash is unchanged is neither downloaded nor read again. **The input store contains game data and must be private.** It must not be published with the outputs.
+`update` records the bundles it fetches in `<output>/inputs`, a content-addressed store named by the SHA-256 of each bundle, and reads them from there when a bundle is needed again. The bundles of the last version, with their content and the files they hold, are kept in the [state of the region](publishing.md#the-state-of-a-region), so a bundle whose declared hash is unchanged is neither downloaded nor read again. **The input store contains game data and must be private.** It must not be published with the outputs.

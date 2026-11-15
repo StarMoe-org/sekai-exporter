@@ -43,7 +43,7 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 
 `costume` produces the `costume-model` and `costume-motion` forms, and from the game data tables the `costume-role` form, one per character and unit with every part it can wear, and the `costume` form, the looks of each costume.
 
-The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` refuses `update --storage`, and no asset is reported with `not_compiled`.
+The [storage view](publishing.md#the-storage-view) is a view rather than a converter, so it writes no asset. A build without `storage-view` publishes no storage view, and no asset is reported with `not_compiled`.
 
 In `sekai-mysekai`: `mysekai`, which produces MySekai forms in the full form a game-reproducing runtime needs: [furniture models](spec/fixture-model.md) and [site models](spec/site-model.md), furniture and site documents, character actions and talks, and the field camera, each with a page among the [specifications](spec/README.md). A build without it reports the roots of its object forms with `not_compiled`.
 

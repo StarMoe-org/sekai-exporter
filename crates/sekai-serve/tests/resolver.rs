@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{Pointer, TreeReference};
 use sekai_serve::{
     Body, Fault, Fetched, Limits, Lookup, ObjectId, Pending, Read, Request, Resolver, Response,
     Routes, Slice,
@@ -94,16 +94,29 @@ impl Published {
         (object(root, "json").path(), chunk_paths)
     }
 
-    /// Writes the pointer of `version` of `target` and makes it current.
+    /// Writes the pointer of `version` of `target`, which names the path index `paths`, and makes
+    /// it current.
     fn point(&mut self, target: &str, version: &str, paths: Option<String>) {
+        self.point_to(target, version, paths, None);
+    }
+
+    /// Writes the pointer of `version` of `target`, which names the path index `paths` and the
+    /// directory tree `tree`, and makes it current.
+    fn point_to(
+        &mut self,
+        target: &str,
+        version: &str,
+        paths: Option<String>,
+        tree: Option<TreeReference>,
+    ) {
         let pointer = Pointer {
             format: "pointer".to_owned(),
             version: sekai_format::publication::VERSION,
             published_version: version.to_owned(),
             revision: "0".repeat(8),
             root: None,
-            sqlite: None,
             paths,
+            tree,
         };
         let bytes = serde_json::to_vec(&pointer).unwrap();
         for name in ["current".to_owned(), format!("versions/{version}")] {
@@ -1006,5 +1019,264 @@ mod lookups {
         }
         assert_eq!(limits, [64 << 10, 64 << 20, 64 << 20]);
         assert!(matches!(lookup, Lookup::Done(response) if response.status == 200));
+    }
+}
+
+mod directories {
+    use super::*;
+    use serde_json::Value;
+
+    /// The listing that `response` carries.
+    fn listing(response: &Response) -> Value {
+        let Body::Bytes(bytes) = &response.body else {
+            panic!("a listing is a document: {response:?}")
+        };
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    /// The subdirectories and file names of the listing of `path`.
+    fn names(resolver: &Resolver, published: &Published, path: &str) -> (Vec<String>, Vec<String>) {
+        let listed = listing(&answer(resolver, published, &get(path)));
+        let strings = |values: &Value, key: Option<&str>| {
+            let values = values.as_array().unwrap().iter();
+            let names = values.map(|value| key.map_or(value, |key| &value[key]));
+            names
+                .map(|name| name.as_str().unwrap().to_owned())
+                .collect()
+        };
+        (
+            strings(&listed["directories"], None),
+            strings(&listed["files"], Some("name")),
+        )
+    }
+
+    fn published() -> Published {
+        let mut published = Published::default();
+        let paths = [
+            "a.txt",
+            "b/c.txt",
+            "b/d/e.txt",
+            "b/d/f.txt",
+            "b/g.txt",
+            "b/g/h.txt",
+            "i/j.txt",
+        ];
+        published.publish("jp/storage", "1", &files(&paths), 2);
+        published
+    }
+
+    #[test]
+    fn a_directory_lists_what_is_right_under_it() {
+        let (resolver, published) = (resolver(""), published());
+        let list = |path| names(&resolver, &published, path);
+        let strings =
+            |names: &[&str]| -> Vec<String> { names.iter().map(|n| n.to_string()).collect() };
+        assert_eq!(
+            list("/jp/storage/"),
+            (strings(&["b", "i"]), strings(&["a.txt"]))
+        );
+        assert_eq!(
+            list("/jp/storage/b/"),
+            (strings(&["d", "g"]), strings(&["c.txt", "g.txt"]))
+        );
+        assert_eq!(
+            list("/jp@1/storage/b/d/"),
+            (strings(&[]), strings(&["e.txt", "f.txt"]))
+        );
+        for missing in ["/jp/storage/x/", "/jp/storage/b/c.txt/", "/jp/storage/b//"] {
+            assert_eq!(answer(&resolver, &published, &get(missing)).status, 404);
+        }
+        // Without its `/`, a directory is a path that names no file.
+        assert_eq!(
+            answer(&resolver, &published, &get("/jp/storage/b")).status,
+            404
+        );
+    }
+
+    #[test]
+    fn a_listing_is_a_document_of_the_publication() {
+        let (resolver, published) = (resolver(r#", "max_age": 5"#), published());
+        let response = answer(&resolver, &published, &get("/jp/storage/b/d/"));
+        assert_eq!(response.status, 200);
+        assert_eq!(header(&response, "content-type"), Some("application/json"));
+        assert_eq!(
+            header(&response, "cache-control"),
+            Some("public, max-age=5")
+        );
+        let Body::Bytes(bytes) = &response.body else {
+            panic!("a listing is a document")
+        };
+        let etag = format!("\"{}\"", hex(&sha256(bytes)));
+        assert_eq!(header(&response, "etag"), Some(etag.as_str()));
+        let length = bytes.len().to_string();
+        assert_eq!(header(&response, "content-length"), Some(length.as_str()));
+
+        let e = file("b/d/e.txt");
+        assert_eq!(
+            listing(&response),
+            serde_json::json!({
+                "format": "directory-listing",
+                "version": 1,
+                "view": "storage",
+                "published_version": "1",
+                "revision": "00000000",
+                "path": "b/d/",
+                "directories": [],
+                "files": [
+                    { "name": "e.txt", "sha256": hex(&e.sha256), "extension": "txt",
+                      "size": e.size, "media_type": "test/txt" },
+                    { "name": "f.txt", "sha256": hex(&file("b/d/f.txt").sha256),
+                      "extension": "txt", "size": 9, "media_type": "test/txt" },
+                ],
+            })
+        );
+
+        let again = Request {
+            if_none_match: Some(&etag),
+            ..get("/jp/storage/b/d/")
+        };
+        let unchanged = answer(&resolver, &published, &again);
+        assert_eq!((unchanged.status, &unchanged.body), (304, &Body::Empty));
+        let head = Request {
+            method: "HEAD",
+            ..get("/jp/storage/b/d/")
+        };
+        let headers = answer(&resolver, &published, &head);
+        assert_eq!(headers.body, Body::Empty);
+        assert_eq!(header(&headers, "content-length"), Some(length.as_str()));
+    }
+
+    #[test]
+    fn a_listing_reads_only_the_chunks_where_its_entries_start() {
+        let mut published = Published::default();
+        let mut paths = vec!["a/0.txt".to_owned()];
+        paths.extend((0..100).map(|n| format!("a/big/{n:03}.txt")));
+        paths.extend([
+            "a/big.txt".to_owned(),
+            "a/z.txt".to_owned(),
+            "b.txt".to_owned(),
+        ]);
+        paths.sort();
+        let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+        let (_, chunks) = published.publish("jp/storage", "1", &files(&paths), 10);
+        assert!(chunks.len() > 10);
+        let resolver = resolver("");
+        assert_eq!(
+            names(&resolver, &published, "/jp/storage/a/"),
+            (
+                vec!["big".to_owned()],
+                vec!["0.txt".to_owned(), "big.txt".to_owned(), "z.txt".to_owned()]
+            )
+        );
+        // The chunk of `a/0.txt` and `a/big.txt`, which starts the subdirectory, and the last
+        // chunk, which holds the paths past it.
+        assert_eq!(published.reads(), ["pointer", "root", "chunk", "chunk"]);
+        names(&resolver, &published, "/jp/storage/a/");
+        assert_eq!(published.reads(), [""; 0]);
+    }
+
+    #[test]
+    fn the_root_of_a_view_without_files_is_listed() {
+        let mut published = Published::default();
+        published.publish("jp/storage", "1", &[], 2);
+        let resolver = resolver("");
+        assert_eq!(
+            names(&resolver, &published, "/jp/storage/"),
+            (Vec::new(), Vec::new())
+        );
+        assert_eq!(
+            answer(&resolver, &published, &get("/en/storage/")).status,
+            404
+        );
+    }
+}
+
+mod trees {
+    use super::*;
+
+    const TREE: &str = "/trees/jp/storage";
+
+    fn resolver() -> Resolver {
+        let json = r#"{ "routes": [
+            { "pattern": "/trees/{region}/{view}", "tree": true },
+            { "pattern": "/{region}/{view}/{path}" }
+        ] }"#;
+        Resolver::new(
+            Routes::from_json(json.as_bytes()).unwrap(),
+            Limits::default(),
+        )
+    }
+
+    /// The storage view of `jp`, whose pointer names the directory tree `tree`.
+    fn published(tree: Option<TreeReference>) -> Published {
+        let mut published = Published::default();
+        published.publish("jp/storage", "1", &files(&["a.png"]), 8192);
+        let current = &published.pointers["jp/storage/current.json"];
+        let pointer: Pointer = serde_json::from_slice(current).unwrap();
+        published.point_to("jp/storage", "1", pointer.paths, tree);
+        published.reads();
+        published
+    }
+
+    fn tree() -> TreeReference {
+        TreeReference {
+            sha256: hex(&sha256(b"tree")),
+            size: 42,
+        }
+    }
+
+    #[test]
+    fn the_tree_is_the_object_the_pointer_names() {
+        let (resolver, published) = (resolver(), published(Some(tree())));
+        let response = answer(&resolver, &published, &get(TREE));
+        assert_eq!(response.status, 200);
+        let expected = Body::Object(Slice {
+            object: object(sha256(b"tree"), "json.gz"),
+            start: 0,
+            length: 42,
+            size: 42,
+        });
+        assert_eq!(response.body, expected);
+        let etag = format!("\"{}\"", tree().sha256);
+        for (name, value) in [
+            ("content-type", "application/gzip"),
+            ("content-length", "42"),
+            ("etag", etag.as_str()),
+            (
+                "content-disposition",
+                "inline; filename=\"directory-tree.json.gz\"",
+            ),
+        ] {
+            assert_eq!(header(&response, name), Some(value), "{name}");
+        }
+        assert_eq!(published.reads(), ["pointer"]);
+        // The pointer is remembered, so the next request reads nothing, and the files of the
+        // view are still found by path.
+        assert_eq!(answer(&resolver, &published, &get(TREE)).status, 200);
+        assert_eq!(published.reads(), [""; 0]);
+        let file = answer(&resolver, &published, &get("/jp/storage/a.png"));
+        assert_eq!(file.status, 200);
+    }
+
+    #[test]
+    fn a_publication_without_a_tree_has_none_to_send() {
+        let (resolver, published) = (resolver(), published(None));
+        assert_eq!(answer(&resolver, &published, &get(TREE)).status, 404);
+        assert_eq!(
+            answer(&resolver, &published, &get("/trees/en/storage")).status,
+            404
+        );
+    }
+
+    #[test]
+    fn a_tree_named_by_something_other_than_a_hash_fails_the_lookup() {
+        let named = TreeReference {
+            sha256: "../secret".to_owned(),
+            size: 1,
+        };
+        let (resolver, published) = (resolver(), published(Some(named)));
+        let (response, fault) = lookup(&resolver, &published, &get(TREE), 0);
+        assert_eq!(response.status, 500);
+        assert!(matches!(fault.unwrap().read, Read::Pointer(_)));
     }
 }

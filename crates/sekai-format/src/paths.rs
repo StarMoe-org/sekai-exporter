@@ -266,6 +266,15 @@ impl Chunk {
         self.rows.iter().map(|row| self.file(row))
     }
 
+    /// The files whose path is not before `path`, in path order.
+    pub fn files_from<'c>(
+        &'c self,
+        path: &str,
+    ) -> impl ExactSizeIterator<Item = ChunkFile<'c>> + use<'c> {
+        let start = self.rows.partition_point(|row| self.path(row) < path);
+        self.rows[start..].iter().map(|row| self.file(row))
+    }
+
     /// The bytes the chunk has allocated besides its own size, without the bookkeeping of the
     /// allocator, which is small for so few allocations.
     pub fn allocated(&self) -> usize {

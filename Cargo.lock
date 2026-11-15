@@ -1295,6 +1295,7 @@ dependencies = [
  "sekai-codec",
  "sekai-format",
  "sekai-unity",
+ "serde",
  "serde_json",
 ]
 
@@ -1317,7 +1318,6 @@ name = "sekai-exporter"
 version = "0.0.0"
 dependencies = [
  "cpu-time",
- "flate2",
  "lexopt",
  "mimalloc",
  "sekai-catalog",
@@ -1332,6 +1332,7 @@ dependencies = [
  "sekai-pipeline",
  "sekai-publish",
  "sekai-serve",
+ "sekai-testkit",
  "sekai-unity",
  "serde_json",
  "sha2",
@@ -1425,8 +1426,10 @@ dependencies = [
 name = "sekai-publish"
 version = "0.0.0"
 dependencies = [
+ "flate2",
  "sekai-catalog",
  "sekai-format",
+ "sekai-testkit",
  "serde",
  "serde_json",
  "sha2",
@@ -1448,6 +1451,17 @@ dependencies = [
  "sha2",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "sekai-testkit"
+version = "0.0.0"
+dependencies = [
+ "aes",
+ "cbc",
+ "rmp-serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]

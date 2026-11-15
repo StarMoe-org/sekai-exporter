@@ -390,7 +390,6 @@ class DeterminismTests(TreeTestCase):
             f"{n}.json": b'{"format": "%s"}' % name.encode()
             for n, name in enumerate(["index-root", "index-chunk", "index-shard", "path-index"])
         }
-        documents["aa/idx.sqlite"] = b"SQLite format 3\x00"
         documents["bb/chunk.paths"] = b"SKPI"
         same = {"a.json": b'{"format": "asset"}'}
         run1, run2 = self.runs({**same, **documents}, same)

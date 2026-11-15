@@ -93,6 +93,7 @@
 |---|---|---|
 | 0 | `sekai-unity` | 解包：UnityFS、SerializedFile、type tree、布局编译、块缓存。不使用过程宏，不依赖 C 库 |
 | 0 | `sekai-format` | 已发布文档的 serde 类型，使用者可将其作为 git 依赖直接使用 |
+| 0 | `sekai-testkit` | 在测试中扮演 S3 兼容存储桶和 CDN 的本地服务器，各 crate 只将其作为开发依赖使用 |
 | 1 | `sekai-layouts` | 不带 type tree 的对象所用的字段布局表及其加载 |
 | 1 | `sekai-codec` | 纯 Rust 实现的贴图与 CRI 解码 |
 | 1 | `sekai-catalog` | 内容寻址的 store 与目录 |

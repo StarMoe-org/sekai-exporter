@@ -8,9 +8,9 @@ use sekai_catalog::{
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
-use sekai_publish::patch::{self, Previous};
+use sekai_publish::patch::{self, Change, Previous};
 use sekai_publish::plan::change;
-use sekai_publish::{Binding, Layout, Plan, documents, plan, publish, tree};
+use sekai_publish::{Binding, File, Layout, Plan, documents, plan, publish, tree};
 
 struct Scratch(PathBuf);
 
@@ -293,167 +293,6 @@ fn publishing_again_changes_nothing() {
 }
 
 #[test]
-fn sqlite_index_is_deterministic_and_valid() {
-    use sekai_format::asset::SourceObject;
-
-    let s = Scratch::new("sqlite");
-    let store = s.store();
-    let root = s.0.join("published");
-
-    let mut bindings = Vec::new();
-    // An asset of several members.
-    let l2d_members: Vec<MemberFile> = [
-        (
-            "model",
-            "json",
-            "application/json",
-            br#"{"version":3}"#.as_slice(),
-        ),
-        (
-            "moc3",
-            "moc3",
-            "application/octet-stream",
-            b"MOC3_BINARY_DATA".as_slice(),
-        ),
-        (
-            "textures/00",
-            "webp",
-            "image/webp",
-            b"RIFF_WEBP_00".as_slice(),
-        ),
-    ]
-    .into_iter()
-    .map(|(role, ext, mime, data)| {
-        let key = store.put(data, ext).unwrap();
-        MemberFile {
-            role: role.to_owned(),
-            sha256: hex(&key),
-            size: data.len() as u64,
-            extension: ext.to_owned(),
-            media_type: mime.to_owned(),
-        }
-    })
-    .collect();
-    let l2d_doc = AssetDocument {
-        format: FORMAT.to_owned(),
-        version: VERSION,
-        name: "chara/model_a".to_owned(),
-        form: "live2d-model".to_owned(),
-        form_version: 2,
-        fingerprint: "11".repeat(32),
-        sources: vec![SourceObject {
-            bundle: "chara_bundle".to_owned(),
-            path_id: 10,
-            class: "MonoBehaviour".to_owned(),
-        }],
-        members: l2d_members,
-        resources: Vec::new(),
-        references: Vec::new(),
-        error: None,
-    };
-    bindings.push(Binding {
-        name: "chara/model_a".to_owned(),
-        document: store.put(&l2d_doc.to_bytes().unwrap(), "json").unwrap(),
-    });
-
-    // Enough standalone textures + an overflow-sized source list to exercise multi-page B-trees
-    // and SQLite payload overflow chains.
-    for idx in 0..220u32 {
-        let name = format!("tex/group_{:02}/img_{idx:03}", idx % 7);
-        let payload = format!("webp-bytes-{idx}").into_bytes();
-        let mkey = store.put(&payload, "webp").unwrap();
-        let sources = if idx == 0 {
-            (0..120)
-                .map(|sidx| SourceObject {
-                    bundle: format!("tex_bundle_long_identifier_{sidx:03}"),
-                    path_id: i64::from(sidx + 1),
-                    class: "Texture2D".to_owned(),
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let doc = AssetDocument {
-            format: FORMAT.to_owned(),
-            version: VERSION,
-            name: name.clone(),
-            form: "texture".to_owned(),
-            form_version: 1,
-            fingerprint: "44".repeat(32),
-            sources,
-            members: vec![MemberFile {
-                role: "image".to_owned(),
-                sha256: hex(&mkey),
-                size: payload.len() as u64,
-                extension: "webp".to_owned(),
-                media_type: "image/webp".to_owned(),
-            }],
-            resources: Vec::new(),
-            references: Vec::new(),
-            error: None,
-        };
-        bindings.push(Binding {
-            name,
-            document: store.put(&doc.to_bytes().unwrap(), "json").unwrap(),
-        });
-    }
-    bindings.push(failed(&store, "broken/item"));
-
-    let forward = plan("v1", &bindings, &store, 2).unwrap();
-    let mut rev_bindings = bindings;
-    rev_bindings.reverse();
-    let backward = plan("v1", &rev_bindings, &store, 2).unwrap();
-
-    let sqlite_of = |plan: &Plan| {
-        let publication = documents(&store, "jp/canonical", plan, Layout::Sqlite).unwrap();
-        publication.pointer.sqlite.unwrap()
-    };
-    let sqlite = sqlite_of(&forward);
-    assert_eq!(sqlite, sqlite_of(&backward));
-    let pointer = publish(
-        &Objects::local(&store),
-        &root,
-        "jp/canonical",
-        &forward,
-        Layout::Sqlite,
-        2,
-    )
-    .unwrap();
-    assert_eq!(pointer.sqlite.as_deref(), Some(sqlite.as_str()));
-
-    // SQLite itself checks the database, through the `sqlite3` module of Python.
-    let python = ["python3", "python"]
-        .into_iter()
-        .find(|python| {
-            std::process::Command::new(python)
-                .args(["-c", "import sqlite3"])
-                .status()
-                .is_ok_and(|s| s.success())
-        })
-        .expect("the integrity check needs Python with its sqlite3 module");
-    let db_path = store.path(&Key {
-        sha256: sekai_catalog::store::parse_hex(&sqlite).unwrap(),
-        extension: "sqlite".to_owned(),
-    });
-    let output = std::process::Command::new(python)
-        .args([
-            "-c",
-            "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); \
-             assert c.execute('PRAGMA integrity_check').fetchall() == [('ok',)]; \
-             assert c.execute('SELECT COUNT(*) FROM assets').fetchone() == (222,); \
-             assert c.execute('SELECT COUNT(*) FROM files').fetchone() == (223,)",
-        ])
-        .arg(&db_path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "sqlite3 integrity check failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-#[test]
 fn a_plan_reads_the_documents_that_only_the_destination_holds() {
     let s = Scratch::new("read-back");
     let earlier = LocalStore::open(s.0.join("earlier")).unwrap();
@@ -519,16 +358,155 @@ fn a_change_gives_the_publication_of_the_new_assets() {
         let before = before.unwrap();
         let previous = Previous::read(&store, &before.pointer).unwrap();
         let change = change(&old, &new, &store, 2).unwrap();
-        let patched =
-            patch::apply(&store, &store, "canonical", "v2", layout, &previous, change).unwrap();
+        let apply = |previous: &Previous| {
+            patch::apply(
+                &store,
+                &store,
+                "canonical",
+                "v2",
+                layout,
+                previous,
+                change.clone(),
+            )
+        };
+        let patched = apply(&previous).unwrap();
         let whole = plan("v2", &new, &store, 2).unwrap();
         let whole = documents(&store, "jp/canonical", &whole, layout).unwrap();
         assert_eq!(patched.pointer, whole.pointer, "{layout:?}");
+        // Without the directory tree of the previous publication, the new one is made from every
+        // file of its path index, and is the same.
+        let without_tree = apply(&Previous {
+            tree: None,
+            ..previous.clone()
+        });
+        assert_eq!(without_tree.unwrap().pointer, whole.pointer, "{layout:?}");
         assert!(
             patched.objects.len() * 20 < whole.objects.len(),
             "{layout:?}: {} of {}",
             patched.objects.len(),
             whole.objects.len()
+        );
+    }
+}
+
+#[test]
+fn a_publication_gives_back_the_documents_of_the_assets_it_names() {
+    let s = Scratch::new("bindings");
+    let store = s.store();
+    let assets = many(&store, 6000, "x");
+    let published = documents(
+        &store,
+        "jp/canonical",
+        &plan("v1", &assets, &store, 2).unwrap(),
+        Layout::Paths,
+    );
+    let previous = Previous::read(&store, &published.unwrap().pointer).unwrap();
+    let wanted = [&assets[5000], &assets[3], &assets[4999]];
+    let names = wanted
+        .iter()
+        .map(|b| b.name.as_str())
+        .chain(["missing/one"]);
+    let mut expected: Vec<Binding> = wanted.into_iter().cloned().collect();
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(previous.lookup(&store).bindings(names).unwrap(), expected);
+    let nothing = Previous::default()
+        .lookup(&store)
+        .bindings(["group_00/item_00000"]);
+    assert!(nothing.unwrap().is_empty());
+}
+
+/// Whether `path` is directly in `directory`.
+fn directly_in(path: &str, directory: &str) -> bool {
+    let file = path
+        .strip_prefix(directory)
+        .and_then(|p| p.strip_prefix('/'));
+    file.is_some_and(|file| !file.contains('/'))
+}
+
+/// A plan of `files` alone, as a view without listings publishes them.
+fn files_plan(version: &str, mut files: Vec<File>) -> Plan {
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Plan {
+        version: version.to_owned(),
+        files,
+        assets: Vec::new(),
+        listings: Default::default(),
+        failures: Vec::new(),
+    }
+}
+
+#[test]
+fn a_directory_is_replaced_file_by_file() {
+    let s = Scratch::new("directory");
+    let store = s.store();
+    let assets = plan("v1", &many(&store, 6000, "x"), &store, 2).unwrap();
+    let before = documents(
+        &store,
+        "jp/storage",
+        &files_plan("v1", assets.files.clone()),
+        Layout::Paths,
+    );
+    let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
+
+    let lookup = previous.lookup(&store);
+    let directory = lookup.directory("group_03").unwrap();
+    let paths: Vec<&str> = directory.iter().map(|f| f.path.as_str()).collect();
+    let expected: Vec<&str> = assets
+        .files
+        .iter()
+        .map(|f| f.path.as_str())
+        .filter(|path| directly_in(path, "group_03"))
+        .collect();
+    assert!(expected.len() > 100);
+    assert_eq!(paths, expected);
+    assert!(lookup.directory("group_3").unwrap().is_empty());
+
+    // The directory now holds its files but the first, and a new one.
+    let added = File {
+        path: "group_03/new.webp".to_owned(),
+        key: store.put(b"new", "webp").unwrap(),
+        size: 3,
+        media_type: "image/webp".to_owned(),
+        asset: "group_03/new".to_owned(),
+        role: "image".to_owned(),
+    };
+    let mut change = Change::default();
+    change.remove_file(paths[0]);
+    change.add_file(added.clone()).unwrap();
+    let mut files: Vec<File> = assets
+        .files
+        .iter()
+        .filter(|f| f.path != paths[0])
+        .cloned()
+        .collect();
+    files.push(added);
+    for layout in [Layout::Paths, Layout::Index] {
+        let before = documents(
+            &store,
+            "jp/storage",
+            &files_plan("v1", assets.files.clone()),
+            layout,
+        );
+        let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
+        let patched = patch::apply(
+            &store,
+            &store,
+            "storage",
+            "v2",
+            layout,
+            &previous,
+            change.clone(),
+        );
+        let whole = documents(
+            &store,
+            "jp/storage",
+            &files_plan("v2", files.clone()),
+            layout,
+        );
+        assert_eq!(
+            patched.unwrap().pointer,
+            whole.unwrap().pointer,
+            "{layout:?}"
         );
     }
 }

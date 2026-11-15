@@ -251,12 +251,15 @@ impl TableConverter for Talks {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(packages) = TalkPackages::open(cx) else {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        if TalkPackages::open(cx).is_none() {
             return Ok(Box::new(NoAssets));
-        };
-        Ok(Box::new(OneAsset::new(NAME, move || {
-            build(&mut packages.reader()?, &Tables::read(cx)?)
+        }
+        Ok(Box::new(OneAsset::new(NAME, |cx| {
+            build(
+                &mut TalkPackages::require(cx)?.reader()?,
+                &Tables::read(cx)?,
+            )
         })))
     }
 }
@@ -274,13 +277,13 @@ impl TableConverter for FixtureTalks {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
-        let Some(packages) = TalkPackages::open(cx) else {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
+        if TalkPackages::open(cx).is_none() {
             return Ok(Box::new(NoAssets));
-        };
-        Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, move || {
+        }
+        Ok(Box::new(OneAsset::new(FIXTURE_TALKS_NAME, |cx| {
             build_fixture_talks(
-                &mut packages.reader()?,
+                &mut TalkPackages::require(cx)?.reader()?,
                 &Tables::read(cx)?,
                 &no_talk_pairs(cx)?,
             )
@@ -399,6 +402,10 @@ fn names_any(conditions: &[&Condition], kinds: &[&str]) -> bool {
 }
 
 fn build(reader: &mut TalkReader<'_>, tables: &Tables) -> Result<Asset, ConvertError> {
+    let talks = tables.talks.iter().map(|row| row.lua.as_str());
+    let birthday = tables.birthday.iter().map(|row| row.lua.as_str());
+    let tutorial = tables.tutorial.iter().map(|row| row.lua.as_str());
+    reader.load(talks.chain(birthday).chain(tutorial));
     let mut units: BTreeMap<String, UnitTalks<'_>> = BTreeMap::new();
     let mut shared = Vec::new();
     for row in &tables.talks {
@@ -448,6 +455,7 @@ fn build_fixture_talks(
     tables: &Tables,
     no_talk: &BTreeSet<(i64, i64)>,
 ) -> Result<Asset, ConvertError> {
+    reader.load(tables.talks.iter().map(|row| row.lua.as_str()));
     let mut talks = Vec::new();
     for row in &tables.talks {
         let conditions = tables.conditions_of(row.condition_group_id)?;
@@ -642,7 +650,7 @@ mod tests {
         version: &Version,
     ) -> Result<Value, ConvertError> {
         let plan = converter.plan(version)?;
-        let asset = plan.convert(0)?.asset;
+        let asset = plan.convert(0, version)?.asset;
         let [member] = asset.members.as_slice() else {
             panic!("{asset:?}");
         };

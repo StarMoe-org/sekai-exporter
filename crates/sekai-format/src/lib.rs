@@ -10,6 +10,7 @@ pub mod chunks;
 pub mod clip;
 pub mod components;
 pub mod costume;
+pub mod directory_tree;
 pub mod episode;
 pub mod gltf;
 pub mod identity;

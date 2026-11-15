@@ -107,8 +107,8 @@ impl Output {
             published_version: version.to_owned(),
             revision: "0".repeat(8),
             root: None,
-            sqlite: None,
             paths: Some(hex(&root)),
+            tree: None,
         };
         let pointer = serde_json::to_vec(&pointer).unwrap();
         let view = self.0.join("published").join(region).join("storage");
@@ -344,7 +344,27 @@ fn published_files_are_served_with_their_bytes_and_headers() {
         (416, "bytes */5")
     );
 
-    for missing in ["/jp/none.txt", "/en/a.txt", "/jp@2/a.txt", "/jp", "/"] {
+    let listed = server.get("/jp/dir/");
+    assert_eq!(listed.status, 200);
+    assert_eq!(listed.header("content-type"), "application/json");
+    assert_eq!(
+        listed.header("content-length"),
+        listed.body.len().to_string()
+    );
+    let listing: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+    assert_eq!(listing["path"], "dir/");
+    assert_eq!(listing["files"][0]["name"], "large.bin");
+    let root: serde_json::Value = serde_json::from_slice(&server.get("/jp/").body).unwrap();
+    assert_eq!(root["directories"], serde_json::json!(["dir", "音"]));
+
+    for missing in [
+        "/jp/none.txt",
+        "/en/a.txt",
+        "/jp@2/a.txt",
+        "/jp",
+        "/",
+        "/jp/none/",
+    ] {
         let reply = server.get(missing);
         assert_eq!(
             (reply.status, reply.body.as_slice()),

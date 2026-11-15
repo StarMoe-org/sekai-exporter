@@ -1,39 +1,18 @@
 //! The bucket that the `publish.s3` section of a configuration names: where `update` publishes the
-//! views of a region, what the catalog records as held there, and where the catalog itself is kept
-//! between runs.
+//! views of a region and keeps its state between runs.
 
 use std::collections::BTreeMap;
-#[cfg(feature = "s3")]
-use std::io::{BufReader, Read};
+use std::io;
 use std::path::Path;
 
-#[cfg(feature = "s3")]
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
-
-use sekai_catalog::{Key, Objects, Remote, Store};
-use sekai_format::identity::VersionIdentity;
+use sekai_catalog::{Key, Objects, Remote};
+use sekai_format::publication::Pointer;
 #[cfg(feature = "s3")]
 use sekai_pipeline::metrics::Recorder;
-use sekai_publish::{Layout, Plan};
+use sekai_pipeline::state::StateFiles;
+use sekai_publish::{Layout, Object};
 
 use crate::monitor::Monitor;
-
-/// The state file of the bucket that holds the catalog.
-#[cfg(feature = "s3")]
-const CATALOG: &str = "catalog.redb";
-
-/// The state file of the bucket that holds the last version of `region`.
-#[cfg(feature = "s3")]
-fn version_file(region: &str) -> String {
-    format!("versions/{region}.json")
-}
-
-/// The state file of the bucket that holds the asset documents of the last publication of
-/// `region`, as a gzipped pack.
-#[cfg(feature = "s3")]
-fn documents_file(region: &str) -> String {
-    format!("documents/{region}.pack.gz")
-}
 
 /// The `publish.s3` section of the configuration, if there is one.
 fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
@@ -45,7 +24,7 @@ fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
 #[cfg(feature = "s3")]
 pub(crate) struct Bucket {
     s3: sekai_publish::s3::S3,
-    layout: sekai_publish::Layout,
+    layout: Layout,
 }
 
 /// No bucket: this build cannot publish to one.
@@ -97,12 +76,9 @@ impl Bucket {
             },
         };
         let layout = match text("layout")?.as_deref() {
-            None | Some("sqlite") => Layout::Sqlite,
-            Some("index") => Layout::Index,
+            None | Some("index") => Layout::Index,
             Some(other) => {
-                return Err(
-                    format!("publish.s3.layout {other:?} must be \"sqlite\" or \"index\"").into(),
-                );
+                return Err(format!("publish.s3.layout {other:?} must be \"index\"").into());
             }
         };
         let s3 = S3::new(bucket, credentials).map_err(|e| e.to_string())?;
@@ -119,134 +95,62 @@ impl Bucket {
         &self.s3
     }
 
+    /// The number of requests to the bucket in flight at once.
+    pub(crate) fn connections(&self) -> usize {
+        self.s3.connections()
+    }
+
     /// Every object of the store in the bucket with its size, from a listing of the whole store.
     pub(crate) fn holdings(&self, monitor: &Monitor) -> Result<BTreeMap<Key, u64>, lexopt::Error> {
         let _span = monitor.span("publish", "listing", "");
         Ok(self.s3.holdings().map_err(|e| e.to_string())?)
     }
 
-    /// Replaces the catalog at `path` with the one the bucket keeps. A bucket that keeps none yet
-    /// leaves the catalog at `path`, if there is one, to start from.
-    pub(crate) fn pull_catalog(&self, path: &Path, monitor: &Monitor) -> Result<(), lexopt::Error> {
-        let _span = monitor.span("state", "pull", CATALOG);
-        let pulled = self
-            .s3
-            .fetch_state(CATALOG, path)
-            .map_err(|e| e.to_string())?;
-        if !pulled {
-            println!("bucket keeps no catalog yet");
-        }
+    /// The names of the state files in the state directory `directory`, from a listing of it.
+    pub(crate) fn state_names(
+        &self,
+        directory: &str,
+        monitor: &Monitor,
+    ) -> Result<Vec<String>, lexopt::Error> {
+        let _span = monitor.span("publish", "listing", directory);
+        Ok(self.s3.state_names(directory).map_err(|e| e.to_string())?)
+    }
+
+    /// The current pointer of `target` in the bucket.
+    pub(crate) fn current(&self, target: &str) -> Result<Option<Pointer>, String> {
+        self.s3.current(target).map_err(|e| e.to_string())
+    }
+
+    /// Uploads the objects of `referred` that the holdings of `objects` do not record.
+    pub(crate) fn store(&self, objects: &Objects<'_>, referred: Vec<Object>) -> Result<(), String> {
+        let stored = sekai_publish::s3::store_objects(objects, &self.s3, referred);
+        let stored = stored.map_err(|e| e.to_string())?;
+        println!(
+            "bucket uploaded {} present {}",
+            stored.uploaded, stored.present
+        );
         Ok(())
     }
 
-    /// Writes the catalog at `path` to the bucket, for the next run to pull.
-    pub(crate) fn push_catalog(&self, path: &Path, monitor: &Monitor) -> Result<(), lexopt::Error> {
-        let _span = monitor.span("state", "push", CATALOG);
-        Ok(self
-            .s3
-            .store_state(CATALOG, path)
-            .map_err(|e| e.to_string())?)
-    }
-
-    /// The last version of `region` that a run recorded in the bucket.
-    pub(crate) fn last_version(
-        &self,
-        region: &str,
-    ) -> Result<Option<VersionIdentity>, lexopt::Error> {
-        let read = |body: &mut dyn Read| Ok(serde_json::from_reader(body)?);
-        let identity = self.s3.read_state(&version_file(region), read);
-        Ok(identity.map_err(|e| format!("the last version of {region}: {e}"))?)
-    }
-
-    /// Records `identity` in the bucket as the last version of `region`, for checks that do not
-    /// pull the catalog.
-    pub(crate) fn set_last_version(
-        &self,
-        region: &str,
-        identity: &VersionIdentity,
-    ) -> Result<(), lexopt::Error> {
-        let bytes = serde_json::to_vec(identity).map_err(|e| e.to_string())?;
-        Ok(self
-            .s3
-            .write_state(&version_file(region), &bytes)
-            .map_err(|e| e.to_string())?)
-    }
-
-    /// Stores in `store` the asset documents of the last publication of `region` that the bucket
-    /// keeps, so that the next publication reads them from there and not one by one from the
-    /// bucket.
-    pub(crate) fn pull_documents(
-        &self,
-        region: &str,
-        store: &dyn Store,
-        monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        let file = documents_file(region);
-        let _span = monitor.span("state", "pull", &file);
-        let unpack = |body: &mut dyn Read| {
-            sekai_catalog::pack::read(&mut BufReader::new(GzDecoder::new(body)), store)
-        };
-        let unpacked = self.s3.read_state(&file, unpack);
-        match unpacked.map_err(|e| e.to_string())? {
-            Some(count) => println!("bucket documents {count}"),
-            None => println!("bucket keeps no documents of {region} yet"),
-        }
+    /// Makes `pointer` the current publication of `target` in the bucket.
+    pub(crate) fn make_current(&self, target: &str, pointer: &Pointer) -> Result<(), String> {
+        let written = sekai_publish::s3::make_current(&self.s3, target, pointer);
+        let written = written.map_err(|e| e.to_string())?;
+        let pointer = if written { "written" } else { "unchanged" };
+        println!("bucket {target} pointer {pointer}");
         Ok(())
     }
+}
 
-    /// Writes the asset documents of `plan`, read from `store`, to the bucket for the next run
-    /// of `region`.
-    pub(crate) fn push_documents(
-        &self,
-        region: &str,
-        plan: &Plan,
-        store: &dyn Store,
-        monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        let file = documents_file(region);
-        let _span = monitor.span("state", "push", &file);
-        let pack = || {
-            let mut packed = GzEncoder::new(Vec::new(), Compression::default());
-            let documents = plan.assets.iter().map(|asset| &asset.document);
-            sekai_catalog::pack::write(store, documents, &mut packed)?;
-            packed.finish()
-        };
-        let bytes = pack().map_err(|e| format!("{file}: {e}"))?;
-        Ok(self
-            .s3
-            .write_state(&file, &bytes)
-            .map_err(|e| e.to_string())?)
+/// The state files of the bucket, under its `state/`.
+#[cfg(feature = "s3")]
+impl StateFiles for Bucket {
+    fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>> {
+        self.s3.read_state(name).map_err(io::Error::other)
     }
 
-    /// Publishes the canonical view, `(target, plan)`, and the storage view, when there is one,
-    /// to the bucket, whose holdings are those of `objects`. The canonical view is published in
-    /// the layout of the configuration, and the storage view with its path index alone.
-    pub(crate) fn publish(
-        &self,
-        objects: &Objects<'_>,
-        canonical: (&str, &Plan),
-        storage: Option<(&str, &Plan)>,
-        monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        let views = std::iter::once((canonical, self.layout))
-            .chain(storage.map(|view| (view, Layout::Paths)));
-        for ((target, plan), layout) in views {
-            let _span = monitor.span("publish", "s3", target);
-            let (_, report) =
-                sekai_publish::s3::publish_with(objects, &self.s3, target, plan, layout)
-                    .map_err(|e| e.to_string())?;
-            println!(
-                "bucket {target} uploaded {} present {} pointer {}",
-                report.uploaded,
-                report.present,
-                if report.pointer_written {
-                    "written"
-                } else {
-                    "unchanged"
-                }
-            );
-        }
-        Ok(())
+    fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        self.s3.write_state(name, bytes).map_err(io::Error::other)
     }
 }
 
@@ -273,67 +177,46 @@ impl Bucket {
         match *self {}
     }
 
+    pub(crate) fn connections(&self) -> usize {
+        match *self {}
+    }
+
     pub(crate) fn holdings(&self, _monitor: &Monitor) -> Result<BTreeMap<Key, u64>, lexopt::Error> {
         match *self {}
     }
 
-    pub(crate) fn pull_catalog(
+    pub(crate) fn state_names(
         &self,
-        _path: &Path,
+        _directory: &str,
         _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
+    ) -> Result<Vec<String>, lexopt::Error> {
         match *self {}
     }
 
-    pub(crate) fn push_catalog(
-        &self,
-        _path: &Path,
-        _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
+    pub(crate) fn current(&self, _target: &str) -> Result<Option<Pointer>, String> {
         match *self {}
     }
 
-    pub(crate) fn last_version(
-        &self,
-        _region: &str,
-    ) -> Result<Option<VersionIdentity>, lexopt::Error> {
-        match *self {}
-    }
-
-    pub(crate) fn set_last_version(
-        &self,
-        _region: &str,
-        _identity: &VersionIdentity,
-    ) -> Result<(), lexopt::Error> {
-        match *self {}
-    }
-
-    pub(crate) fn pull_documents(
-        &self,
-        _region: &str,
-        _store: &dyn Store,
-        _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        match *self {}
-    }
-
-    pub(crate) fn push_documents(
-        &self,
-        _region: &str,
-        _plan: &Plan,
-        _store: &dyn Store,
-        _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
-        match *self {}
-    }
-
-    pub(crate) fn publish(
+    pub(crate) fn store(
         &self,
         _objects: &Objects<'_>,
-        _canonical: (&str, &Plan),
-        _storage: Option<(&str, &Plan)>,
-        _monitor: &Monitor,
-    ) -> Result<(), lexopt::Error> {
+        _referred: Vec<Object>,
+    ) -> Result<(), String> {
+        match *self {}
+    }
+
+    pub(crate) fn make_current(&self, _target: &str, _pointer: &Pointer) -> Result<(), String> {
+        match *self {}
+    }
+}
+
+#[cfg(not(feature = "s3"))]
+impl StateFiles for Bucket {
+    fn read(&self, _name: &str) -> io::Result<Option<Vec<u8>>> {
+        match *self {}
+    }
+
+    fn write(&self, _name: &str, _bytes: &[u8]) -> io::Result<()> {
         match *self {}
     }
 }

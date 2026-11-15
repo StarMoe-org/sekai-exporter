@@ -36,12 +36,14 @@ mod stats;
 mod storage;
 #[cfg(all(feature = "cdn", not(feature = "storage-view")))]
 mod storage {
+    use std::collections::BTreeSet;
+
     use sekai_catalog::{Derivations, LocalStore, Objects};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
-    use sekai_publish::Plan;
+    use sekai_publish::Binding;
+    use sekai_publish::patch::{Change, Lookup};
 
-    use crate::export::Destination;
     use crate::monitor::Monitor;
 
     /// Makes no further files in a build without the storage view.
@@ -63,22 +65,17 @@ mod storage {
         }
     }
 
-    /// Publishes no view in a build without the storage view, and refuses to write its tree.
-    pub(crate) fn publish(
-        _index: &Plan,
-        _target: &str,
-        destination: &Destination<'_>,
+    /// The empty change: a build without the storage view leaves it as it was.
+    pub(crate) fn change(
+        _units: &BTreeSet<&str>,
+        _assets: &[Binding],
+        _previous: &Lookup<'_>,
         _objects: &Objects<'_>,
         _derivations: &dyn Derivations,
         _threads: usize,
         _monitor: &Monitor,
-    ) -> Result<Option<Plan>, lexopt::Error> {
-        match destination.tree {
-            Some(_) => {
-                Err("this build has no storage view: enable the storage-view feature".into())
-            }
-            None => Ok(None),
-        }
+    ) -> Result<Change, String> {
+        Ok(Change::default())
     }
 }
 #[cfg(feature = "cdn")]
@@ -107,37 +104,41 @@ commands:
       are written to <output>/metrics.jsonl. The index is published under
       <output>/published, and --tree also writes a path tree.
   update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
-         [--tree <dir>] [--storage <dir>] [--threads <n>] [--memory <bytes>]
-         [--plain] [--force] [--verify] [--check]
-      Bring <output> up to the current version of a region of the configuration.
+         [--threads <n>] [--memory <bytes>] [--plain] [--force] [--verify]
+         [--rebuild-tables] [--check]
+      Bring the site of a region of the configuration up to its current
+      version. The site is the bucket of the configuration, or else <output>.
       Bundles go to <output>/inputs, which holds game data and must stay
-      private. The canonical and the storage view are published under
-      <output>/published with their path indexes; --tree and --storage also
-      write them as path trees. A version that matches the last complete run is
-      left alone unless --force or --verify is given. Each bundle is evaluated
-      with the bundles it depends on: those the manifest lists and those that
-      hold the external files it names. When all of them hold the same content
-      as in an earlier run, the result that run recorded is taken instead, so
-      only the bundles of changed units are fetched. Content is the hash the
-      manifest declares, or else the bytes, which are fetched to compare;
-      --force evaluates every bundle again and records the results anew. With a
-      bucket, the run starts from the catalog the bucket keeps under state/ and
-      writes it back when it is done, so <output> needs nothing from earlier
-      runs; one run per bucket goes at a time. The catalog records what the
-      bucket holds as each upload is accepted, and a run uploads only what it
-      does not record; --verify first replaces that record with a listing of the
-      bucket's store, so the bucket gets back what it lost. The bucket also
-      keeps the asset documents of the last publication of each region under
-      state/, in one file that a run reads at its start; any other object
-      missing from <output>/store is read back from the bucket. --only selects
-      bundles by name prefix, with their dependencies. A selection is neither
-      recorded as a version nor sent to a bucket; it needs an <output> without a
-      complete run and empty --tree and --storage folders. --check only looks up
-      the current version and prints whether it differs from the last one
-      recorded: in the bucket, which keeps it under state/ beside the catalog,
-      or else in <output>. It exits with 0 when the version is unchanged and 1
-      when it changed, downloads and writes nothing, and cannot be combined
-      with --force, --verify, --only, --tree or --storage.
+      private, and new objects go to <output>/store. The canonical and the
+      storage view are published at the site with their path indexes: in the
+      bucket, or under <output>/published. A version that matches the last
+      complete run is left alone unless --force or --verify is given.
+      The site keeps the state of each region under state/: the units, names,
+      bundles and publications of its last version, and the records of units
+      and derivations that later runs take, so <output> needs nothing from
+      earlier runs. Each bundle is evaluated with the bundles it depends on:
+      those the manifest lists and those that hold the external files it names.
+      When all of them hold the same content as in an earlier run, the result
+      that run recorded is taken instead, so only the bundles of changed units
+      are fetched, and the publications are patched where those units changed
+      them. Content is the hash the manifest declares, or else the bytes, which
+      are fetched to compare; --force evaluates every bundle again and records
+      the results anew. One run per site goes at a time. A run puts every new
+      object at the site before the records and the state that name it, and
+      those before the pointers of the views, so an interrupted run leaves the
+      last version in place. An object missing from <output>/store is read back
+      from the bucket; --verify first lists the bucket's store, uploads every
+      object the version needs that it lacks, and stops when one is in neither
+      the bucket nor <output>/store. An asset built from tables is kept when
+      what it read gives what it gave in the last run; --rebuild-tables builds
+      every one again. --only selects bundles by name prefix, with
+      their dependencies. A selection is neither recorded as a version nor sent
+      to a bucket; it publishes under <output>/published and needs an <output>
+      without a complete run. --check only looks up the current version and
+      prints whether it differs from the last one the site recorded. It exits
+      with 0 when the version is unchanged and 1 when it changed, downloads and
+      writes nothing, and cannot be combined with --force, --verify,
+      --rebuild-tables or --only.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

@@ -9,7 +9,9 @@ mod rules;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use sekai_convert::tables::{AssetEntry, TableAsset, TableContext, TableConverter, TablePlan};
+use sekai_convert::tables::{
+    AssetEntry, Shared, SharedEntries, TableAsset, TableContext, TableConverter, TablePlan,
+};
 use sekai_convert::{Asset, Content, ConvertError, Member};
 use sekai_format::audio::CueTable;
 use sekai_format::episode::{
@@ -17,6 +19,7 @@ use sekai_format::episode::{
     Warning, WarningKind,
 };
 use sekai_format::story::{ActionSet, ScenarioBackground};
+use serde::Serialize;
 use serde_json::Value;
 
 use catalog::{AreaSource, Character2d, Costume2d, Row};
@@ -50,24 +53,27 @@ impl TableConverter for Episode {
         2
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         let catalog = catalog::load(cx)?;
-        let entries: Vec<Entry> = catalog
+        let located = catalog
             .rows
             .into_iter()
-            .filter_map(|row| Entry::locate(cx, row))
-            .collect();
-        let library = Library {
-            cx,
-            cue_tables: Cache::default(),
-            motions: Cache::default(),
-        };
+            .filter_map(|row| Entry::locate(cx, row));
+        let mut entries = BTreeMap::new();
+        for entry in located {
+            let name = entry.asset_name();
+            if entries.contains_key(&name) {
+                return Err(malformed(format!("two episodes are named {name}")));
+            }
+            entries.insert(name, entry);
+        }
+        let library = Library::default();
         Ok(Box::new(Plan {
-            names: entries.iter().map(Entry::asset_name).collect(),
-            part_voices: library.part_voice_index()?,
-            entries,
-            character2ds: catalog.character2ds,
-            costume2ds: catalog.costume2ds,
+            names: entries.keys().cloned().collect(),
+            part_voices: Shared::new("part_voices", library.part_voice_index(cx)?),
+            entries: Shared::new("entries", entries),
+            character2ds: Shared::new("character2ds", catalog.character2ds),
+            costume2ds: Shared::new("costume2ds", catalog.costume2ds),
             library,
         }))
     }
@@ -88,6 +94,7 @@ fn malformed(e: impl std::fmt::Display) -> ConvertError {
 }
 
 /// An episode whose scene data the version holds.
+#[derive(Serialize)]
 struct Entry {
     row: Row,
     scenario: String,
@@ -114,9 +121,10 @@ impl Entry {
     }
 }
 
-/// The assets of the version, with what is read from them kept for the other episodes.
-struct Library<'a> {
-    cx: &'a dyn TableContext,
+/// What is read from the assets of the version, kept for the other episodes by the identity of
+/// the asset, so that an episode that finds it kept still reads that identity.
+#[derive(Default)]
+struct Library {
     cue_tables: Cache<CueTable>,
     motions: Cache<MotionIndex>,
 }
@@ -136,18 +144,22 @@ fn cached<T>(
     Ok(value)
 }
 
-impl Library<'_> {
-    fn cue_table(&self, asset: &str) -> Result<Arc<CueTable>, ConvertError> {
-        cached(&self.cue_tables, asset, || {
-            CueTable::from_bytes(&self.cx.member(asset, "cues")?).map_err(malformed)
+impl Library {
+    fn cue_table(&self, cx: &dyn TableContext, asset: &str) -> Result<Arc<CueTable>, ConvertError> {
+        cached(&self.cue_tables, &cx.identity(asset)?, || {
+            CueTable::from_bytes(&cx.member(asset, "cues")?).map_err(malformed)
         })
     }
 
-    fn motion_index(&self, asset: &str) -> Result<Arc<MotionIndex>, ConvertError> {
-        cached(&self.motions, asset, || {
+    fn motion_index(
+        &self,
+        cx: &dyn TableContext,
+        asset: &str,
+    ) -> Result<Arc<MotionIndex>, ConvertError> {
+        cached(&self.motions, &cx.identity(asset)?, || {
             let mut index = MotionIndex::new();
             // Body motions come before facial motions in a document, so a body motion wins.
-            for member in self.cx.document(asset)?.members {
+            for member in cx.document(asset)?.members {
                 let name = member
                     .role
                     .strip_prefix("motion/")
@@ -163,14 +175,17 @@ impl Library<'_> {
     }
 
     /// Cue name to the part voice bundles that hold it, in name order.
-    fn part_voice_index(&self) -> Result<BTreeMap<String, Vec<String>>, ConvertError> {
+    fn part_voice_index(
+        &self,
+        cx: &dyn TableContext,
+    ) -> Result<BTreeMap<String, Vec<String>>, ConvertError> {
         let mut index: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for bundle in self.cx.bundles() {
+        for bundle in cx.bundles() {
             if !rules::is_part_voice_bundle(bundle) {
                 continue;
             }
-            for entry in of_form(self.cx.assets(bundle), AUDIO) {
-                for cue in &self.cue_table(&entry.name)?.cues {
+            for entry in of_form(cx.assets(bundle), AUDIO) {
+                for cue in &self.cue_table(cx, &entry.name)?.cues {
                     let holders = index.entry(cue.name.clone()).or_default();
                     if !holders.iter().any(|known| known == bundle) {
                         holders.push(bundle.to_owned());
@@ -182,19 +197,22 @@ impl Library<'_> {
     }
 }
 
-struct Plan<'a> {
-    library: Library<'a>,
+/// The episodes of a version. An episode reads the plan only through its shared maps.
+struct Plan {
+    library: Library,
     names: Vec<String>,
-    entries: Vec<Entry>,
-    character2ds: BTreeMap<i64, Character2d>,
-    costume2ds: BTreeMap<i64, Vec<Costume2d>>,
-    part_voices: BTreeMap<String, Vec<String>>,
+    /// The episode of each asset name.
+    entries: Shared<String, Entry>,
+    character2ds: Shared<i64, Character2d>,
+    costume2ds: Shared<i64, Vec<Costume2d>>,
+    /// Cue name to the part voice bundles that hold it.
+    part_voices: Shared<String, Vec<String>>,
 }
 
-impl Plan<'_> {
-    /// The part voice bundle of what `character` says.
-    fn part_voice_bundle(&self, character: i64) -> Option<String> {
-        let row = self.character2ds.get(&character)?;
+impl Plan {
+    /// The part voice bundle of what `character` says, for the episode that `cx` builds.
+    fn part_voice_bundle(&self, cx: &dyn TableContext, character: i64) -> Option<String> {
+        let row = self.character2ds.get(&character, cx)?;
         Some(rules::part_voice_bundle(
             row.asset_name.as_ref()?,
             row.unit.as_ref()?,
@@ -202,31 +220,50 @@ impl Plan<'_> {
     }
 }
 
-impl TablePlan for Plan<'_> {
+impl TablePlan for Plan {
     fn names(&self) -> &[String] {
         &self.names
     }
 
-    fn convert(&self, index: usize) -> Result<TableAsset, ConvertError> {
+    fn convert(&self, index: usize, cx: &dyn TableContext) -> Result<TableAsset, ConvertError> {
+        let name = &self.names[index];
+        let entry = self.entries.get(name, cx).ok_or_else(|| {
+            ConvertError::new("missing_asset", format!("the plan has no episode {name}"))
+        })?;
         Builder {
             plan: self,
-            entry: &self.entries[index],
+            cx,
+            entry,
             warnings: Vec::new(),
             references: BTreeSet::new(),
         }
         .build()
     }
+
+    fn reusable(&self) -> bool {
+        true
+    }
+
+    fn shared(&self) -> Vec<&dyn SharedEntries> {
+        vec![
+            &self.entries,
+            &self.character2ds,
+            &self.costume2ds,
+            &self.part_voices,
+        ]
+    }
 }
 
 /// One episode being built.
-struct Builder<'p, 'a> {
-    plan: &'p Plan<'a>,
+struct Builder<'p> {
+    plan: &'p Plan,
+    cx: &'p dyn TableContext,
     entry: &'p Entry,
     warnings: Vec<Warning>,
     references: BTreeSet<String>,
 }
 
-impl<'p> Builder<'p, '_> {
+impl<'p> Builder<'p> {
     fn build(mut self) -> Result<TableAsset, ConvertError> {
         let entry = self.entry;
         let area = entry.row.area.as_ref();
@@ -274,11 +311,7 @@ impl<'p> Builder<'p, '_> {
     }
 
     fn scene(&self) -> Result<Value, ConvertError> {
-        let bytes = self
-            .plan
-            .library
-            .cx
-            .member(&self.entry.scenario, SCENARIO)?;
+        let bytes = self.cx.member(&self.entry.scenario, SCENARIO)?;
         let scene: Value = serde_json::from_slice(&bytes).map_err(malformed)?;
         if scene.is_object() {
             Ok(scene)
@@ -288,7 +321,7 @@ impl<'p> Builder<'p, '_> {
     }
 
     fn assets(&self, bundle: &str) -> &'p [AssetEntry] {
-        self.plan.library.cx.assets(bundle)
+        self.cx.assets(bundle)
     }
 
     fn warn(&mut self, kind: WarningKind, detail: String) {
@@ -363,7 +396,10 @@ impl<'p> Builder<'p, '_> {
                 self.warn(WarningKind::MotionNotFound, detail);
             }
         }
-        let row = self.plan.character2ds.get(&rules::table_character(refs.id));
+        let row = self
+            .plan
+            .character2ds
+            .get(&rules::table_character(refs.id), self.cx);
         Ok(Character {
             asset_name: row.and_then(|row| row.asset_name.clone()),
             motion_set,
@@ -393,8 +429,8 @@ impl<'p> Builder<'p, '_> {
         group: i64,
         motion_set: Option<&str>,
     ) -> Result<Vec<AreaCostume>, ConvertError> {
-        let plan = self.plan;
-        let rows = plan.costume2ds.get(&refs.id).into_iter().flatten();
+        let rows = self.plan.costume2ds.get(&refs.id, self.cx);
+        let rows = rows.into_iter().flatten();
         rows.filter(|row| row.group == group)
             .map(|row| {
                 let model = row.model.as_deref().and_then(|m| self.model(m, refs.id));
@@ -424,7 +460,7 @@ impl<'p> Builder<'p, '_> {
             self.warn(WarningKind::AssetMissing, detail);
             return Ok(BTreeMap::new());
         };
-        let bytes = self.plan.library.cx.member(&entry.name, ACTION_SET)?;
+        let bytes = self.cx.member(&entry.name, ACTION_SET)?;
         let mut groups = BTreeMap::new();
         for detail in ActionSet::from_bytes(&bytes).map_err(malformed)?.details {
             groups
@@ -445,7 +481,8 @@ impl<'p> Builder<'p, '_> {
     }
 
     fn motion_set(&mut self, id: i64) -> Option<String> {
-        let Some(row) = self.plan.character2ds.get(&rules::table_character(id)) else {
+        let table_character = rules::table_character(id);
+        let Some(row) = self.plan.character2ds.get(&table_character, self.cx) else {
             let detail = format!("Character2dId {id} is not in character2ds");
             self.warn(WarningKind::TableMismatch, detail);
             return None;
@@ -474,7 +511,7 @@ impl<'p> Builder<'p, '_> {
         let sources = [model, motion_set]
             .into_iter()
             .flatten()
-            .map(|asset| Ok((asset, self.plan.library.motion_index(asset)?)))
+            .map(|asset| Ok((asset, self.plan.library.motion_index(self.cx, asset)?)))
             .collect::<Result<Vec<_>, ConvertError>>()?;
         let found = names.iter().filter_map(|name| {
             let key = name.to_lowercase();
@@ -586,11 +623,7 @@ impl<'p> Builder<'p, '_> {
         let mut movies = Vec::new();
         for bundle in bundles {
             for entry in of_form(self.assets(bundle), SCENARIO_BACKGROUND) {
-                let bytes = self
-                    .plan
-                    .library
-                    .cx
-                    .member(&entry.name, SCENARIO_BACKGROUND)?;
+                let bytes = self.cx.member(&entry.name, SCENARIO_BACKGROUND)?;
                 movies.extend(
                     ScenarioBackground::from_bytes(&bytes)
                         .map_err(malformed)?
@@ -644,22 +677,17 @@ impl<'p> Builder<'p, '_> {
     }
 
     fn voices(&mut self, refs: &References) -> Result<BTreeMap<String, Sound>, ConvertError> {
-        let plan = self.plan;
+        let (plan, cx) = (self.plan, self.cx);
         let own = rules::voice_bundle(&self.entry.bundle, &self.entry.row.story.scenario_id);
         let mut planned = SearchPlan::new();
         for voice in &refs.voices {
             let candidates = planned.entry(&voice.id).or_default();
             candidates.push(own.clone());
             if rules::is_part_voice(&voice.id) {
-                candidates.extend(plan.part_voice_bundle(voice.character));
+                candidates.extend(plan.part_voice_bundle(cx, voice.character));
             }
-            candidates.extend(
-                plan.part_voices
-                    .get(&voice.id)
-                    .into_iter()
-                    .flatten()
-                    .cloned(),
-            );
+            let holders = plan.part_voices.get(&voice.id, cx);
+            candidates.extend(holders.into_iter().flatten().cloned());
         }
         self.sounds(planned, "voice")
     }
@@ -699,7 +727,7 @@ impl<'p> Builder<'p, '_> {
             let mut assets: Vec<&AssetEntry> = of_form(self.assets(bundle), AUDIO).collect();
             assets.sort_by_key(|entry| !stem(&entry.name).eq_ignore_ascii_case(scenario_id));
             for entry in assets {
-                let table = self.plan.library.cue_table(&entry.name)?;
+                let table = self.plan.library.cue_table(self.cx, &entry.name)?;
                 if let Some(found) = table.cues.iter().find(|known| known.name == cue) {
                     return Ok(Some(Sound {
                         asset: self.refer(&entry.name),

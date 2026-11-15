@@ -273,6 +273,21 @@ pub fn indexed_files(
     }))
 }
 
+/// The index of the bundle `name` whose bytes have the SHA-256 `bundle`, from its stored index,
+/// when `indexes` holds one.
+pub fn indexed_bundle(
+    name: &str,
+    bundle: &[u8; 32],
+    indexes: &dyn BundleIndexes,
+) -> io::Result<Option<BundleIndex>> {
+    let record = indexes.get(bundle)?;
+    let record = record.as_deref().and_then(IndexRecord::decode);
+    Ok(record.map(|record| BundleIndex {
+        name: name.to_owned(),
+        files: record.files,
+    }))
+}
+
 fn external_paths(externals: Vec<sekai_unity::serialized::External>) -> Vec<String> {
     externals
         .into_iter()

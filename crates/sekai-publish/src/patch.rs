@@ -6,32 +6,45 @@
 //! kept. A publication from nothing is a change from an empty previous one, so both are written by
 //! the same code and give the same documents.
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex, PoisonError};
 
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use sekai_catalog::{Key, LocalStore, Store};
 use sekai_format::chunks::{self, Patched, Row};
+use sekai_format::directory_tree::{self, DirectoryTree, TreeFile};
 use sekai_format::paths::{self, Chunk, ChunkReference, PathFile, PathIndex};
 use sekai_format::publication::{
     AssetFailure, IndexChunk, IndexEntry, IndexRoot, IndexShard, ListingEntry, ListingTable,
-    Pointer, ShardReference, TableChunk, VERSION,
+    Pointer, ShardReference, TableChunk, TreeReference, VERSION,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::layout::{Layout, Object, Publication};
-use crate::plan::{Contribution, File, Plan, PublishError, hex};
+use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path, hex};
 
 const JSON: &str = "application/json";
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
 
-/// What a change does at a path: the file of an asset it removes, and the file it adds.
+/// What a change does at a path: whether it removes the file there, and the file it adds.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PathEdit {
-    removed: Option<String>,
+    removed: Option<Owner>,
     added: Option<File>,
+}
+
+/// The asset whose file a change removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Owner {
+    /// The file is one of this asset, which the previous publication must confirm.
+    Asset(String),
+    /// The file is whatever the previous publication has at the path.
+    Any,
 }
 
 /// A change to a publication: the files, listing entries and failures of the assets it removes
@@ -49,7 +62,7 @@ impl Change {
     pub(crate) fn remove(&mut self, asset: &Contribution) {
         for file in &asset.files {
             let edit = self.paths.entry(file.path.clone()).or_default();
-            edit.removed = Some(asset.asset.name.clone());
+            edit.removed = Some(Owner::Asset(asset.asset.name.clone()));
         }
         let name = asset.asset.name.clone();
         match &asset.outcome {
@@ -65,11 +78,7 @@ impl Change {
     /// Adds what `asset` contributes. Fails if another added asset has a file at the same path.
     pub(crate) fn add(&mut self, asset: Contribution) -> Result<(), PublishError> {
         for file in asset.files {
-            let edit = self.paths.entry(file.path.clone()).or_default();
-            if edit.added.is_some() {
-                return Err(two_files(&file.path));
-            }
-            edit.added = Some(file);
+            self.add_file(file)?;
         }
         let name = asset.asset.name;
         match asset.outcome {
@@ -80,6 +89,23 @@ impl Change {
                 self.failures.insert(name, Some(failure));
             }
         }
+        Ok(())
+    }
+
+    /// Removes the file at `path`, whichever asset it belongs to, from a view whose assets are
+    /// neither listed nor failed, such as the storage view.
+    pub fn remove_file(&mut self, path: &str) {
+        self.paths.entry(path.to_owned()).or_default().removed = Some(Owner::Any);
+    }
+
+    /// Adds `file` to a view whose assets are neither listed nor failed. Fails if the change adds
+    /// another file at its path.
+    pub fn add_file(&mut self, file: File) -> Result<(), PublishError> {
+        let edit = self.paths.entry(file.path.clone()).or_default();
+        if edit.added.is_some() {
+            return Err(two_files(&file.path));
+        }
+        edit.added = Some(file);
         Ok(())
     }
 
@@ -124,6 +150,8 @@ pub struct Previous {
     pub index: Option<IndexRoot>,
     /// The root of the path index.
     pub paths: Option<PathIndex>,
+    /// The directory tree, which is read when a change needs it.
+    pub tree: Option<TreeReference>,
 }
 
 impl Previous {
@@ -144,7 +172,77 @@ impl Previous {
                 PathIndex::from_bytes(&read(root)?).map_err(|e| PublishError::new("previous", e))
             })
             .transpose()?;
-        Ok(Self { index, paths })
+        let tree = pointer.tree.clone();
+        Ok(Self { index, paths, tree })
+    }
+
+    /// The files of the publication, looked up in the chunks of its path index, which are read
+    /// from `store` as the lookups need them and kept.
+    pub fn lookup<'s>(&self, store: &'s dyn Store) -> Lookup<'s> {
+        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
+        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        Lookup(Table::new(store, firsts, read_paths))
+    }
+}
+
+/// The files of a previous publication, by path. Each chunk of its path index is read once, when
+/// a lookup first needs it, and lookups may run on several threads at once.
+pub struct Lookup<'a>(Table<'a, PathFile>);
+
+impl Lookup<'_> {
+    /// The file at `path`, if the publication has one.
+    pub fn file(&self, path: &str) -> Result<Option<PathFile>, PublishError> {
+        self.0.get(path)
+    }
+
+    /// The asset document of the asset `name`, if the publication has the asset.
+    pub fn document(&self, name: &str) -> Result<Option<Key>, PublishError> {
+        let file = self.file(&document_path(name))?;
+        Ok(file.map(|file| Key {
+            sha256: file.sha256,
+            extension: file.extension,
+        }))
+    }
+
+    /// The asset document of each asset of `names` that the publication has, in name order.
+    pub fn bindings<'n>(
+        &self,
+        names: impl IntoIterator<Item = &'n str>,
+    ) -> Result<Vec<Binding>, PublishError> {
+        let mut names: Vec<&str> = names.into_iter().collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut bindings = Vec::with_capacity(names.len());
+        for name in names {
+            if let Some(document) = self.document(name)? {
+                let name = name.to_owned();
+                bindings.push(Binding { name, document });
+            }
+        }
+        Ok(bindings)
+    }
+
+    /// The files directly in `directory`, in path order: those at `<directory>/<file>`, where the
+    /// file has no `/`. Only the chunks that hold such paths are read.
+    pub fn directory(&self, directory: &str) -> Result<Vec<PathFile>, PublishError> {
+        let table = &self.0;
+        let prefix = format!("{directory}/");
+        // Every path in the directory sorts before this, since `0` follows `/`.
+        let after = format!("{directory}0");
+        let start = table.chunk_of(&prefix).unwrap_or(0);
+        let mut files = Vec::new();
+        for position in start..table.chunks.len() {
+            if position > start && table.chunks[position].0 >= after {
+                break;
+            }
+            let rows = table.rows(position)?;
+            let inside = rows.iter().filter(|file| {
+                let file_name = file.path.strip_prefix(&prefix);
+                file_name.is_some_and(|name| !name.contains('/'))
+            });
+            files.extend(inside.cloned());
+        }
+        Ok(files)
     }
 }
 
@@ -188,6 +286,23 @@ impl Written<'_> {
         let bytes = serde_json::to_vec(document).map_err(|e| PublishError::new("documents", e))?;
         self.put(&bytes, "json", JSON)
     }
+
+    /// Stores `tree` gzip-compressed and returns the reference a pointer names it by.
+    fn put_tree(&mut self, tree: &DirectoryTree) -> Result<TreeReference, PublishError> {
+        let json = serde_json::to_vec(tree).map_err(|e| PublishError::new("documents", e))?;
+        let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
+        let bytes = gzip
+            .write_all(&json)
+            .and_then(|()| gzip.finish())
+            .map_err(PublishError::wrap("documents"))?;
+        let sha256 = self.put(
+            &bytes,
+            directory_tree::EXTENSION,
+            directory_tree::MEDIA_TYPE,
+        )?;
+        let size = bytes.len() as u64;
+        Ok(TreeReference { sha256, size })
+    }
 }
 
 /// Reads the rows of the chunk object named by a SHA-256 from a store.
@@ -199,7 +314,7 @@ struct Table<'a, R> {
     /// The first key and the object of each chunk.
     chunks: Vec<(String, String)>,
     read: ReadChunk<R>,
-    loaded: RefCell<HashMap<usize, Rc<Vec<R>>>>,
+    loaded: Mutex<HashMap<usize, Arc<Vec<R>>>>,
 }
 
 impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
@@ -212,25 +327,34 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
             store,
             chunks: chunks.collect(),
             read,
-            loaded: RefCell::default(),
+            loaded: Mutex::default(),
         }
     }
 
-    fn rows(&self, position: usize) -> Result<Rc<Vec<R>>, PublishError> {
-        if let Some(rows) = self.loaded.borrow().get(&position) {
-            return Ok(Rc::clone(rows));
+    /// The rows of the chunk at `position`, read once. Two threads that ask at once may both read
+    /// it, and keep the same rows.
+    fn rows(&self, position: usize) -> Result<Arc<Vec<R>>, PublishError> {
+        let loaded = || self.loaded.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(rows) = loaded().get(&position) {
+            return Ok(Arc::clone(rows));
         }
-        let rows = Rc::new((self.read)(self.store, &self.chunks[position].1)?);
-        self.loaded.borrow_mut().insert(position, Rc::clone(&rows));
+        let rows = Arc::new((self.read)(self.store, &self.chunks[position].1)?);
+        loaded().insert(position, Arc::clone(&rows));
         Ok(rows)
+    }
+
+    /// The position of the chunk that holds `key` if any chunk does, which is the last chunk
+    /// whose first key is not after it.
+    fn chunk_of(&self, key: &str) -> Option<usize> {
+        let after = self
+            .chunks
+            .partition_point(|(first, _)| first.as_str() <= key);
+        after.checked_sub(1)
     }
 
     /// The row of `key`.
     fn get(&self, key: &str) -> Result<Option<R>, PublishError> {
-        let position = self
-            .chunks
-            .partition_point(|(first, _)| first.as_str() <= key);
-        let Some(position) = position.checked_sub(1) else {
+        let Some(position) = self.chunk_of(key) else {
             return Ok(None);
         };
         let rows = self.rows(position)?;
@@ -241,7 +365,7 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
     /// The chunks of the table after `edits`.
     fn patch(&self, edits: BTreeMap<String, Option<R>>) -> Result<Vec<Patched<R>>, PublishError> {
         let firsts: Vec<String> = self.chunks.iter().map(|(first, _)| first.clone()).collect();
-        let load = |position| self.rows(position).map(Rc::unwrap_or_clone);
+        let load = |position| self.rows(position).map(Arc::unwrap_or_clone);
         chunks::patch(&firsts, load, edits)
     }
 }
@@ -281,9 +405,14 @@ pub fn apply(
             Some(index_tables(store, &mut written, previous, edits)?)
         }
     };
-    let (paths, files) = path_chunks(store, &mut written, previous.paths.as_ref(), &edits)?;
+    let changes = PathChanges::new(store, previous.paths.as_ref(), &edits)?;
+    let tree_files = changes.tree_files(previous.tree.as_ref())?;
+    let (paths, files) = changes.chunks(&mut written)?;
     let failures = tables.as_ref().map_or(&[][..], |t| &t.failures);
     let revision = revision(version, &paths, failures);
+    let tree = DirectoryTree::new(view, version, &revision, tree_files)
+        .map_err(|e| PublishError::new("documents", e))?;
+    let tree = written.put_tree(&tree)?;
 
     let paths = written.put_json(&PathIndex {
         format: "path-index".to_owned(),
@@ -323,8 +452,8 @@ pub fn apply(
             published_version: version.to_owned(),
             revision,
             root,
-            sqlite: None,
             paths: Some(paths),
+            tree: Some(tree),
         },
         objects,
     })
@@ -343,36 +472,96 @@ fn revision(version: &str, paths: &[ChunkReference], failures: &[TableChunk]) ->
     hex(&Sha256::digest(text.as_bytes()))
 }
 
-/// The chunks of the path index after `change`, and the number of paths.
-fn path_chunks(
-    store: &dyn Store,
-    written: &mut Written<'_>,
-    previous: Option<&PathIndex>,
-    edits: &BTreeMap<String, PathEdit>,
-) -> Result<(Vec<ChunkReference>, u64), PublishError> {
-    let old = previous.map_or(&[][..], |index| index.chunks.as_slice());
-    let firsts = old.iter().map(|c| (c.first.clone(), c.sha256.clone()));
-    let table = Table::new(store, firsts, read_paths);
-    let mut rows = BTreeMap::new();
-    for (path, edit) in edits {
-        if edit.removed.is_none() && edit.added.is_some() && table.get(path)?.is_some() {
-            return Err(two_files(path));
+/// The path index of the previous publication and what a change does to its paths.
+struct PathChanges<'a> {
+    store: &'a dyn Store,
+    /// The chunks of the previous index.
+    old: &'a [ChunkReference],
+    table: Table<'a, PathFile>,
+    /// The file at each path the change edits, or `None` where it removes the file.
+    rows: BTreeMap<String, Option<PathFile>>,
+}
+
+impl<'a> PathChanges<'a> {
+    /// The changes that `edits` make to `previous`, the path index of the previous publication.
+    /// Fails if a file is added at a path that the change does not free.
+    fn new(
+        store: &'a dyn Store,
+        previous: Option<&'a PathIndex>,
+        edits: &BTreeMap<String, PathEdit>,
+    ) -> Result<Self, PublishError> {
+        let old = previous.map_or(&[][..], |index| index.chunks.as_slice());
+        let firsts = old.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        let table = Table::new(store, firsts, read_paths);
+        let mut rows = BTreeMap::new();
+        for (path, edit) in edits {
+            if edit.removed.is_none() && edit.added.is_some() && table.get(path)?.is_some() {
+                return Err(two_files(path));
+            }
+            rows.insert(path.clone(), edit.added.as_ref().map(path_file));
         }
-        rows.insert(path.clone(), edit.added.as_ref().map(path_file));
+        Ok(Self {
+            store,
+            old,
+            table,
+            rows,
+        })
     }
-    let mut chunks = Vec::new();
-    for chunk in table.patch(rows)? {
-        chunks.push(match chunk {
-            Patched::Kept(position) => old[position].clone(),
-            Patched::New(files) => ChunkReference {
-                first: files[0].path.clone(),
-                sha256: written.put(&Chunk::encode(&files), "paths", CHUNK_MEDIA_TYPE)?,
-                files: files.len() as u64,
-            },
-        });
+
+    /// The files of the publication after the change, in path order: those of `previous`, the
+    /// directory tree of the previous publication, with the edits applied. Without a tree, they
+    /// are read from every chunk of the previous path index.
+    fn tree_files(&self, previous: Option<&TreeReference>) -> Result<Vec<TreeFile>, PublishError> {
+        let before = match previous {
+            Some(tree) => read_tree(self.store, tree)?,
+            None => self.files()?,
+        };
+        let kept = before
+            .into_iter()
+            .filter(|file| !self.rows.contains_key(&file.path));
+        let added = self.rows.values().flatten().map(TreeFile::from);
+        let mut files: Vec<TreeFile> = kept.chain(added).collect();
+        files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
     }
-    let files = chunks.iter().map(|chunk| chunk.files).sum();
-    Ok((chunks, files))
+
+    /// Every file of the previous path index.
+    fn files(&self) -> Result<Vec<TreeFile>, PublishError> {
+        let mut files = Vec::new();
+        for position in 0..self.old.len() {
+            files.extend(self.table.rows(position)?.iter().map(TreeFile::from));
+        }
+        Ok(files)
+    }
+
+    /// The chunks of the path index after the change, and the number of paths.
+    fn chunks(self, written: &mut Written<'_>) -> Result<(Vec<ChunkReference>, u64), PublishError> {
+        let mut chunks = Vec::new();
+        for chunk in self.table.patch(self.rows)? {
+            chunks.push(match chunk {
+                Patched::Kept(position) => self.old[position].clone(),
+                Patched::New(files) => ChunkReference {
+                    first: files[0].path.clone(),
+                    sha256: written.put(&Chunk::encode(&files), "paths", CHUNK_MEDIA_TYPE)?,
+                    files: files.len() as u64,
+                },
+            });
+        }
+        let files = chunks.iter().map(|chunk| chunk.files).sum();
+        Ok((chunks, files))
+    }
+}
+
+/// The files of the directory tree `tree`, read from `store`.
+fn read_tree(store: &dyn Store, tree: &TreeReference) -> Result<Vec<TreeFile>, PublishError> {
+    let bytes = read_object(store, &tree.sha256, directory_tree::EXTENSION)?;
+    let mut json = Vec::new();
+    GzDecoder::new(bytes.as_slice())
+        .read_to_end(&mut json)
+        .map_err(PublishError::wrap("previous"))?;
+    DirectoryTree::from_json(&json)
+        .and_then(|tree| tree.files())
+        .map_err(|e| PublishError::new("previous", e))
 }
 
 fn read_paths(store: &dyn Store, sha256: &str) -> Result<Vec<PathFile>, PublishError> {
@@ -527,9 +716,16 @@ fn shard_edits(
         for (path, edit) in changes {
             let name = split(path).1;
             match (entries.remove(name), &edit.removed) {
-                (Some(entry), Some(owner)) if entry.asset == *owner => {}
+                (Some(_), Some(Owner::Any)) => {}
+                (Some(entry), Some(Owner::Asset(owner))) if entry.asset == *owner => {}
                 (Some(_), None) => return Err(two_files(path)),
-                (found, Some(owner)) => {
+                (None, Some(Owner::Any)) => {
+                    return Err(PublishError::new(
+                        "previous",
+                        format!("{path} holds no file to remove"),
+                    ));
+                }
+                (found, Some(Owner::Asset(owner))) => {
                     let found = found.map_or("nothing".to_owned(), |entry| entry.asset);
                     return Err(PublishError::new(
                         "previous",

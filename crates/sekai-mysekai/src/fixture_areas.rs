@@ -83,11 +83,11 @@ impl TableConverter for FixtureAreas {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if meta_assets(cx).next().is_none() {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 
@@ -105,10 +105,12 @@ fn meta_assets<'c>(cx: &'c dyn TableContext) -> impl Iterator<Item = (&'c str, &
 }
 
 fn build(cx: &dyn TableContext) -> Result<Asset, ConvertError> {
+    let metas: Vec<(&str, &str)> = meta_assets(cx).collect();
+    let assets: Vec<&str> = metas.iter().map(|(_, asset)| *asset).collect();
     let mut packages = Map::new();
-    for (package, asset) in meta_assets(cx) {
-        let meta: Json = serde_json::from_slice(&cx.member(asset, DOCUMENT)?)
-            .map_err(|e| malformed(format!("{asset}: {e}")))?;
+    for ((package, asset), bytes) in metas.into_iter().zip(cx.members(&assets, DOCUMENT)) {
+        let meta: Json =
+            serde_json::from_slice(&bytes?).map_err(|e| malformed(format!("{asset}: {e}")))?;
         packages.insert(package.to_owned(), meta);
     }
     document(&json!({ "packages": packages }))
@@ -184,7 +186,7 @@ mod tests {
         let plan = FixtureAreas.plan(&version).unwrap();
         assert_eq!(plan.names(), [NAME]);
         assert_eq!(
-            json_of(&plan.convert(0).unwrap().asset),
+            json_of(&plan.convert(0, &version).unwrap().asset),
             json!({"packages": {"a": {"motionArea": []}, "b": {"motionArea": [[true]]}}})
         );
     }

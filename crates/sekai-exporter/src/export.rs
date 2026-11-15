@@ -337,7 +337,7 @@ fn walk(directory: &Path, prefix: &str, out: &mut Vec<Entry>) -> io::Result<()> 
             out.push(Entry {
                 name,
                 size: metadata.len(),
-                content: String::new(),
+                content: None,
                 dependencies: Vec::new(),
             });
         }
@@ -409,7 +409,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Destination {
             output: &options.output,
             tree: options.tree.as_deref(),
-            layout: Layout::Sqlite,
+            layout: Layout::Index,
         },
         &Objects::local(&store),
         options.threads,

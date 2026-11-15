@@ -43,7 +43,7 @@
 
 `costume` 产出 `costume-model` 与 `costume-motion` 两种形式，并由游戏数据表产出 `costume-role` 形式（每个角色在每个单元一份，含其可穿戴的全部部件）和 `costume` 形式（每套服装的各个造型）。
 
-[storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建会拒绝 `update --storage`，并且不会以 `not_compiled` 报告任何资产。
+[storage 视图](publishing.zh-CN.md#storage-视图)是视图而非转换器，不写出任何资产。不含 `storage-view` 的构建不发布 storage 视图，并且不会以 `not_compiled` 报告任何资产。
 
 `sekai-mysekai` 中只有 `mysekai` 一个 feature，按复刻游戏的运行时所需的完整形式产出 MySekai 的各种形式：[家具模型](spec/fixture-model.zh-CN.md)与[场地模型](spec/site-model.zh-CN.md)、家具与站点文档、角色动作与对话、场地相机，每种在[规格](spec/README.zh-CN.md)中各有一页。不含它的构建会把其对象形式的根以 `not_compiled` 报告。
 

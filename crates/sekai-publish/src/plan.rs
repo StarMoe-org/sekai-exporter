@@ -111,6 +111,11 @@ pub struct Plan {
     pub failures: Vec<AssetFailure>,
 }
 
+/// The path of the asset document of the asset `name`.
+pub(crate) fn document_path(name: &str) -> String {
+    format!("{name}.asset.json")
+}
+
 pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -146,7 +151,7 @@ pub(crate) struct Contribution {
 fn contribution(store: &dyn Store, binding: &Binding) -> Result<Contribution, PublishError> {
     let (document, size) = read(store, &binding.name, &binding.document)?;
     let mut files = vec![File {
-        path: format!("{}.asset.json", binding.name),
+        path: document_path(&binding.name),
         key: binding.document.clone(),
         size,
         media_type: "application/json".to_owned(),

@@ -108,11 +108,11 @@ impl TableConverter for Emoticons {
         1
     }
 
-    fn plan<'a>(&self, cx: &'a dyn TableContext) -> Result<Box<dyn TablePlan + 'a>, ConvertError> {
+    fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         if item_assets(cx).next().is_none() {
             return Ok(Box::new(NoAssets));
         }
-        Ok(Box::new(OneAsset::new(NAME, move || build(cx))))
+        Ok(Box::new(OneAsset::new(NAME, build)))
     }
 }
 
@@ -131,12 +131,13 @@ fn item_assets<'c>(cx: &'c dyn TableContext) -> impl Iterator<Item = (&'c str, &
 }
 
 fn build(cx: &dyn TableContext) -> Result<Asset, ConvertError> {
+    let found: Vec<(&str, &str)> = item_assets(cx).collect();
+    let assets: Vec<&str> = found.iter().map(|(_, asset)| *asset).collect();
     let mut items = Map::new();
     let mut unsupported = Vec::new();
-    for (item, asset) in item_assets(cx) {
-        let bytes = cx.member(asset, DOCUMENT)?;
+    for ((item, asset), bytes) in found.into_iter().zip(cx.members(&assets, DOCUMENT)) {
         let document: Json =
-            serde_json::from_slice(&bytes).map_err(|e| malformed(format!("{asset}: {e}")))?;
+            serde_json::from_slice(&bytes?).map_err(|e| malformed(format!("{asset}: {e}")))?;
         if let Some(gaps) = document["unsupported"].as_array() {
             unsupported.extend(gaps.iter().cloned());
         }

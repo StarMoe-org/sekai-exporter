@@ -1,8 +1,10 @@
 //! Lookups: the reads that answer a request, and what a resolver remembers between requests.
 //!
 //! A lookup is a short sequence of reads that the host makes: the pointer of the view, the root
-//! of the path index the pointer names, and the chunk of the index that holds the path. The
-//! resolver remembers what the reads gave, within fixed limits, so most lookups read nothing.
+//! of the path index the pointer names, and the chunk of the index that holds the path, or, for a
+//! directory, each chunk in which a file or a subdirectory of it starts. The directory tree of a
+//! view needs only the pointer, which names it. The resolver remembers what the reads gave,
+//! within fixed limits, so most lookups read nothing.
 
 use std::fmt;
 use std::mem::size_of;
@@ -14,8 +16,9 @@ use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 
 use crate::cache::Lru;
+use crate::listing::{self, Listed, Listing};
 use crate::response::{ObjectId, Request, Response};
-use crate::routes::{Routes, Target};
+use crate::routes::{Entry, Routes, Target};
 
 /// The longest URL path the resolver looks at, in bytes.
 const MAX_PATH_BYTES: usize = 8 << 10;
@@ -137,7 +140,7 @@ pub struct Pending<'a> {
 /// The resolver of the paths of published views: it answers requests from what its host reads.
 ///
 /// The resolver does no I/O and reads no clock. A host starts a lookup for each request, makes
-/// the reads the lookup asks for, at most three, and writes the response:
+/// the reads the lookup asks for, at most three for a file, and writes the response:
 ///
 /// ```
 /// # use std::time::Duration;
@@ -183,8 +186,23 @@ struct State {
 struct Pointed {
     /// When it was read.
     read_at: Duration,
-    /// The root of the path index it names; none when nothing is published under it.
+    named: Named,
+}
+
+/// What lookups go on from in a pointer; nothing when nothing is published under it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Named {
+    /// The root of the path index.
     root: Option<[u8; 32]>,
+    /// The directory tree.
+    tree: Option<TreeObject>,
+}
+
+/// The directory tree of a publication, an object of the store.
+#[derive(Debug, Clone, Copy)]
+struct TreeObject {
+    sha256: [u8; 32],
+    size: u64,
 }
 
 impl Pointed {
@@ -196,11 +214,13 @@ impl Pointed {
     }
 }
 
-/// A decoded object of a path index.
+/// What the resolver keeps of path indexes: a decoded object, named by its hash, or a listing
+/// made from one, named by [`listing::key`].
 #[derive(Debug, Clone)]
 enum Indexed {
     Root(Arc<PathIndex>),
     Chunk(Arc<Chunk>),
+    Listing(Arc<Listed>),
 }
 
 impl Resolver {
@@ -256,6 +276,7 @@ impl Resolver {
             request: *request,
             target,
             started: now,
+            gathering: None,
         };
         asked.pointer(now)
     }
@@ -300,7 +321,7 @@ fn shaped(request: &Request<'_>, response: Response) -> Response {
     }
 }
 
-/// A request and the file it names.
+/// A request and the file or directory it names.
 #[derive(Debug)]
 struct Asked<'a> {
     resolver: &'a Resolver,
@@ -308,6 +329,18 @@ struct Asked<'a> {
     target: Target,
     /// When the lookup started.
     started: Duration,
+    /// The listing of the directory the target names, while it is gathered. It is boxed, as it
+    /// grows with the directory while a lookup is moved from read to read.
+    gathering: Option<Box<Gathering>>,
+}
+
+/// The listing of a directory, and the path index it is gathered from.
+#[derive(Debug)]
+struct Gathering {
+    /// The hash of the root of the index.
+    root: [u8; 32],
+    index: Arc<PathIndex>,
+    listing: Listing,
 }
 
 impl<'a> Asked<'a> {
@@ -335,44 +368,109 @@ impl<'a> Asked<'a> {
         let name = self.target.pointer();
         match self.resolver.reading(&name) {
             Some(pointed) if pointed.holds(self.started, now, self.resolver.max_age) => {
-                self.pointed(pointed.root)
+                self.pointed(pointed.named)
             }
             _ => self.read(Read::Pointer(name)),
         }
     }
 
-    /// Goes on from what the pointer names.
-    fn pointed(self, root: Option<[u8; 32]>) -> Lookup<'a> {
-        match root {
-            Some(root) => self.root(root),
-            None => self.not_found(),
+    /// Goes on from what the pointer names: to the root of the path index for a path, or to the
+    /// answer for the directory tree.
+    fn pointed(self, named: Named) -> Lookup<'a> {
+        match &self.target.entry {
+            Entry::Path(_) => match named.root {
+                Some(root) => self.root(root),
+                None => self.not_found(),
+            },
+            Entry::Tree => match named.tree {
+                Some(tree) => self.tree(tree),
+                None => self.not_found(),
+            },
         }
+    }
+
+    /// Answers with `tree`, the directory tree of the view.
+    fn tree(&self, tree: TreeObject) -> Lookup<'a> {
+        let routes = &self.resolver.routes;
+        self.done(routes.tree(&self.request, tree.sha256, tree.size))
     }
 
     /// Goes on from the root of the path index: a decoded one, or by reading it.
     fn root(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
-            Some(Indexed::Root(index)) => self.indexed(sha256, &index),
+            Some(Indexed::Root(index)) => self.indexed(sha256, index),
             _ => self.read(Read::Root(ObjectId::root(sha256))),
         }
     }
 
-    /// Goes on from the chunk of `index` whose range holds the path: a decoded one, or by
-    /// reading it.
-    fn indexed(self, root: [u8; 32], index: &PathIndex) -> Lookup<'a> {
-        let Some(at) = index.chunk_of(&self.target.path) else {
+    /// Goes on from `index`, the path index with the root `root`: to the chunk whose range holds
+    /// the path of a file, or to the listing of a directory.
+    fn indexed(self, root: [u8; 32], index: Arc<PathIndex>) -> Lookup<'a> {
+        let Entry::Path(path) = &self.target.entry else {
             return self.not_found();
         };
-        match parse_sha256(&index.chunks[at].sha256) {
-            Some(sha256) => self.chunk(sha256),
-            None => {
-                let reason = format!("chunk {at} is not named by a SHA-256");
-                self.failed(Read::Root(ObjectId::root(root)), reason)
+        if self.target.entry.is_directory() {
+            let key = listing::key(&root, path);
+            if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
+                return self.listed(&listed);
             }
+            let listing = Listing::new(path);
+            return self.gather(Box::new(Gathering {
+                root,
+                index,
+                listing,
+            }));
+        }
+        match index.chunk_of(path) {
+            Some(at) => self.named_chunk(root, chunk_sha256(&index, at)),
+            None => self.not_found(),
         }
     }
 
-    /// Goes on from the chunk that holds the path: a decoded one, or by reading it.
+    /// Goes on from the chunk that the root `root` names by `named`, or fails when the root names
+    /// it by something other than a hash.
+    fn named_chunk(self, root: [u8; 32], named: Result<[u8; 32], String>) -> Lookup<'a> {
+        match named {
+            Ok(sha256) => self.chunk(sha256),
+            Err(reason) => self.failed(Read::Root(ObjectId::root(root)), reason),
+        }
+    }
+
+    /// Goes on with the listing of `gathering`: to the chunk it reads next, or to the response
+    /// once it has looked at every path under the directory.
+    fn gather(mut self, gathering: Box<Gathering>) -> Lookup<'a> {
+        let Gathering {
+            root,
+            index,
+            listing,
+        } = &*gathering;
+        if let Some(at) = listing.wanted(index) {
+            let (root, named) = (*root, chunk_sha256(index, at));
+            self.gathering = Some(gathering);
+            return self.named_chunk(root, named);
+        }
+        if !listing.is_found() {
+            return self.not_found();
+        }
+        match listing.listed(index) {
+            Ok(listed) => {
+                let listed = Arc::new(listed);
+                let key = listing::key(root, listing.directory());
+                let weight = listed.weight();
+                self.resolver
+                    .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+                self.listed(&listed)
+            }
+            Err(reason) => self.failed(Read::Root(ObjectId::root(*root)), reason),
+        }
+    }
+
+    /// Answers with `listed`, the listing of the directory.
+    fn listed(&self, listed: &Listed) -> Lookup<'a> {
+        self.done(self.resolver.routes.listing(&self.request, listed))
+    }
+
+    /// Goes on from a chunk of the path index: a decoded one, or by reading it.
     fn chunk(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
             Some(Indexed::Chunk(chunk)) => self.found(sha256, &chunk),
@@ -380,17 +478,21 @@ impl<'a> Asked<'a> {
         }
     }
 
-    /// Answers with the file of the path in `chunk`, if it has one.
-    fn found(self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
-        let file = chunk.get(&self.target.path);
-        match self
-            .resolver
-            .routes
-            .respond(&self.request, &self.target, file)
-        {
+    /// Goes on from `chunk`: with the listing that reads it, or by answering with the file of the
+    /// path in it, if it has one.
+    fn found(mut self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
+        if let Some(mut gathering) = self.gathering.take() {
+            gathering.listing.gather(&gathering.index, chunk);
+            return self.gather(gathering);
+        }
+        let Entry::Path(path) = &self.target.entry else {
+            return self.not_found();
+        };
+        let file = chunk.get(path);
+        match self.resolver.routes.respond(&self.request, file) {
             Ok(response) => self.done(response),
             Err(reason) => {
-                let reason = format!("{:?}: {reason}", self.target.path);
+                let reason = format!("{path:?}: {reason}");
                 self.failed(Read::Chunk(ObjectId::chunk(sha256)), reason)
             }
         }
@@ -433,8 +535,12 @@ impl<'a> Pending<'a> {
             Fetched::Absent => {
                 return match read {
                     Read::Pointer(name) => {
-                        let root = None;
-                        resolver.remember(name, Pointed { read_at: now, root });
+                        let named = Named::default();
+                        let pointed = Pointed {
+                            read_at: now,
+                            named,
+                        };
+                        resolver.remember(name, pointed);
                         asked.not_found()
                     }
                     read => asked.failed(read, "is not in the store"),
@@ -442,10 +548,14 @@ impl<'a> Pending<'a> {
             }
         };
         match read {
-            Read::Pointer(name) => match pointer_root(bytes) {
-                Ok(root) => {
-                    resolver.remember(name, Pointed { read_at: now, root });
-                    asked.pointed(root)
+            Read::Pointer(name) => match pointer_names(bytes) {
+                Ok(named) => {
+                    let pointed = Pointed {
+                        read_at: now,
+                        named,
+                    };
+                    resolver.remember(name, pointed);
+                    asked.pointed(named)
                 }
                 Err(reason) => asked.failed(Read::Pointer(name), reason),
             },
@@ -455,7 +565,7 @@ impl<'a> Pending<'a> {
                     let sha256 = *object.sha256();
                     let weight = root_weight(&index);
                     resolver.keep(sha256, Indexed::Root(Arc::clone(&index)), weight);
-                    asked.indexed(sha256, &index)
+                    asked.indexed(sha256, index)
                 }
                 Err(reason) => asked.failed(Read::Root(object), reason),
             },
@@ -473,18 +583,28 @@ impl<'a> Pending<'a> {
     }
 }
 
-/// The root of the path index that the pointer in `bytes` names, if it names one.
-fn pointer_root(bytes: &[u8]) -> Result<Option<[u8; 32]>, String> {
+/// What the pointer in `bytes` names: the root of its path index and its directory tree, each
+/// if it names one.
+fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
     let pointer: Pointer = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if pointer.format != "pointer" {
         return Err(format!("its format is {:?}", pointer.format));
     }
-    match &pointer.paths {
-        None => Ok(None),
-        Some(paths) => parse_sha256(paths)
-            .map(Some)
-            .ok_or_else(|| format!("it names the path index {paths:?}, which is not a SHA-256")),
-    }
+    let hash = |what: &str, sha256: &str| {
+        parse_sha256(sha256)
+            .ok_or_else(|| format!("it names the {what} {sha256:?}, which is not a SHA-256"))
+    };
+    let root = pointer.paths.map(|paths| hash("path index", &paths));
+    let tree = pointer.tree.map(|tree| {
+        hash("directory tree", &tree.sha256).map(|sha256| TreeObject {
+            sha256,
+            size: tree.size,
+        })
+    });
+    Ok(Named {
+        root: root.transpose()?,
+        tree: tree.transpose()?,
+    })
 }
 
 /// Checks that `bytes` are the object `object` names.
@@ -504,6 +624,12 @@ fn decoded_root(object: &ObjectId, bytes: &[u8]) -> Result<PathIndex, String> {
 fn decoded_chunk(object: &ObjectId, bytes: &[u8]) -> Result<Chunk, String> {
     verified(object, bytes)?;
     Chunk::decode(bytes).map_err(|e| e.to_string())
+}
+
+/// The hash of the chunk at `at` of `index`.
+fn chunk_sha256(index: &PathIndex, at: usize) -> Result<[u8; 32], String> {
+    parse_sha256(&index.chunks[at].sha256)
+        .ok_or_else(|| format!("chunk {at} is not named by a SHA-256"))
 }
 
 /// The 32 bytes that `text` gives as 64 lowercase hexadecimal digits.
@@ -561,7 +687,7 @@ mod tests {
                 "jp/storage/current.json".to_owned(),
                 Pointed {
                     read_at,
-                    root: None,
+                    named: Named::default(),
                 },
             );
             resolver.usage().pointers

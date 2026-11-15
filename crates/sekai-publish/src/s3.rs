@@ -4,33 +4,32 @@
 //! `<prefix>store/<aa>/<sha256>.<extension>`, and the pointer of a target at
 //! `<prefix>published/<target>/current.json`. Requests are signed with AWS Signature Version 4.
 //!
-//! What the bucket holds is recorded in [`Holdings`] as each upload is accepted, and a publication
-//! uploads only the objects that are not recorded, without asking the bucket about them. Each
-//! upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket rejects
-//! bytes that do not match. The pointer is written last, and only when it changes. When the record
-//! cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
+//! What the bucket holds is recorded in [`Holdings`](sekai_catalog::Holdings) as each upload is accepted, and a publication
+//! uploads only the local objects that are not recorded, without asking the bucket about them.
+//! Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket
+//! rejects bytes that do not match. The pointer is written last, and only when it changes. When the
+//! record cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
 //!
 //! The bucket also keeps the state of the runs that publish to it, as files under
-//! `<prefix>state/` that no publication refers to: [`S3::fetch_state`] and [`S3::store_state`].
+//! `<prefix>state/` that no publication refers to: [`S3::read_state`] and [`S3::write_state`].
 //! A state file larger than 16 MiB is written as a multipart upload, so that each request stays
 //! short.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Read};
-use std::path::Path;
-use std::sync::Mutex;
+use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sekai_catalog::{Holdings, Key, LocalStore, Objects, Remote};
+use sekai_catalog::{Key, LocalStore, Objects, Remote, Store};
 use sekai_format::publication::Pointer;
 use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
-use crate::layout::{Layout, Publication, check_version, documents, version_pointer};
+use crate::layout::{Layout, Object, Publication, check_version, documents, version_pointer};
 use crate::plan::{Plan, PublishError, hex};
 
 /// The SHA-256 of no bytes.
@@ -84,6 +83,8 @@ impl fmt::Debug for Credentials {
 /// A client for one bucket.
 pub struct S3 {
     agent: Agent,
+    /// One slot for each of the connections of the bucket.
+    slots: Slots,
     bucket: Bucket,
     credentials: Credentials,
     /// `<scheme>://<authority>` of the endpoint.
@@ -137,9 +138,12 @@ impl S3 {
             return Err(invalid("there are no connections"));
         }
         let path = path.trim_end_matches('/');
-        // A listing of a large store can take minutes before the service sends anything.
+        // A listing of a large store can take minutes before the service sends anything. Every
+        // connection in flight stays open for the next request, so that none is opened again.
         let agent = Agent::config_builder()
             .http_status_as_error(false)
+            .max_idle_connections(bucket.connections)
+            .max_idle_connections_per_host(bucket.connections)
             .timeout_connect(Some(Duration::from_secs(30)))
             .timeout_recv_response(Some(Duration::from_secs(300)))
             .timeout_per_read(Some(Duration::from_secs(300)))
@@ -147,6 +151,7 @@ impl S3 {
             .into();
         Ok(Self {
             agent,
+            slots: Slots::new(bucket.connections),
             origin: format!("{scheme}://{authority}"),
             host: authority
                 .strip_suffix(default_port)
@@ -160,6 +165,11 @@ impl S3 {
             bucket,
             credentials,
         })
+    }
+
+    /// The number of requests in flight at once.
+    pub fn connections(&self) -> usize {
+        self.bucket.connections
     }
 
     /// Every object of the store in the bucket with its size, from a listing of the whole store,
@@ -183,42 +193,31 @@ impl S3 {
         format!("{}published/{target}/current.json", self.bucket.prefix)
     }
 
+    /// The current pointer of `target`, or `None` when the bucket has none.
+    pub fn current(&self, target: &str) -> Result<Option<Pointer>, PublishError> {
+        let bytes = self
+            .get(&self.pointer(target))
+            .map_err(|e| PublishError::new("pointer", e))?;
+        bytes
+            .map(|bytes| serde_json::from_slice(&bytes))
+            .transpose()
+            .map_err(|e| PublishError::new("pointer", e))
+    }
+
     /// The name of the state file `file` in the bucket, under `state/`, which no publication
     /// refers to.
     fn state(&self, file: &str) -> String {
         format!("{}state/{file}", self.bucket.prefix)
     }
 
-    /// Copies the state file `file` of the bucket to `path`, and returns whether the bucket keeps
-    /// one. The bytes go to a file beside `path` first, which replaces it once it is complete.
-    pub fn fetch_state(&self, file: &str, path: &Path) -> Result<bool, PublishError> {
-        let mut partial = path.as_os_str().to_owned();
-        partial.push(".part");
-        let fetched = self
-            .get_with(&self.state(file), |body| {
-                let mut out = File::create(&partial)?;
-                io::copy(body, &mut out)?;
-                out.sync_all()
-            })
-            .map_err(|e| PublishError::new("state", e))?;
-        if fetched.is_some() {
-            std::fs::rename(&partial, path).map_err(PublishError::wrap("state"))?;
-        }
-        Ok(fetched.is_some())
-    }
-
-    /// What `read` makes of the state file `file` of the bucket, or `None` when it keeps none.
-    pub fn read_state<T>(
-        &self,
-        file: &str,
-        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
-    ) -> Result<Option<T>, PublishError> {
-        self.get_with(&self.state(file), read)
+    /// The bytes of the state file `file` of the bucket, or `None` when it keeps none.
+    pub fn read_state(&self, file: &str) -> Result<Option<Vec<u8>>, PublishError> {
+        self.get(&self.state(file))
             .map_err(|e| PublishError::new("state", e))
     }
 
     /// Writes `bytes` to the bucket as its state file `file`, in parts when there are more than
-    /// [`PART`].
+    /// 16 MiB.
     pub fn write_state(&self, file: &str, bytes: &[u8]) -> Result<(), PublishError> {
         let name = self.state(file);
         let written = if bytes.len() as u64 > PART {
@@ -231,31 +230,6 @@ impl S3 {
                 STATE_MEDIA_TYPE,
                 STATE_CACHE_CONTROL,
                 || Ok(bytes),
-            )
-        };
-        written.map_err(|e| PublishError::new("state", e))
-    }
-
-    /// Writes the file at `path` to the bucket as its state file `file`, in parts when it has
-    /// more than [`PART`] bytes.
-    pub fn store_state(&self, file: &str, path: &Path) -> Result<(), PublishError> {
-        let name = self.state(file);
-        let open = || File::open(path).map_err(|e| format!("{}: {e}", path.display()));
-        let size = std::fs::metadata(path)
-            .map_err(PublishError::wrap("state"))?
-            .len();
-        let written = if size > PART {
-            open().and_then(|file| {
-                self.put_in_parts(&name, STATE_MEDIA_TYPE, STATE_CACHE_CONTROL, file)
-            })
-        } else {
-            let digest = file_sha256(path).map_err(PublishError::wrap("state"))?;
-            self.put(
-                &name,
-                &hex(&digest),
-                STATE_MEDIA_TYPE,
-                STATE_CACHE_CONTROL,
-                open,
             )
         };
         written.map_err(|e| PublishError::new("state", e))
@@ -301,7 +275,9 @@ impl S3 {
     }
 
     /// Sends a request for `name` with the canonical query string `query` until it gets a
-    /// response that trying again cannot change.
+    /// response that trying again cannot change, and returns it with its body read. An attempt
+    /// fails when the connection fails before the last byte of the body, so a response cut off
+    /// midway is asked for again.
     fn send(
         &self,
         method: &'static str,
@@ -309,7 +285,7 @@ impl S3 {
         query: &str,
         payload: &str,
         request: impl Fn(&str, Vec<(&'static str, String)>) -> Result<Response<Body>, ureq::Error>,
-    ) -> Result<Response<Body>, String> {
+    ) -> Result<Reply, String> {
         let uri = format!("{}/{}", self.path, encode(name));
         let url = match query {
             "" => format!("{}{uri}", self.origin),
@@ -318,11 +294,12 @@ impl S3 {
         let mut attempt = 0;
         loop {
             attempt += 1;
-            let failure = match request(&url, self.headers(method, &uri, query, payload)) {
-                Ok(response) => {
-                    let status = response.status().as_u16();
+            let reply = self.exchange(|| request(&url, self.headers(method, &uri, query, payload)));
+            let failure = match reply {
+                Ok(reply) => {
+                    let status = reply.status().as_u16();
                     if !(status == 429 || status >= 500) || attempt >= ATTEMPTS {
-                        return Ok(response);
+                        return Ok(reply);
                     }
                     format!("{method} {name}: HTTP {status}")
                 }
@@ -335,28 +312,27 @@ impl S3 {
         }
     }
 
-    /// The bytes of `name`, or `None` when the bucket does not hold it.
-    fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
-        self.get_with(name, |body| {
-            let mut bytes = Vec::new();
-            body.read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
+    /// One attempt of a request: waits for a free slot, so that no more requests are in flight
+    /// than the bucket has connections, sends the request that `request` makes and reads the
+    /// whole response.
+    fn exchange(
+        &self,
+        request: impl FnOnce() -> Result<Response<Body>, ureq::Error>,
+    ) -> Result<Reply, ureq::Error> {
+        let _slot = self.slots.take();
+        let (head, mut body) = request()?.into_parts();
+        let mut bytes = Vec::new();
+        body.as_reader().read_to_end(&mut bytes)?;
+        Ok(Response::from_parts(head, bytes))
     }
 
-    /// What `read` makes of the bytes of `name`, or `None` when the bucket does not hold it.
-    fn get_with<T>(
-        &self,
-        name: &str,
-        read: impl FnOnce(&mut dyn Read) -> io::Result<T>,
-    ) -> Result<Option<T>, String> {
-        let mut response = self.send("GET", name, "", EMPTY, |url, headers| {
+    /// The bytes of `name`, or `None` when the bucket does not hold it.
+    fn get(&self, name: &str) -> Result<Option<Vec<u8>>, String> {
+        let reply = self.send("GET", name, "", EMPTY, |url, headers| {
             signed(self.agent.get(url), headers).call()
         })?;
-        match response.status().as_u16() {
-            200 => read(&mut response.body_mut().as_reader())
-                .map(Some)
-                .map_err(|e| format!("GET {name}: {e}")),
+        match reply.status().as_u16() {
+            200 => Ok(Some(reply.into_body())),
             404 => Ok(None),
             status => Err(format!("GET {name}: HTTP {status}")),
         }
@@ -375,17 +351,10 @@ impl S3 {
                 .map(|(name, value)| format!("{name}={}", encode_component(value)))
                 .collect::<Vec<_>>()
                 .join("&");
-            let mut response = self.send("GET", "", &query, EMPTY, |url, headers| {
+            let reply = self.send("GET", "", &query, EMPTY, |url, headers| {
                 signed(self.agent.get(url), headers).call()
             })?;
-            let status = response.status().as_u16();
-            if status != 200 {
-                return Err(format!("LIST {prefix}: HTTP {status}"));
-            }
-            let body = response
-                .body_mut()
-                .read_to_string()
-                .map_err(|e| format!("LIST {prefix}: {e}"))?;
+            let body = success_text("LIST", prefix, reply)?;
             let page = Page::parse(&body).map_err(|e| format!("LIST {prefix}: {e}"))?;
             names.extend(page.names);
             match page.next {
@@ -395,15 +364,37 @@ impl S3 {
         }
     }
 
-    /// Every object of the store in the bucket with its size, listed one store directory per
-    /// connection.
+    /// Every object of the store in the bucket with its size.
     fn list_store(&self) -> Result<BTreeMap<String, u64>, PublishError> {
+        let store = format!("{}store", self.bucket.prefix);
+        self.list_sharded(&store, "files")
+    }
+
+    /// The names of the state files in the state directory `directory` of the bucket, whose files
+    /// lie in subdirectories named by two hexadecimal digits, as [`S3::read_state`] names them.
+    pub fn state_names(&self, directory: &str) -> Result<Vec<String>, PublishError> {
+        let listed = self.list_sharded(&self.state(directory), "state")?;
+        let state = self.state("");
+        let names = listed
+            .into_keys()
+            .filter_map(|name| name.strip_prefix(&state).map(str::to_owned));
+        Ok(names.collect())
+    }
+
+    /// Every object under `directory` with its size, where the objects lie in subdirectories named
+    /// by two hexadecimal digits, listed one subdirectory per connection. A failure is an error of
+    /// `stage`.
+    fn list_sharded(
+        &self,
+        directory: &str,
+        stage: &'static str,
+    ) -> Result<BTreeMap<String, u64>, PublishError> {
         let names = Mutex::new(BTreeMap::new());
         each(SHARDS, self.bucket.connections, |shard| {
-            let prefix = format!("{}store/{shard:02x}/", self.bucket.prefix);
+            let prefix = format!("{directory}/{shard:02x}/");
             let listed = self
                 .list(&prefix)
-                .map_err(|e| PublishError::new("files", e))?;
+                .map_err(|e| PublishError::new(stage, e))?;
             names
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -564,6 +555,49 @@ impl S3 {
     }
 }
 
+/// The requests a client may have in flight: a request waits for a free slot and holds it until
+/// its response is dropped.
+struct Slots {
+    free: Mutex<usize>,
+    freed: Condvar,
+}
+
+/// A slot taken from [`Slots`], given back when dropped.
+struct Slot<'s>(&'s Slots);
+
+impl Slots {
+    fn new(slots: usize) -> Self {
+        Self {
+            free: Mutex::new(slots),
+            freed: Condvar::new(),
+        }
+    }
+
+    fn free(&self) -> MutexGuard<'_, usize> {
+        self.free.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A free slot, once there is one.
+    fn take(&self) -> Slot<'_> {
+        let mut free = self.free();
+        while *free == 0 {
+            free = self.freed.wait(free).unwrap_or_else(|e| e.into_inner());
+        }
+        *free -= 1;
+        Slot(self)
+    }
+}
+
+impl Drop for Slot<'_> {
+    fn drop(&mut self) {
+        *self.0.free() += 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// A response with its whole body.
+type Reply = Response<Vec<u8>>;
+
 /// `request` with the signed `headers`.
 fn signed<B>(
     request: ureq::RequestBuilder<B>,
@@ -574,13 +608,10 @@ fn signed<B>(
     })
 }
 
-/// The body of `response` to `method` on `name` as text, when the response is a success.
-fn success_text(method: &str, name: &str, mut response: Response<Body>) -> Result<String, String> {
-    match response.status().as_u16() {
-        200 => response
-            .body_mut()
-            .read_to_string()
-            .map_err(|e| format!("{method} {name}: {e}")),
+/// The body of `reply` to `method` on `name` as text, when the reply is a success.
+fn success_text(method: &str, name: &str, reply: Reply) -> Result<String, String> {
+    match reply.status().as_u16() {
+        200 => String::from_utf8(reply.into_body()).map_err(|e| format!("{method} {name}: {e}")),
         status => Err(format!("{method} {name}: HTTP {status}")),
     }
 }
@@ -601,12 +632,8 @@ pub fn publish(
     publish_with(objects, s3, target, plan, Layout::Index)
 }
 
-/// Publishes `plan` as `target` in `layout` to the bucket of `s3`: the objects first, then the
-/// pointer of its version, then the current pointer of `target`. The documents are written to the
-/// local store of `objects`, whose holdings record what the bucket holds. Every object they do not
-/// record is uploaded from the local store, and recorded once the bucket accepts it, also when the
-/// publication fails later. A failed stage leaves the previous pointer in place, and running the
-/// publication again uploads only what is still unrecorded.
+/// Publishes `plan` as `target` in `layout` to the bucket of `s3`, writing its documents to the
+/// local store of `objects` first. See [`upload`].
 pub fn publish_with(
     objects: &Objects<'_>,
     s3: &S3,
@@ -615,81 +642,145 @@ pub fn publish_with(
     layout: Layout,
 ) -> Result<(Pointer, S3Report), PublishError> {
     check_version(&plan.version)?;
+    let publication = documents(objects.local, target, plan, layout)?;
+    upload(objects, s3, target, publication)
+}
+
+/// Uploads `publication`, whose documents are in the local store of `objects`, as `target` to the
+/// bucket of `s3`: the objects with [`store_objects`], then the pointers with [`make_current`].
+pub fn upload(
+    objects: &Objects<'_>,
+    s3: &S3,
+    target: &str,
+    publication: Publication,
+) -> Result<(Pointer, S3Report), PublishError> {
     let Publication {
         pointer,
         objects: referred,
-    } = documents(objects.local, target, plan, layout)?;
+    } = publication;
+    check_version(&pointer.published_version)?;
+    let Stored { uploaded, present } = store_objects(objects, s3, referred)?;
+    let pointer_written = make_current(s3, target, &pointer)?;
+    Ok((
+        pointer,
+        S3Report {
+            uploaded,
+            present,
+            pointer_written,
+        },
+    ))
+}
+
+/// What [`store_objects`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stored {
+    /// The objects uploaded.
+    pub uploaded: usize,
+    /// The objects taken to be in the bucket already, which were not uploaded.
+    pub present: usize,
+}
+
+/// Uploads the objects of `referred` to the bucket of `s3`.
+///
+/// The holdings of `objects` record what the bucket holds. Every object that they do not record
+/// and that the local store of `objects` has is uploaded, and recorded once the bucket accepts it,
+/// also when a later upload fails. An object the local store does not have was named by an
+/// earlier publication or record, and those are written only once their objects are in the
+/// bucket. Running the upload again sends only what is still unrecorded.
+pub fn store_objects(
+    objects: &Objects<'_>,
+    s3: &S3,
+    referred: Vec<Object>,
+) -> Result<Stored, PublishError> {
     let referred: BTreeMap<Key, (u64, String)> = referred
         .into_iter()
         .map(|object| (object.key, (object.size, object.media_type)))
         .collect();
     let referred: Vec<_> = referred.into_iter().collect();
-    let pointer_bytes =
-        serde_json::to_vec(&pointer).map_err(|e| PublishError::new("pointer", e))?;
-    let pointer_name = s3.pointer(target);
-    let remote_pointer = s3
-        .get(&pointer_name)
-        .map_err(|e| PublishError::new("pointer", e))?;
-
-    let unrecorded = unrecorded(objects.held, &referred)?;
+    let unrecorded = unrecorded(objects, &referred)?;
     let confirmed = Mutex::new(Vec::with_capacity(unrecorded.len()));
-    let uploading = upload(objects.local, s3, &unrecorded, &confirmed);
+    let uploading = put_objects(objects.local, s3, &unrecorded, &confirmed);
     let confirmed = confirmed.into_inner().unwrap_or_else(|e| e.into_inner());
     objects
         .held
         .hold(&confirmed)
         .map_err(PublishError::wrap("holdings"))?;
     uploading?;
-    let uploaded = unrecorded.len();
+    Ok(Stored {
+        uploaded: unrecorded.len(),
+        present: referred.len() - unrecorded.len(),
+    })
+}
 
-    let pointer_written = remote_pointer.as_deref() != Some(pointer_bytes.as_slice());
-    if pointer_written {
-        let digest: [u8; 32] = Sha256::digest(&pointer_bytes).into();
-        let sha256 = hex(&digest);
-        let version_name = format!(
-            "{}published/{}",
-            s3.bucket.prefix,
-            version_pointer(target, &plan.version)
-        );
-        for name in [&version_name, &pointer_name] {
-            s3.put(
-                name,
-                &sha256,
-                "application/json",
-                POINTER_CACHE_CONTROL,
-                || Ok(pointer_bytes.as_slice()),
-            )
-            .map_err(|e| PublishError::new("pointer", e))?;
-        }
+/// Makes `pointer` the current publication of `target` in the bucket of `s3`: writes the pointer
+/// of its version, then the current pointer of `target`, unless that is `pointer` already. Call it
+/// once every object of the publication is in the bucket. Returns whether the pointers were
+/// written.
+pub fn make_current(s3: &S3, target: &str, pointer: &Pointer) -> Result<bool, PublishError> {
+    check_version(&pointer.published_version)?;
+    let bytes = serde_json::to_vec(pointer).map_err(|e| PublishError::new("pointer", e))?;
+    let current = s3.pointer(target);
+    let remote = s3
+        .get(&current)
+        .map_err(|e| PublishError::new("pointer", e))?;
+    if remote.as_deref() == Some(bytes.as_slice()) {
+        return Ok(false);
     }
-    Ok((
-        pointer,
-        S3Report {
-            uploaded,
-            present: referred.len() - uploaded,
-            pointer_written,
-        },
-    ))
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let sha256 = hex(&digest);
+    let version = format!(
+        "{}published/{}",
+        s3.bucket.prefix,
+        version_pointer(target, &pointer.published_version)
+    );
+    for name in [&version, &current] {
+        s3.put(
+            name,
+            &sha256,
+            "application/json",
+            POINTER_CACHE_CONTROL,
+            || Ok(bytes.as_slice()),
+        )
+        .map_err(|e| PublishError::new("pointer", e))?;
+    }
+    Ok(true)
 }
 
 /// An object a publication refers to: its key, its size and its media type.
 type Referred = (Key, (u64, String));
 
-/// The objects of `referred`, in key order, that `held` does not record with their size.
+/// The objects of `referred`, in key order, that the holdings of `objects` do not record with
+/// their size and that its local store has. A local file of another size is refused.
 fn unrecorded<'a>(
-    held: &dyn Holdings,
+    objects: &Objects<'_>,
     referred: &'a [Referred],
 ) -> Result<Vec<&'a Referred>, PublishError> {
     let mut unknown = Vec::new();
     for directory in referred.chunk_by(|(a, _), (b, _)| a.sha256[0] == b.sha256[0]) {
-        let sizes = held
-            .sizes(directory[0].0.sha256[0])
-            .map_err(PublishError::wrap("holdings"))?;
-        unknown.extend(
-            directory
-                .iter()
-                .filter(|(key, (size, _))| sizes.get(key) != Some(size)),
-        );
+        let held = objects.held.sizes(directory[0].0.sha256[0]);
+        let held = held.map_err(PublishError::wrap("holdings"))?;
+        for referred @ (key, (size, _)) in directory {
+            if held.get(key) == Some(size) {
+                continue;
+            }
+            let local = objects.local.size(key);
+            match local.map_err(PublishError::wrap("files"))? {
+                Some(local) if local == *size => unknown.push(referred),
+                Some(local) => {
+                    return Err(PublishError::new(
+                        "verify",
+                        format!("{key} has {local} bytes in the store, not {size}"),
+                    ));
+                }
+                None if objects.held.complete() => {
+                    return Err(PublishError::new(
+                        "verify",
+                        format!("{key} is in neither the bucket nor the local store"),
+                    ));
+                }
+                None => {}
+            }
+        }
     }
     Ok(unknown)
 }
@@ -697,7 +788,7 @@ fn unrecorded<'a>(
 /// Uploads each of `unrecorded` from `local`, adding every object the bucket then holds to
 /// `confirmed`. The bucket is not asked first: an object is named by its bytes, so writing it
 /// again changes nothing.
-fn upload(
+fn put_objects(
     local: &LocalStore,
     s3: &S3,
     unrecorded: &[&Referred],
@@ -706,12 +797,6 @@ fn upload(
     each(unrecorded.len(), s3.bucket.connections, |i| {
         let (key, (size, media_type)) = unrecorded[i];
         let path = local.path(key);
-        if !std::fs::metadata(&path).is_ok_and(|m| m.is_file() && m.len() == *size) {
-            return Err(PublishError::new(
-                "verify",
-                format!("{key} is neither in the store with {size} bytes nor recorded as held"),
-            ));
-        }
         s3.put(
             &s3.object(key),
             &hex(&key.sha256),
@@ -761,21 +846,6 @@ fn each(
     match failures.into_iter().min_by_key(|(i, _)| *i) {
         Some((_, e)) => Err(e),
         None => Ok(()),
-    }
-}
-
-/// The SHA-256 of the bytes of the file at `path`.
-fn file_sha256(path: &Path) -> io::Result<[u8; 32]> {
-    let mut file = BufReader::with_capacity(1 << 20, File::open(path)?);
-    let mut hasher = Sha256::new();
-    loop {
-        let chunk = file.fill_buf()?;
-        if chunk.is_empty() {
-            return Ok(hasher.finalize().into());
-        }
-        hasher.update(chunk);
-        let read = chunk.len();
-        file.consume(read);
     }
 }
 

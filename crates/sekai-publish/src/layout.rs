@@ -7,9 +7,9 @@ use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::publication::{Pointer, is_name};
 use sha2::{Digest, Sha256};
 
+use crate::index;
 use crate::patch::{self, Change, Previous};
 use crate::plan::{Plan, PublishError, hex};
-use crate::{index, sqlite};
 
 /// The documents a publication writes next to its files. Every layout has a path index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -17,10 +17,8 @@ pub enum Layout {
     /// Only the path index, for a view without asset documents.
     Paths,
     /// Index shards, listings and an index root.
-    Index,
-    /// The `index` layout and an `index.sqlite` database.
     #[default]
-    Sqlite,
+    Index,
 }
 
 /// An object of the store that a publication refers to.
@@ -59,14 +57,7 @@ pub fn documents(
     let view = view_of(target);
     let change = Change::all(plan)?;
     let previous = Previous::default();
-    let mut publication =
-        patch::apply(store, store, view, &plan.version, layout, &previous, change)?;
-    if layout == Layout::Sqlite {
-        let sqlite = sqlite::build(store, plan, &publication.pointer.revision)?;
-        publication.pointer.sqlite = Some(hex(&sqlite.key.sha256));
-        publication.objects.push(sqlite);
-    }
-    Ok(publication)
+    patch::apply(store, store, view, &plan.version, layout, &previous, change)
 }
 
 /// Whether `version` can name its pointer file.
@@ -108,9 +99,35 @@ pub fn publish(
             format!("{} is not in the store", object.key),
         ));
     }
-    write_pointer(&root.join(version_pointer(target, &plan.version)), &pointer)?;
-    write_pointer(&root.join(target).join("current.json"), &pointer)?;
+    make_current(root, target, &pointer)?;
     Ok(pointer)
+}
+
+/// The current pointer of `target` under the published root `root`, or `None` when there is none.
+pub fn current(root: &Path, target: &str) -> Result<Option<Pointer>, PublishError> {
+    let wrap = PublishError::wrap("pointer");
+    let bytes = match std::fs::read(current_path(root, target)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(wrap(e)),
+    };
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| PublishError::new("pointer", e))
+}
+
+/// Makes `pointer` the current publication of `target` under the published root `root`: writes
+/// the pointer of its version, then the current pointer. Call it once every object of the
+/// publication is in place.
+pub fn make_current(root: &Path, target: &str, pointer: &Pointer) -> Result<(), PublishError> {
+    check_version(&pointer.published_version)?;
+    let version = root.join(version_pointer(target, &pointer.published_version));
+    write_pointer(&version, pointer)?;
+    write_pointer(&current_path(root, target), pointer)
+}
+
+fn current_path(root: &Path, target: &str) -> std::path::PathBuf {
+    root.join(target).join("current.json")
 }
 
 /// Writes `pointer` to `path` through a temporary file, so a reader sees the old or the new one.

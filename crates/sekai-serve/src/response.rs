@@ -1,11 +1,17 @@
-//! Responses: what a request is answered with, given the file it names.
+//! Responses: what a request is answered with, given the file, directory or tree it names.
 
 use std::fmt;
+use std::sync::Arc;
 
+use sekai_format::directory_tree;
 use sekai_format::paths::ChunkFile;
 use sekai_format::publication::is_name;
 
-use crate::routes::{Delivery, Routes, Target, is_header_value};
+use crate::listing::Listed;
+use crate::routes::{Delivery, Routes, is_header_value};
+
+/// The file name the directory tree of a view is delivered under.
+const TREE_FILE_NAME: &str = "directory-tree.json.gz";
 
 /// The methods the resolver answers.
 const ALLOW: &str = "GET, HEAD, OPTIONS";
@@ -53,6 +59,9 @@ pub enum Body {
     Empty,
     /// A short text.
     Text(&'static str),
+    /// A document the resolver made, such as the listing of a directory, shared with the
+    /// resolver, which keeps it for later requests.
+    Bytes(Arc<[u8]>),
     /// A byte range of an object of the store.
     Object(Slice),
 }
@@ -89,6 +98,14 @@ impl ObjectId {
         Self {
             sha256,
             extension: "paths".to_owned(),
+        }
+    }
+
+    /// A directory tree, `<aa>/<sha256>.json.gz`.
+    pub(crate) fn tree(sha256: [u8; 32]) -> Self {
+        Self {
+            sha256,
+            extension: directory_tree::EXTENSION.to_owned(),
         }
     }
 
@@ -141,13 +158,12 @@ enum Range {
 }
 
 impl Routes {
-    /// The response to `request` for `target`, given the file the target names, if the view
-    /// has it. Fails with the reason when the index describes the file with an extension or a
-    /// media type that cannot be sent.
+    /// The response to `request` with `file`, the file the request names, if the view has it.
+    /// Fails with the reason when the index describes the file with an extension or a media type
+    /// that cannot be sent.
     pub(crate) fn respond(
         &self,
         request: &Request<'_>,
-        target: &Target,
         file: Option<ChunkFile<'_>>,
     ) -> Result<Response, String> {
         let Some(file) = file else {
@@ -158,17 +174,50 @@ impl Routes {
         if !is_header_value(file.media_type) {
             return Err(format!("{:?} is not a media type", file.media_type));
         }
+        Ok(self.deliver(request, file, object))
+    }
+
+    /// The response to `request` with the directory tree of a view, the object with the hash
+    /// `sha256` and `size` bytes.
+    pub(crate) fn tree(&self, request: &Request<'_>, sha256: [u8; 32], size: u64) -> Response {
+        let file = ChunkFile {
+            path: TREE_FILE_NAME,
+            sha256,
+            extension: directory_tree::EXTENSION,
+            size,
+            media_type: directory_tree::MEDIA_TYPE,
+        };
+        self.deliver(request, file, ObjectId::tree(sha256))
+    }
+
+    /// The response to `request` with `file`, the object `object`, as the routes deliver files.
+    fn deliver(&self, request: &Request<'_>, file: ChunkFile<'_>, object: ObjectId) -> Response {
         // A named version is cached no longer than the current one: its name can be published
         // again with other files, and the resolver answers with them within `max_age`.
         let cache_control = format!("public, max-age={}", self.max_age);
-        Ok(match &self.delivery {
-            Delivery::Bytes => self.file(request, &target.path, file, object, cache_control),
+        match &self.delivery {
+            Delivery::Bytes => self.file(request, file, object, cache_control),
             Delivery::Redirect(store_url) => {
                 let location = format!("{store_url}/{object}");
                 let headers = vec![("location", location), ("cache-control", cache_control)];
                 self.finish(302, headers, Body::Empty)
             }
-        })
+        }
+    }
+
+    /// The response to `request` with `listed`, the listing of a directory.
+    pub(crate) fn listing(&self, request: &Request<'_>, listed: &Listed) -> Response {
+        let etag = &listed.etag;
+        let cache_control = format!("public, max-age={}", self.max_age);
+        let mut headers = vec![("etag", etag.clone()), ("cache-control", cache_control)];
+        if request.if_none_match.is_some_and(|tags| lists(tags, etag)) {
+            return self.finish(304, headers, Body::Empty);
+        }
+        headers.extend([
+            ("content-type", "application/json".to_owned()),
+            ("content-length", listed.document.len().to_string()),
+        ]);
+        self.finish(200, headers, Body::Bytes(Arc::clone(&listed.document)))
     }
 
     /// The response when the publication cannot be read.
@@ -207,12 +256,10 @@ impl Routes {
         self.finish(204, headers, Body::Empty)
     }
 
-    /// The response that carries `file`, the file at `path`, or the range of it that the request
-    /// asks for.
+    /// The response that carries `file`, or the range of it that the request asks for.
     fn file(
         &self,
         request: &Request<'_>,
-        path: &str,
         file: ChunkFile<'_>,
         object: ObjectId,
         cache_control: String,
@@ -246,7 +293,7 @@ impl Routes {
             ("content-type", file.media_type.to_owned()),
             ("content-length", length.to_string()),
             ("accept-ranges", "bytes".to_owned()),
-            ("content-disposition", disposition(path)),
+            ("content-disposition", disposition(file.path)),
         ]);
         let body = Body::Object(Slice {
             object,

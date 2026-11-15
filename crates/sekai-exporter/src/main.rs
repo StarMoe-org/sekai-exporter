@@ -65,7 +65,7 @@ mod storage {
         }
     }
 
-    /// No change: a build without the storage view publishes none.
+    /// The empty change: a build without the storage view leaves it as it was.
     pub(crate) fn change(
         _units: &BTreeSet<&str>,
         _assets: &[Binding],
@@ -74,8 +74,8 @@ mod storage {
         _derivations: &dyn Derivations,
         _threads: usize,
         _monitor: &Monitor,
-    ) -> Result<Option<Change>, String> {
-        Ok(None)
+    ) -> Result<Change, String> {
+        Ok(Change::default())
     }
 }
 #[cfg(feature = "cdn")]

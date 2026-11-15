@@ -7,32 +7,37 @@ Every file in RUN1 must exist in RUN2 with the same bytes, and the reverse. With
 is the metrics file of the second run, JSON Lines with one object per line. Each span of the
 "convert" stage ({"kind": "span", "stage": "convert"}) is one recomputed derivation, and their
 count must be 0. With --skip-publication, the documents of a publication (index roots, index shards, table
-chunks and path indexes) are left out of both directories, so that the store of a run that
-published can be compared with the store of a run that did not.
+chunks, path indexes and directory trees) are left out of both directories, so that the store of a
+run that published can be compared with the store of a run that did not.
 
 Exit status: 0 if everything matches, 1 otherwise, 2 for usage errors.
 """
 
 import argparse
+import gzip
 import json
 import os
 import sys
 
 from compare import join_relative, list_files, same_bytes
 
-PUBLICATION_FORMATS = {"index-root", "index-chunk", "index-shard", "path-index"}
+PUBLICATION_FORMATS = {"index-root", "index-chunk", "index-shard", "path-index", "directory-tree"}
 PUBLICATION_EXTENSIONS = (".paths",)
 
 
 def is_publication(path):
     if path.endswith(PUBLICATION_EXTENSIONS):
         return True
-    if not path.endswith(".json"):
+    if path.endswith(".json"):
+        opened = open(path, encoding="utf-8")
+    elif path.endswith(".json.gz"):
+        opened = gzip.open(path, "rt", encoding="utf-8")
+    else:
         return False
     try:
-        with open(path, encoding="utf-8") as handle:
+        with opened as handle:
             document = json.load(handle)
-    except ValueError:
+    except (ValueError, OSError):
         return False
     return isinstance(document, dict) and document.get("format") in PUBLICATION_FORMATS
 

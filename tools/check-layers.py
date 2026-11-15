@@ -12,6 +12,7 @@ import sys
 LAYERS = {
     "sekai-unity": 0,
     "sekai-format": 0,
+    "sekai-testkit": 0,
     "sekai-layouts": 1,
     "sekai-codec": 1,
     "sekai-catalog": 1,

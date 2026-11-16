@@ -14,6 +14,9 @@ use crate::{
 
 /// The bit of `settingsRaw` that says a sprite is packed into another texture.
 const PACKED: u64 = 1;
+/// The bit of `settingsRaw` that says a packed sprite keeps a rectangle of its atlas, rather than
+/// a tight outline.
+const RECTANGLE_PACKING: u64 = 2;
 /// The place and width of the rotation of a sprite in `settingsRaw`.
 const ROTATION_SHIFT: u32 = 2;
 const ROTATION_MASK: u64 = 0xF;
@@ -29,6 +32,10 @@ impl Converter for Sprite {
 
     fn version(&self) -> u32 {
         2
+    }
+
+    fn revision(&self) -> u32 {
+        1
     }
 
     fn encoders(&self) -> crate::Encoders {
@@ -65,7 +72,7 @@ impl Converter for Sprite {
             field(placement.data, "textureRectOffset")?,
             "textureRectOffset",
         )?;
-        let region = placement.region(rect, texture_rect, texture_rect_offset)?;
+        let cut = placement.cut(rect, texture_rect, texture_rect_offset)?;
         let layout = Layout {
             rect,
             texture_rect,
@@ -81,12 +88,12 @@ impl Converter for Sprite {
                     content: match image {
                         Some(Content::Image(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &region)?;
+                                cut.image(image.width(), image.height(), image.pixels(), &rect)?;
                             Content::Image(Surface::new(w, h, pixels)?)
                         }
                         Some(Content::HdrImage(image)) => {
                             let (w, h, pixels) =
-                                crop(image.width(), image.height(), image.pixels(), &region)?;
+                                cut.image(image.width(), image.height(), image.pixels(), &rect)?;
                             Content::HdrImage(HdrSurface::new(w, h, pixels)?)
                         }
                         _ => return Err(malformed("the sprite's texture holds no image")),
@@ -162,14 +169,10 @@ impl<'a> Placement<'a> {
         pptr(self.data, name, self.owner, cx)
     }
 
-    /// The region of the texture that the image of the sprite is cut from. An atlas may trim or
-    /// rotate what it holds, and only a sprite it holds whole has its image at `texture_rect`.
-    fn region(
-        &self,
-        rect: Rect,
-        texture_rect: Rect,
-        offset: [f32; 2],
-    ) -> Result<Rect, ConvertError> {
+    /// How the image of the sprite `rect` is cut from the texture. An atlas holds a sprite whole
+    /// at `texture_rect`, or trimmed of its transparent margins to `texture_rect`, which then lies
+    /// at `offset` in the sprite; it may also rotate a sprite or keep only a tight outline.
+    fn cut(&self, rect: Rect, texture_rect: Rect, offset: [f32; 2]) -> Result<Cut, ConvertError> {
         let settings = field(self.data, "settingsRaw")?
             .as_u64()
             .ok_or_else(|| malformed("settingsRaw is not an integer"))?;
@@ -177,14 +180,58 @@ impl<'a> Placement<'a> {
             return if settings & PACKED != 0 {
                 Err(unsupported("a sprite packed into another texture"))
             } else {
-                Ok(rect)
+                Ok(Cut::whole(rect))
             };
         }
-        let same_size = (rect.width, rect.height) == (texture_rect.width, texture_rect.height);
-        if settings >> ROTATION_SHIFT & ROTATION_MASK != 0 || offset != [0.0, 0.0] || !same_size {
-            return Err(unsupported("a sprite trimmed or rotated in its atlas"));
+        if settings >> ROTATION_SHIFT & ROTATION_MASK != 0 {
+            return Err(unsupported("a sprite rotated in its atlas"));
         }
-        Ok(texture_rect)
+        let same_size = (rect.width, rect.height) == (texture_rect.width, texture_rect.height);
+        if same_size && offset == [0.0, 0.0] {
+            return Ok(Cut::whole(texture_rect));
+        }
+        if settings & RECTANGLE_PACKING == 0 {
+            return Err(unsupported(
+                "a sprite trimmed to a tight outline in its atlas",
+            ));
+        }
+        Ok(Cut {
+            region: texture_rect,
+            trim: Some(offset),
+        })
+    }
+}
+
+/// How the image of a sprite is cut from its texture.
+struct Cut {
+    /// The region of the texture that holds the image.
+    region: Rect,
+    /// For a sprite its atlas trimmed of transparent margins, where the region lies in the
+    /// rectangle of the sprite, from its bottom left.
+    trim: Option<[f32; 2]>,
+}
+
+impl Cut {
+    /// The image of a sprite held whole at `region`.
+    fn whole(region: Rect) -> Self {
+        Self { region, trim: None }
+    }
+
+    /// The image of the sprite `rect` cut from an RGBA image of `width` x `height` pixels, given
+    /// as its channel values with rows from top to bottom: the region, which a trimmed sprite has
+    /// in a transparent image of the size of `rect`.
+    fn image<T: Copy + Default>(
+        &self,
+        width: u32,
+        height: u32,
+        pixels: &[T],
+        rect: &Rect,
+    ) -> Result<(u32, u32, Vec<T>), ConvertError> {
+        let region = crop(width, height, pixels, &self.region)?;
+        match self.trim {
+            Some(offset) => place(region, offset, rect),
+            None => Ok(region),
+        }
     }
 }
 
@@ -222,6 +269,38 @@ fn crop<T: Copy>(
         .copied()
         .collect();
     Ok(((x1 - x0) as u32, (y1 - y0) as u32, out))
+}
+
+/// The RGBA image `image`, rows from top to bottom, in a transparent image of the size of `rect`
+/// with its bottom left corner at `offset` from the bottom left, both rounded to whole pixels as
+/// [`crop`] rounds.
+fn place<T: Copy + Default>(
+    (width, height, pixels): (u32, u32, Vec<T>),
+    offset: [f32; 2],
+    rect: &Rect,
+) -> Result<(u32, u32, Vec<T>), ConvertError> {
+    let round = |value: f32| f64::from(value).round_ties_even();
+    let (outer_width, outer_height) = (round(rect.width), round(rect.height));
+    let (x, y) = (round(offset[0]), round(offset[1]));
+    let fits = 0.0 <= x
+        && x + f64::from(width) <= outer_width
+        && 0.0 <= y
+        && y + f64::from(height) <= outer_height;
+    if !fits {
+        return Err(malformed(format!(
+            "the {width} x {height} region at ({x}, {y}) is not inside the {outer_width} x \
+             {outer_height} sprite"
+        )));
+    }
+    let (outer_width, outer_height) = (outer_width as usize, outer_height as usize);
+    let (x, y, width, height) = (x as usize, y as usize, width as usize, height as usize);
+    let mut out = vec![T::default(); outer_width * outer_height * 4];
+    let top = outer_height - y - height;
+    for (row, line) in pixels.chunks(width * 4).enumerate() {
+        let start = ((top + row) * outer_width + x) * 4;
+        out[start..start + width * 4].copy_from_slice(line);
+    }
+    Ok((outer_width as u32, outer_height as u32, out))
 }
 
 /// The layout written as the `sprite` member.
@@ -358,6 +437,19 @@ mod tests {
         assert_eq!(reds, [10, 11, 20, 21]);
         assert!(crop(4, 3, &pixels, &rect(3.0, 0.0, 2.0, 1.0)).is_err());
         assert!(crop(4, 3, &pixels, &rect(1.0, 1.0, 0.2, 1.0)).is_err());
+    }
+
+    #[test]
+    fn a_trimmed_region_is_placed_in_a_transparent_image_of_the_sprite() {
+        // A 2 x 1 region 1 pixel from the left and 1 from the bottom of a 4 x 3 sprite.
+        let region = (2, 1, vec![1u8, 1, 1, 1, 2, 2, 2, 2]);
+        let sprite = rect(0.0, 0.0, 4.0, 3.0);
+        let (w, h, out) = place(region.clone(), [1.0, 1.0], &sprite).unwrap();
+        assert_eq!((w, h), (4, 3));
+        let reds: Vec<u8> = out.chunks(4).map(|p| p[0]).collect();
+        assert_eq!(reds, [0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0]);
+        assert!(out.chunks(4).all(|p| p[0] != 0 || p == [0, 0, 0, 0]));
+        assert!(place(region, [3.0, 0.0], &sprite).is_err());
     }
 
     #[test]

@@ -242,18 +242,38 @@ fn a_sprite_its_atlas_holds_whole_is_cut_from_the_atlas_texture() {
 }
 
 #[test]
+fn a_sprite_its_atlas_trimmed_is_its_region_in_a_transparent_image() {
+    // The atlas packs rectangles and kept one column of the 2 x 2 sprite, 1 pixel from its left.
+    let file = File(vec![
+        sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+        texture(),
+        atlas_holding(rect(1.0, 0.0, 1.0, 2.0), vector(1.0, 0.0), 3),
+    ]);
+    let got = members(Sprite.convert(id(1), &file).unwrap().unwrap());
+    let Content::Image(image) = &got[0].1 else {
+        panic!("unexpected members {got:?}");
+    };
+    assert_eq!((image.width(), image.height()), (2, 2));
+    let alphas: Vec<u8> = image.pixels().chunks(4).map(|p| p[3]).collect();
+    assert_eq!(alphas, [0, 3, 0, 3]);
+    let reds: Vec<u8> = image.pixels().chunks(4).map(|p| p[0]).collect();
+    assert_eq!(reds, [0, 11, 0, 21]);
+}
+
+#[test]
 fn sprites_drawn_from_elsewhere_are_unsupported() {
     let whole = || rect(0.0, 0.0, 4.0, 3.0);
+    // Settings 1 packs tight outlines, 3 rectangles, and 11 rotates a rectangle.
     let cases = [
         File(vec![
             sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
             texture(),
-            atlas_holding(rect(1.0, 0.0, 1.5, 2.0), vector(0.0, 0.0), 3),
+            atlas_holding(rect(1.0, 0.0, 1.5, 2.0), vector(0.0, 0.0), 1),
         ]),
         File(vec![
             sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
             texture(),
-            atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(1.0, 0.0), 3),
+            atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(1.0, 0.0), 1),
         ]),
         File(vec![
             sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),

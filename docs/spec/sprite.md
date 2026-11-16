@@ -38,11 +38,15 @@ The document has no whitespace.
 
 **Image.** The `texture` of the render data is decoded as the `texture` form decodes a `Texture2D`. Each edge of `m_Rect`, or of `textureRect` when the render data comes from the atlas, is rounded to the nearest whole pixel, ties to even: the left edge is `x`, the right edge `x + width`, the bottom edge `y` and the top edge `y + height`, the sums taken in double precision. The image is the pixels between those edges, with `y` counted from the bottom row of the texture.
 
+**Trimmed sprites.** An atlas that packs rectangles (bit 1 of `settingsRaw` set) may trim the transparent margins of a sprite: its `textureRect` is then smaller than `m_Rect`, or its `textureRectOffset` is not zero. The image of such a sprite has the size of `m_Rect`, each side rounded to the nearest whole pixel, ties to even. It is transparent black except for the pixels cut from `textureRect`, whose bottom left corner lies at `textureRectOffset`, rounded the same way, from the bottom left of the image.
+
 **Outcomes other than an image:**
 
 | Case | Result |
 |---|---|
-| The render data comes from the atlas and is rotated (bits 2 to 5 of `settingsRaw`), has a non-zero `textureRectOffset`, or has a `textureRect` of another size than `m_Rect` | Error `unsupported` |
+| The render data comes from the atlas and is rotated (bits 2 to 5 of `settingsRaw`) | Error `unsupported` |
+| The render data comes from an atlas that packs tight outlines (bit 1 of `settingsRaw` clear) and has a non-zero `textureRectOffset` or a `textureRect` of another size than `m_Rect` | Error `unsupported` |
+| The region of a trimmed sprite reaches outside its image | Error `malformed` |
 | The render data is `m_RD` and `settingsRaw` has the packed bit (bit 0) set | Error `unsupported` |
 | The render data has an `alphaTexture` that is not null | Error `unsupported` |
 | The rounded rectangle is empty or reaches outside the texture | Error `malformed` |
@@ -58,7 +62,7 @@ The `image` member is decoded content, which the evaluator encodes as the `textu
 
 ## 5. Correctness
 
-The image is the rectangle the sprite was defined with, so it keeps the size of the picture and the place of its content, including transparent margins. `m_RD.textureRect` is the smaller box around the mesh, in fractional pixels when the mesh is tight; the layout records it for programs that draw the mesh. The rectangle is rounded to whole pixels the same way an image library crops a box given in fractional pixels.
+The image is the rectangle the sprite was defined with, so it keeps the size of the picture and the place of its content, including transparent margins. A rectangle-packing atlas trims only margins whose pixels are fully transparent, so putting the region back at its offset in a transparent image gives the picture of the sprite; colour values the margins held under zero alpha are not kept. `m_RD.textureRect` is the smaller box around the mesh, in fractional pixels when the mesh is tight; the layout records it for programs that draw the mesh. The rectangle is rounded to whole pixels the same way an image library crops a box given in fractional pixels.
 
 The crop and the layout are checked on real bundles against UnityPy: the image against the same rectangle cut from the texture decoded by the reference decoders of `tools/compare-texture`, and every value of the layout against the fields UnityPy reads.
 
@@ -67,4 +71,4 @@ The crop and the layout are checked on real bundles against UnityPy: the image a
 | Version | Change |
 |---|---|
 | 1 | First version |
-| 2 | The image is the rectangle `m_Rect` |
+| 2 | The image is the rectangle `m_Rect`. Revision 1 converts sprites that a rectangle-packing atlas trimmed, which version 2 refused |

@@ -13,7 +13,7 @@ use crate::EncodeError;
 pub const NAME: &str = "mp3";
 
 /// The encoder version.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 
 /// The bitrates of MPEG-1, for 32, 44.1 and 48 kHz, in kbit/s.
 const MPEG1: [u32; 14] = [
@@ -40,17 +40,16 @@ fn bitrates(sample_rate: u32) -> Option<&'static [u32]> {
     }
 }
 
-/// The bitrate a sound of `sample_rate` is encoded at, in kbit/s: one and a half times
-/// `source`, the bitrate of its lossy source in bit/s, rounded up to a bitrate of its MPEG
-/// version and at most the highest one. Decoded samples, which have no lossy source, take the
-/// highest.
+/// The bitrate a sound of `sample_rate` is encoded at, in kbit/s: twice `source`, the bitrate
+/// of its lossy source in bit/s, rounded up to a bitrate of its MPEG version and at most the
+/// highest one. Decoded samples, which have no lossy source, take the highest.
 pub fn bitrate(sample_rate: u32, source: Option<u32>) -> Result<u32, EncodeError> {
     let rates = bitrates(sample_rate)
         .ok_or_else(|| failed(format!("no MPEG version has {sample_rate} Hz")))?;
     let highest = rates[rates.len() - 1];
     Ok(match source {
         Some(source) => {
-            let wanted = u64::from(source) * 3 / 2;
+            let wanted = u64::from(source) * 2;
             let fits = rates.iter().find(|&&rate| u64::from(rate) * 1000 >= wanted);
             fits.copied().unwrap_or(highest)
         }

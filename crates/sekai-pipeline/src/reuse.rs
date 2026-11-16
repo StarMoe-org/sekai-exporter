@@ -38,6 +38,7 @@ use std::io;
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, UnitRecords};
 use sekai_convert::Converter;
+use sekai_unity::ClassLayouts;
 use sekai_unity::index::{BundleIndex, VersionIndex};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
@@ -247,7 +248,7 @@ impl<'m> Reuse<'m> {
     ) -> io::Result<Self> {
         let _span = stream.recorder.span("plan", "reuse", "");
         let units = Units::new(manifest);
-        let context = context(stream);
+        let context = context(stream.classes, stream.limit);
         let identities = identities(stream);
         let current: BTreeSet<&str> = identities.values().flat_map(Identities::both).collect();
         let scanned: BTreeSet<String> = identities.keys().map(|&form| form.to_owned()).collect();
@@ -407,14 +408,32 @@ fn entries_to_evaluate(
         .collect()
 }
 
-/// What every unit key of an evaluation with `stream` starts with: the revision, the class
-/// layouts and the size limit of assets.
-fn context(stream: &Stream<'_>) -> String {
+/// What the results of units follow from besides the bytes of their bundles, for an evaluation
+/// with `converters`, the class layouts `classes` and the size limit of assets `limit`: the start
+/// of every unit key under `unit`, and the identities of each converter under `form <name>`.
+/// Evaluations with the same identity give a unit with the same bundles the same result, so a
+/// run whose inputs and evaluation identity are those of the last run has nothing to evaluate.
+pub fn evaluation_identity(
+    converters: &[Box<dyn Converter>],
+    classes: &dyn ClassLayouts,
+    limit: Option<u64>,
+) -> BTreeMap<String, String> {
+    let forms = converters.iter().map(|converter| {
+        let identity = Identities::of(converter.as_ref()).failing;
+        (format!("form {}", converter.name()), identity)
+    });
+    let unit = ("unit".to_owned(), context(classes, limit));
+    std::iter::once(unit).chain(forms).collect()
+}
+
+/// What every unit key of an evaluation with the class layouts `classes` and the size limit of
+/// assets `limit` starts with: the revision, the class layouts and the limit.
+fn context(classes: &dyn ClassLayouts, limit: Option<u64>) -> String {
     let mut text = format!("{REVISION}\n");
-    if let Some(identity) = stream.classes.identity() {
+    if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", eval::hex(&identity)));
     }
-    if let Some(limit) = stream.limit {
+    if let Some(limit) = limit {
         text.push_str(&format!("limit {limit}\n"));
     }
     text

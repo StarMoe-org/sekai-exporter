@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use sekai_catalog::{Key, NoRemote, Objects, Remote};
-use sekai_format::identity::VersionIdentity;
+use sekai_format::identity::RecordedVersion;
 use sekai_format::publication::Pointer;
 use sekai_pipeline::state::{DirectoryFiles, StateFiles};
 use sekai_publish::{Layout, Object};
@@ -109,7 +109,7 @@ impl<'a> Site<'a> {
 pub(super) fn last_version(
     files: &dyn StateFiles,
     region: &str,
-) -> Result<Option<VersionIdentity>, String> {
+) -> Result<Option<RecordedVersion>, String> {
     let failed = |e: String| format!("the last version of {region}: {e}");
     let bytes = files
         .read(&version_file(region))
@@ -120,13 +120,14 @@ pub(super) fn last_version(
         .map_err(|e| failed(e.to_string()))
 }
 
-/// Records `identity` in `files` as the last version of `region`.
+/// Records `recorded` in `files` as the last version of `region`.
 pub(super) fn set_last_version(
     files: &dyn StateFiles,
     region: &str,
-    identity: &VersionIdentity,
+    recorded: &RecordedVersion,
 ) -> Result<(), String> {
-    let bytes = serde_json::to_vec(identity).map_err(|e| e.to_string())?;
-    let written = files.write(&version_file(region), &bytes);
-    written.map_err(|e| format!("the last version of {region}: {e}"))
+    let bytes = serde_json::to_vec(recorded).map_err(|e| e.to_string())?;
+    files
+        .write(&version_file(region), &bytes)
+        .map_err(|e| format!("the last version of {region}: {e}"))
 }

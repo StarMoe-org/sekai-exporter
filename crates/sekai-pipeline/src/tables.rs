@@ -43,6 +43,20 @@ pub struct TableStage<'a> {
     pub previous: &'a [TableOutput],
 }
 
+/// What the assets that `converters` build follow from besides their reads: the form and version
+/// of each converter, under `table <name>`. An asset is kept from the previous run only while
+/// these and its reads are the same.
+pub fn evaluation_identity(converters: &[Box<dyn TableConverter>]) -> BTreeMap<String, String> {
+    converters
+        .iter()
+        .map(|converter| {
+            let name = converter.name();
+            let identity = format!("{name} {}", converter.version());
+            (format!("table {name}"), identity)
+        })
+        .collect()
+}
+
 /// An asset built from tables, or kept from the previous run.
 #[derive(Debug, Clone)]
 pub struct Built {

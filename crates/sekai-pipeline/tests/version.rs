@@ -9,8 +9,7 @@ use sekai_convert::image::Texture;
 use sekai_convert::{Content, Context, Converter, PPtr};
 use sekai_pipeline::version::{indexed_bundle, indexed_files};
 use sekai_pipeline::{BundleIndexes, BundleInput, NoBundleIndexes, Version};
-use sekai_unity::serialized::TypeTree;
-use sekai_unity::{ByteSource, Chunk, ClassLayouts, NoBlockCache, NoClasses};
+use sekai_unity::{ByteSource, Chunk, ClassLayouts, NoBlockCache, NoClasses, TypeTree};
 use sha2::{Digest, Sha256};
 
 fn input(file: &str, name: &str) -> BundleInput {

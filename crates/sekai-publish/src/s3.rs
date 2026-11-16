@@ -7,18 +7,20 @@
 //! What the bucket holds is recorded in [`Holdings`](sekai_catalog::Holdings) as each upload is accepted, and a publication
 //! uploads only the local objects that are not recorded, without asking the bucket about them.
 //! Each upload is signed with the SHA-256 of its bytes, which is also its name, so the bucket
-//! rejects bytes that do not match. The pointer is written last, and only when it changes. When the
-//! record cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
+//! rejects bytes that do not match. An object larger than 16 MiB is written as a multipart upload,
+//! so that each request stays short; its bytes are hashed as they are read, and the upload is
+//! aborted when they do not match its name. The pointer is written last, and only when it changes.
+//! When the record cannot be trusted, [`S3::holdings`] lists the whole store to replace it.
 //!
 //! The bucket also keeps the state of the runs that publish to it, as files under
 //! `<prefix>state/` that no publication refers to: [`S3::read_state`] and [`S3::write_state`].
-//! A state file larger than 16 MiB is written as a multipart upload, so that each request stays
-//! short.
+//! A state file larger than 16 MiB is written as a multipart upload as well.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime};
@@ -48,8 +50,9 @@ const POINTER_CACHE_CONTROL: &str = "no-cache";
 const STATE_CACHE_CONTROL: &str = "private, no-store";
 /// The media type of the state files.
 const STATE_MEDIA_TYPE: &str = "application/octet-stream";
-/// The size of the parts of a large state file. Each part is a request of its own, short enough
-/// that no service between the client and the bucket cuts it off; S3 asks for at least 5 MiB.
+/// The size of the parts of a large object or state file. Each part is a request of its own,
+/// short enough that no service between the client and the bucket cuts it off and that its
+/// signature is still current when it arrives; S3 asks for at least 5 MiB.
 const PART: u64 = 16 << 20;
 /// The store directories: the first two hexadecimal digits of the names.
 const SHARDS: usize = 256;
@@ -483,6 +486,32 @@ impl S3 {
         }
     }
 
+    /// Writes the local file `path` as the object `key` of `size` bytes, as a multipart upload when
+    /// it is larger than one part. A part is checked by the bucket against its own SHA-256, so the
+    /// bytes of a multipart upload are checked against `key` as they are read instead.
+    fn put_object(
+        &self,
+        key: &Key,
+        size: u64,
+        media_type: &str,
+        path: &Path,
+    ) -> Result<(), String> {
+        let name = self.object(key);
+        let open = || File::open(path).map_err(|e| format!("{key}: {e}"));
+        if size > PART {
+            let source = Named::new(open()?, key.sha256);
+            self.put_in_parts(&name, media_type, IMMUTABLE_CACHE_CONTROL, source)
+        } else {
+            self.put(
+                &name,
+                &hex(&key.sha256),
+                media_type,
+                IMMUTABLE_CACHE_CONTROL,
+                open,
+            )
+        }
+    }
+
     /// Writes the bytes of `source` to `name` as a multipart upload of [`PART`]-byte parts. An
     /// upload that fails is aborted, so that the bucket does not keep its parts.
     fn put_in_parts(
@@ -859,21 +888,53 @@ fn put_objects(
 ) -> Result<(), PublishError> {
     each(unrecorded.len(), s3.bucket.connections, |i| {
         let (key, (size, media_type)) = unrecorded[i];
-        let path = local.path(key);
-        s3.put(
-            &s3.object(key),
-            &hex(&key.sha256),
-            media_type,
-            IMMUTABLE_CACHE_CONTROL,
-            || File::open(&path).map_err(|e| format!("{key}: {e}")),
-        )
-        .map_err(|message| PublishError::new("files", message))?;
+        s3.put_object(key, *size, media_type, &local.path(key))
+            .map_err(|message| PublishError::new("files", message))?;
         confirmed
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push((key.clone(), *size));
         Ok(())
     })
+}
+
+/// A reader of the bytes of an object, which fails at their end when they do not have the SHA-256
+/// the object is named by.
+struct Named<R> {
+    source: R,
+    /// The hash of the bytes read so far, until the end has been checked.
+    hash: Option<Sha256>,
+    sha256: [u8; 32],
+}
+
+impl<R> Named<R> {
+    fn new(source: R, sha256: [u8; 32]) -> Self {
+        Self {
+            source,
+            hash: Some(Sha256::new()),
+            sha256,
+        }
+    }
+}
+
+impl<R: Read> Read for Named<R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.source.read(buffer)?;
+        if read > 0 {
+            if let Some(hash) = &mut self.hash {
+                hash.update(&buffer[..read]);
+            }
+        } else if !buffer.is_empty()
+            && let Some(hash) = self.hash.take()
+            && hash.finalize()[..] != self.sha256
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("the bytes do not have the SHA-256 {}", hex(&self.sha256)),
+            ));
+        }
+        Ok(read)
+    }
 }
 
 /// Runs `job` for indices `0..n` on up to `threads` threads, stopping after the first failure.

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
-use sekai_format::publication::{Pointer, TreeReference};
+use sekai_format::publication::{ObjectReference, Pointer};
 use sekai_serve::{
     Body, Fault, Fetched, Limits, Lookup, ObjectId, Pending, Read, Request, Resolver, Response,
     Routes, Slice,
@@ -97,18 +97,6 @@ impl Published {
     /// Writes the pointer of `version` of `target`, which names the path index `paths`, and makes
     /// it current.
     fn point(&mut self, target: &str, version: &str, paths: Option<String>) {
-        self.point_to(target, version, paths, None);
-    }
-
-    /// Writes the pointer of `version` of `target`, which names the path index `paths` and the
-    /// directory tree `tree`, and makes it current.
-    fn point_to(
-        &mut self,
-        target: &str,
-        version: &str,
-        paths: Option<String>,
-        tree: Option<TreeReference>,
-    ) {
         let pointer = Pointer {
             format: "pointer".to_owned(),
             version: sekai_format::publication::VERSION,
@@ -116,9 +104,17 @@ impl Published {
             revision: "0".repeat(8),
             root: None,
             paths,
-            tree,
+            tree: None,
+            history: None,
+            changes: None,
         };
-        let bytes = serde_json::to_vec(&pointer).unwrap();
+        self.make_current(target, &pointer);
+    }
+
+    /// Writes `pointer` as the pointer of its version of `target`, and makes it current.
+    fn make_current(&mut self, target: &str, pointer: &Pointer) {
+        let version = &pointer.published_version;
+        let bytes = serde_json::to_vec(pointer).unwrap();
         for name in ["current".to_owned(), format!("versions/{version}")] {
             self.pointers
                 .insert(format!("{target}/{name}.json"), bytes.clone());
@@ -1191,7 +1187,7 @@ mod directories {
     }
 }
 
-mod trees {
+mod documents {
     use super::*;
 
     const TREE: &str = "/trees/jp/storage";
@@ -1199,6 +1195,8 @@ mod trees {
     fn resolver() -> Resolver {
         let json = r#"{ "routes": [
             { "pattern": "/trees/{region}/{view}", "tree": true },
+            { "pattern": "/history/{region}/{view}", "history": true },
+            { "pattern": "/changes/{region}/{view}@{version}", "changes": true },
             { "pattern": "/{region}/{view}/{path}" }
         ] }"#;
         Resolver::new(
@@ -1207,48 +1205,54 @@ mod trees {
         )
     }
 
-    /// The storage view of `jp`, whose pointer names the directory tree `tree`.
-    fn published(tree: Option<TreeReference>) -> Published {
+    /// The storage view of `jp` at version `1`, whose pointer `name` gives its documents.
+    fn published(name: impl FnOnce(&mut Pointer)) -> Published {
         let mut published = Published::default();
         published.publish("jp/storage", "1", &files(&["a.png"]), 8192);
         let current = &published.pointers["jp/storage/current.json"];
-        let pointer: Pointer = serde_json::from_slice(current).unwrap();
-        published.point_to("jp/storage", "1", pointer.paths, tree);
+        let mut pointer: Pointer = serde_json::from_slice(current).unwrap();
+        name(&mut pointer);
+        published.make_current("jp/storage", &pointer);
         published.reads();
         published
     }
 
-    fn tree() -> TreeReference {
-        TreeReference {
-            sha256: hex(&sha256(b"tree")),
+    /// A document of 42 bytes, named by the hash of `bytes`.
+    fn document(bytes: &[u8]) -> ObjectReference {
+        ObjectReference {
+            sha256: hex(&sha256(bytes)),
             size: 42,
         }
     }
 
-    #[test]
-    fn the_tree_is_the_object_the_pointer_names() {
-        let (resolver, published) = (resolver(), published(Some(tree())));
-        let response = answer(&resolver, &published, &get(TREE));
+    /// Checks that `response` sends the document `bytes` names under `file_name`.
+    fn sends(response: &Response, bytes: &[u8], file_name: &str) {
         assert_eq!(response.status, 200);
         let expected = Body::Object(Slice {
-            object: object(sha256(b"tree"), "json.gz"),
+            object: object(sha256(bytes), "json.gz"),
             start: 0,
             length: 42,
             size: 42,
         });
         assert_eq!(response.body, expected);
-        let etag = format!("\"{}\"", tree().sha256);
+        let etag = format!("\"{}\"", document(bytes).sha256);
+        let disposition = format!("inline; filename=\"{file_name}\"");
         for (name, value) in [
             ("content-type", "application/gzip"),
             ("content-length", "42"),
             ("etag", etag.as_str()),
-            (
-                "content-disposition",
-                "inline; filename=\"directory-tree.json.gz\"",
-            ),
+            ("content-disposition", disposition.as_str()),
         ] {
-            assert_eq!(header(&response, name), Some(value), "{name}");
+            assert_eq!(header(response, name), Some(value), "{name}");
         }
+    }
+
+    #[test]
+    fn the_tree_is_the_object_the_pointer_names() {
+        let resolver = resolver();
+        let published = published(|pointer| pointer.tree = Some(document(b"tree")));
+        let response = answer(&resolver, &published, &get(TREE));
+        sends(&response, b"tree", "directory-tree.json.gz");
         assert_eq!(published.reads(), ["pointer"]);
         // The pointer is remembered, so the next request reads nothing, and the files of the
         // view are still found by path.
@@ -1259,22 +1263,46 @@ mod trees {
     }
 
     #[test]
-    fn a_publication_without_a_tree_has_none_to_send() {
-        let (resolver, published) = (resolver(), published(None));
-        assert_eq!(answer(&resolver, &published, &get(TREE)).status, 404);
-        assert_eq!(
-            answer(&resolver, &published, &get("/trees/en/storage")).status,
-            404
-        );
+    fn the_history_and_the_changes_are_the_objects_the_pointer_names() {
+        let resolver = resolver();
+        let published = published(|pointer| {
+            pointer.history = Some(document(b"history"));
+            pointer.changes = Some(document(b"changes"));
+        });
+        let history = answer(&resolver, &published, &get("/history/jp/storage"));
+        sends(&history, b"history", "version-history.json.gz");
+        let changes = answer(&resolver, &published, &get("/changes/jp/storage@1"));
+        sends(&changes, b"changes", "version-changes.json.gz");
+        let unpublished = answer(&resolver, &published, &get("/changes/jp/storage@2"));
+        assert_eq!(unpublished.status, 404);
     }
 
     #[test]
-    fn a_tree_named_by_something_other_than_a_hash_fails_the_lookup() {
-        let named = TreeReference {
+    fn a_publication_without_a_document_has_none_to_send() {
+        let resolver = resolver();
+        let published = published(|_| {});
+        for path in [
+            TREE,
+            "/trees/en/storage",
+            "/history/jp/storage",
+            "/changes/jp/storage@1",
+        ] {
+            assert_eq!(
+                answer(&resolver, &published, &get(path)).status,
+                404,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_document_named_by_something_other_than_a_hash_fails_the_lookup() {
+        let named = ObjectReference {
             sha256: "../secret".to_owned(),
             size: 1,
         };
-        let (resolver, published) = (resolver(), published(Some(named)));
+        let resolver = resolver();
+        let published = published(|pointer| pointer.history = Some(named));
         let (response, fault) = lookup(&resolver, &published, &get(TREE), 0);
         assert_eq!(response.status, 500);
         assert!(matches!(fault.unwrap().read, Read::Pointer(_)));

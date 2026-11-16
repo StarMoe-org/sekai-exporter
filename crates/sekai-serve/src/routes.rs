@@ -26,18 +26,29 @@ pub struct Target {
     pub entry: Entry,
 }
 
-/// A file, a directory or the whole tree of a view.
+/// A file, a directory, or a document that the pointer of a view names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// The path in the view: of a file, or of a directory when it is empty, for the root, or
     /// ends with `/`.
     Path(String),
+    /// A document of the publication.
+    Document(Document),
+}
+
+/// A document that the pointer of a publication names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Document {
     /// The directory tree of the view.
     Tree,
+    /// The version history of the view.
+    History,
+    /// The changes of the version since the version before it.
+    Changes,
 }
 
 impl Entry {
-    /// Whether the entry is a directory rather than a file or the tree.
+    /// Whether the entry is a directory rather than a file or a document.
     pub fn is_directory(&self) -> bool {
         matches!(self, Self::Path(path) if path.is_empty() || path.ends_with('/'))
     }
@@ -109,14 +120,14 @@ enum Piece {
 enum Ending {
     /// A path in the view, which the rest of the URL path gives.
     Path,
-    /// The directory tree of the view, after which the URL path ends.
-    Tree,
+    /// A document of the publication, after which the URL path ends.
+    Document(Document),
 }
 
 /// A pattern and the names it fixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Route {
-    /// The segments before `{path}`, or all of them in a route to the directory tree.
+    /// The segments before `{path}`, or all of them in a route to a document.
     segments: Vec<Vec<Piece>>,
     ending: Ending,
     region: Option<String>,
@@ -163,6 +174,31 @@ struct RouteFile {
     /// Whether the route names the directory tree of the view, with a pattern without `{path}`.
     #[serde(default)]
     tree: bool,
+    /// Whether the route names the version history of the view, with a pattern without `{path}`.
+    #[serde(default)]
+    history: bool,
+    /// Whether the route names the changes of the version, with a pattern without `{path}`.
+    #[serde(default)]
+    changes: bool,
+}
+
+impl RouteFile {
+    /// The document the route names, if it names one. Fails when it names more than one.
+    fn document(&self) -> Result<Option<Document>, &'static str> {
+        let named = [
+            (self.tree, Document::Tree),
+            (self.history, Document::History),
+            (self.changes, Document::Changes),
+        ];
+        let mut named = named
+            .into_iter()
+            .filter_map(|(on, document)| on.then_some(document));
+        let document = named.next();
+        if named.next().is_some() {
+            return Err("it names more than one of tree, history and changes");
+        }
+        Ok(document)
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -242,11 +278,14 @@ impl Route {
             .ok_or_else(|| error("it does not start with /"))?
             .split('/')
             .collect();
-        let (before, ending) = match (texts.split_last(), file.tree) {
-            (Some((&"{path}", _)), true) => return Err(error("a route to the tree has no {path}")),
-            (Some((&"{path}", before)), false) => (before, Ending::Path),
-            (_, false) => return Err(error("its last segment is not {path}")),
-            (_, true) => (texts.as_slice(), Ending::Tree),
+        let document = file.document().map_err(error)?;
+        let (before, ending) = match (texts.split_last(), document) {
+            (Some((&"{path}", _)), Some(_)) => {
+                return Err(error("a route to a document has no {path}"));
+            }
+            (Some((&"{path}", before)), None) => (before, Ending::Path),
+            (_, None) => return Err(error("its last segment is not {path}")),
+            (_, Some(document)) => (texts.as_slice(), Ending::Document(document)),
         };
         let segments = before
             .iter()
@@ -270,7 +309,7 @@ impl Route {
         }
         let entry = match (self.ending, parts.next()) {
             (Ending::Path, Some(path)) => Entry::Path(percent_decode(path)?),
-            (Ending::Tree, None) => Entry::Tree,
+            (Ending::Document(document), None) => Entry::Document(document),
             _ => return None,
         };
         Some(Target {

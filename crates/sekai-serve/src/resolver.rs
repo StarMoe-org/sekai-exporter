@@ -2,8 +2,8 @@
 //!
 //! A lookup is a short sequence of reads that the host makes: the pointer of the view, the root
 //! of the path index the pointer names, and the chunk of the index that holds the path, or, for a
-//! directory, each chunk in which a file or a subdirectory of it starts. The directory tree of a
-//! view needs only the pointer, which names it. The resolver remembers what the reads gave,
+//! directory, each chunk in which a file or a subdirectory of it starts. The directory tree, the
+//! version history and the changes of a publication need only the pointer, which names them. The resolver remembers what the reads gave,
 //! within fixed limits, so most lookups read nothing.
 
 use std::fmt;
@@ -12,13 +12,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use sekai_format::paths::{Chunk, ChunkReference, PathIndex};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{ObjectReference, Pointer};
 use sha2::{Digest, Sha256};
 
 use crate::cache::Lru;
 use crate::listing::{self, Listed, Listing};
 use crate::response::{ObjectId, Request, Response};
-use crate::routes::{Entry, Routes, Target};
+use crate::routes::{Document, Entry, Routes, Target};
 
 /// The longest URL path the resolver looks at, in bytes.
 const MAX_PATH_BYTES: usize = 8 << 10;
@@ -195,12 +195,27 @@ struct Named {
     /// The root of the path index.
     root: Option<[u8; 32]>,
     /// The directory tree.
-    tree: Option<TreeObject>,
+    tree: Option<Stored>,
+    /// The version history.
+    history: Option<Stored>,
+    /// The changes of the version.
+    changes: Option<Stored>,
 }
 
-/// The directory tree of a publication, an object of the store.
+impl Named {
+    /// The object of `document`, if the pointer names one.
+    fn document(&self, document: Document) -> Option<Stored> {
+        match document {
+            Document::Tree => self.tree,
+            Document::History => self.history,
+            Document::Changes => self.changes,
+        }
+    }
+}
+
+/// A document of a publication, an object of the store.
 #[derive(Debug, Clone, Copy)]
-struct TreeObject {
+struct Stored {
     sha256: [u8; 32],
     size: u64,
 }
@@ -375,24 +390,25 @@ impl<'a> Asked<'a> {
     }
 
     /// Goes on from what the pointer names: to the root of the path index for a path, or to the
-    /// answer for the directory tree.
+    /// answer for a document.
     fn pointed(self, named: Named) -> Lookup<'a> {
         match &self.target.entry {
             Entry::Path(_) => match named.root {
                 Some(root) => self.root(root),
                 None => self.not_found(),
             },
-            Entry::Tree => match named.tree {
-                Some(tree) => self.tree(tree),
+            &Entry::Document(document) => match named.document(document) {
+                Some(stored) => self.document(document, stored),
                 None => self.not_found(),
             },
         }
     }
 
-    /// Answers with `tree`, the directory tree of the view.
-    fn tree(&self, tree: TreeObject) -> Lookup<'a> {
+    /// Answers with `document`, the object `stored`.
+    fn document(&self, document: Document, stored: Stored) -> Lookup<'a> {
         let routes = &self.resolver.routes;
-        self.done(routes.tree(&self.request, tree.sha256, tree.size))
+        let response = routes.document(&self.request, document, stored.sha256, stored.size);
+        self.done(response)
     }
 
     /// Goes on from the root of the path index: a decoded one, or by reading it.
@@ -583,8 +599,8 @@ impl<'a> Pending<'a> {
     }
 }
 
-/// What the pointer in `bytes` names: the root of its path index and its directory tree, each
-/// if it names one.
+/// What the pointer in `bytes` names: the root of its path index and its documents, each if it
+/// names one.
 fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
     let pointer: Pointer = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if pointer.format != "pointer" {
@@ -594,16 +610,20 @@ fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
         parse_sha256(sha256)
             .ok_or_else(|| format!("it names the {what} {sha256:?}, which is not a SHA-256"))
     };
+    let stored = |what: &str, document: Option<ObjectReference>| {
+        let object = |document: ObjectReference| -> Result<Stored, String> {
+            let sha256 = hash(what, &document.sha256)?;
+            let size = document.size;
+            Ok(Stored { sha256, size })
+        };
+        document.map(object).transpose()
+    };
     let root = pointer.paths.map(|paths| hash("path index", &paths));
-    let tree = pointer.tree.map(|tree| {
-        hash("directory tree", &tree.sha256).map(|sha256| TreeObject {
-            sha256,
-            size: tree.size,
-        })
-    });
     Ok(Named {
         root: root.transpose()?,
-        tree: tree.transpose()?,
+        tree: stored("directory tree", pointer.tree)?,
+        history: stored("version history", pointer.history)?,
+        changes: stored("version changes", pointer.changes)?,
     })
 }
 

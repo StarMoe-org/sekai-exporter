@@ -109,6 +109,8 @@ impl Output {
             root: None,
             paths: Some(hex(&root)),
             tree: None,
+            history: None,
+            changes: None,
         };
         let pointer = serde_json::to_vec(&pointer).unwrap();
         let view = self.0.join("published").join(region).join("storage");

@@ -1,7 +1,7 @@
 //! Routes files: valid ones resolve URL paths to the files they name, and invalid ones are
 //! refused.
 
-use sekai_serve::{Entry, Routes, Target};
+use sekai_serve::{Document, Entry, Routes, Target};
 
 fn routes(json: &str) -> Routes {
     Routes::from_json(json.as_bytes()).unwrap()
@@ -13,6 +13,8 @@ fn sample() -> Routes {
             "routes": [
                 { "pattern": "/trees/{region}/{view}", "tree": true },
                 { "pattern": "/trees/{region}@{version}/{view}", "tree": true },
+                { "pattern": "/history/{region}/{view}", "history": true },
+                { "pattern": "/changes/{region}/{view}@{version}", "changes": true },
                 { "pattern": "/files/{region}-{view}/{path}" },
                 { "pattern": "/jp-storage/{path}", "region": "jp", "view": "storage" },
                 { "pattern": "/{region}@{version}/{path}", "view": "canonical" },
@@ -109,11 +111,16 @@ fn a_route_to_the_tree_names_the_directory_tree_of_a_view() {
     let cases = [
         (
             "/trees/jp/storage",
-            named("jp", "storage", None, Entry::Tree),
+            named("jp", "storage", None, Entry::Document(Document::Tree)),
         ),
         (
             "/trees/jp@6.1.0/canonical",
-            named("jp", "canonical", Some("6.1.0"), Entry::Tree),
+            named(
+                "jp",
+                "canonical",
+                Some("6.1.0"),
+                Entry::Document(Document::Tree),
+            ),
         ),
         // Nothing may follow the tree, and the later routes do not take what it does not.
         (
@@ -125,7 +132,34 @@ fn a_route_to_the_tree_names_the_directory_tree_of_a_view() {
     for (path, expected) in cases {
         assert_eq!(routes.resolve(path), expected, "{path}");
     }
-    assert!(!Entry::Tree.is_directory());
+    assert!(!Entry::Document(Document::Tree).is_directory());
+}
+
+#[test]
+fn routes_name_the_version_history_and_the_changes_of_a_version() {
+    let routes = sample();
+    let cases = [
+        (
+            "/history/jp/storage",
+            named("jp", "storage", None, Entry::Document(Document::History)),
+        ),
+        (
+            "/changes/jp/canonical@6.1.0",
+            named(
+                "jp",
+                "canonical",
+                Some("6.1.0"),
+                Entry::Document(Document::Changes),
+            ),
+        ),
+        (
+            "/changes/jp/canonical",
+            target("changes", "canonical", None, "jp/canonical"),
+        ),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(routes.resolve(path), expected, "{path}");
+    }
 }
 
 #[test]
@@ -213,6 +247,8 @@ fn invalid_routes_are_refused() {
         one(r#"{ "pattern": "/{region}/{view}/{path}", "tree": true }"#),
         one(r#"{ "pattern": "/", "region": "jp", "view": "storage", "tree": true }"#),
         one(r#"{ "pattern": "/trees/{region}", "tree": true }"#),
+        one(r#"{ "pattern": "/{region}/{view}/{path}", "history": true }"#),
+        one(r#"{ "pattern": "/{region}/{view}", "tree": true, "changes": true }"#),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "delivery": "redirect" }"#
             .to_owned(),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "store_url": "https://a" }"#

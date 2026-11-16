@@ -6,7 +6,8 @@ use sekai_catalog::{Key, NoRemote, Objects, Remote};
 use sekai_format::identity::RecordedVersion;
 use sekai_format::publication::Pointer;
 use sekai_pipeline::state::{DirectoryFiles, StateFiles};
-use sekai_publish::{Layout, Object};
+use sekai_publish::history::Versions;
+use sekai_publish::{Layout, Object, PublishError};
 
 use crate::bucket::Bucket;
 
@@ -78,6 +79,11 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// The published versions of `target`.
+    pub(super) fn versions<'s>(&'s self, target: &'s str) -> PublishedVersions<'s> {
+        PublishedVersions { site: self, target }
+    }
+
     /// Puts the objects of `referred` where the site serves them, and records in the holdings of
     /// `objects` that the site holds them. The output directory serves its local store, which
     /// holds them already.
@@ -101,6 +107,25 @@ impl<'a> Site<'a> {
                 sekai_publish::make_current(published, target, pointer).map_err(|e| e.to_string())
             }
             Self::Bucket(bucket) => bucket.make_current(target, pointer),
+        }
+    }
+}
+
+/// The published versions of a target of a site.
+pub(super) struct PublishedVersions<'s> {
+    site: &'s Site<'s>,
+    target: &'s str,
+}
+
+impl Versions for PublishedVersions<'_> {
+    fn pointer(&self, version: &str) -> Result<Option<Pointer>, PublishError> {
+        match self.site {
+            Site::Local { published, .. } => {
+                sekai_publish::version(published, self.target, version)
+            }
+            Site::Bucket(bucket) => bucket
+                .version(self.target, version)
+                .map_err(|e| PublishError::new("previous", e)),
         }
     }
 }

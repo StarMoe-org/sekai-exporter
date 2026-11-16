@@ -8,9 +8,12 @@ use sekai_catalog::{
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::publication::Pointer;
 use sekai_format::{AssetDocument, AssetError, MemberFile};
-use sekai_publish::patch::{self, Change, Previous};
+use sekai_publish::history::NoVersions;
+use sekai_publish::patch::{self, Change, Edition, Previous};
 use sekai_publish::plan::change;
-use sekai_publish::{Binding, File, Layout, Plan, documents, plan, publish, tree};
+use sekai_publish::{
+    Binding, File, Layout, Plan, Publication, PublishError, documents, plan, publish, tree,
+};
 
 struct Scratch(PathBuf);
 
@@ -320,6 +323,35 @@ fn a_plan_reads_the_documents_that_only_the_destination_holds() {
     assert!(bindings.iter().all(|b| local.contains(&b.document)));
 }
 
+/// Applies `change` to `previous` as the publication of `version` of `view` in `layout`, which
+/// records no time and finds no other published version.
+fn apply(
+    store: &LocalStore,
+    view: &str,
+    version: &str,
+    layout: Layout,
+    previous: &Previous,
+    change: Change,
+) -> Result<Publication, PublishError> {
+    let edition = Edition {
+        view,
+        version,
+        layout,
+        published_at: None,
+    };
+    patch::apply(store, store, &edition, previous, change, &NoVersions)
+}
+
+/// `pointer` without its version history and changes, which follow the publications before it:
+/// what a publication of the same files gives, whatever came before.
+fn contents(pointer: Pointer) -> Pointer {
+    Pointer {
+        history: None,
+        changes: None,
+        ..pointer
+    }
+}
+
 /// `count` assets in a few directories, every seventh of them failed.
 fn many(store: &LocalStore, count: usize, salt: &str) -> Vec<Binding> {
     (0..count)
@@ -358,28 +390,22 @@ fn a_change_gives_the_publication_of_the_new_assets() {
         let before = before.unwrap();
         let previous = Previous::read(&store, &before.pointer).unwrap();
         let change = change(&old, &new, &store, 2).unwrap();
-        let apply = |previous: &Previous| {
-            patch::apply(
-                &store,
-                &store,
-                "canonical",
-                "v2",
-                layout,
-                previous,
-                change.clone(),
-            )
+        let patch = |previous: &Previous| {
+            apply(&store, "canonical", "v2", layout, previous, change.clone())
         };
-        let patched = apply(&previous).unwrap();
+        let patched = patch(&previous).unwrap();
         let whole = plan("v2", &new, &store, 2).unwrap();
         let whole = documents(&store, "jp/canonical", &whole, layout).unwrap();
-        assert_eq!(patched.pointer, whole.pointer, "{layout:?}");
+        let expected = contents(whole.pointer.clone());
+        assert_eq!(contents(patched.pointer.clone()), expected, "{layout:?}");
         // Without the directory tree of the previous publication, the new one is made from every
         // file of its path index, and is the same.
-        let without_tree = apply(&Previous {
+        let without_tree = patch(&Previous {
             tree: None,
             ..previous.clone()
         });
-        assert_eq!(without_tree.unwrap().pointer, whole.pointer, "{layout:?}");
+        let without_tree = without_tree.unwrap().pointer;
+        assert_eq!(contents(without_tree), expected, "{layout:?}");
         assert!(
             patched.objects.len() * 20 < whole.objects.len(),
             "{layout:?}: {} of {}",
@@ -488,15 +514,7 @@ fn a_directory_is_replaced_file_by_file() {
             layout,
         );
         let previous = Previous::read(&store, &before.unwrap().pointer).unwrap();
-        let patched = patch::apply(
-            &store,
-            &store,
-            "storage",
-            "v2",
-            layout,
-            &previous,
-            change.clone(),
-        );
+        let patched = apply(&store, "storage", "v2", layout, &previous, change.clone());
         let whole = documents(
             &store,
             "jp/storage",
@@ -504,8 +522,8 @@ fn a_directory_is_replaced_file_by_file() {
             layout,
         );
         assert_eq!(
-            patched.unwrap().pointer,
-            whole.unwrap().pointer,
+            contents(patched.unwrap().pointer),
+            contents(whole.unwrap().pointer),
             "{layout:?}"
         );
     }
@@ -526,16 +544,7 @@ fn a_change_that_changes_nothing_keeps_every_document() {
     let previous = Previous::read(&store, &before.pointer).unwrap();
     let change = change(&assets, &assets, &store, 2).unwrap();
     assert!(change.is_empty());
-    let after = patch::apply(
-        &store,
-        &store,
-        "canonical",
-        "v1",
-        Layout::Index,
-        &previous,
-        change,
-    )
-    .unwrap();
+    let after = apply(&store, "canonical", "v1", Layout::Index, &previous, change).unwrap();
     assert_eq!(after.pointer, before.pointer);
 }
 
@@ -556,7 +565,7 @@ fn a_change_may_not_publish_two_files_at_one_path() {
     new.push(asset(&store, "d/a/image", &[("image", b"3")]));
     for layout in [Layout::Index, Layout::Paths] {
         let change = change(&old, &new, &store, 2).unwrap();
-        let error = patch::apply(&store, &store, "t", "v2", layout, &previous, change);
+        let error = apply(&store, "t", "v2", layout, &previous, change);
         let error = error.unwrap_err();
         assert!(error.message.contains("d/a/image.webp"), "{error}");
     }

@@ -115,8 +115,8 @@ fn a_second_publication_uploads_nothing() {
 
     let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     // Seven files, three shards, a chunk of directories, a chunk of one listing and the root, and
-    // a path index of one chunk, and the directory tree.
-    assert_eq!((report.uploaded, report.present), (16, 0));
+    // a path index of one chunk, the directory tree and the version history.
+    assert_eq!((report.uploaded, report.present), (17, 0));
     assert!(report.pointer_written);
     for file in &plan.files {
         assert_eq!(
@@ -139,7 +139,7 @@ fn a_second_publication_uploads_nothing() {
     let puts = server.count(Operation::Put);
     let (again, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
     assert_eq!(again, pointer);
-    assert_eq!((report.uploaded, report.present), (0, 16));
+    assert_eq!((report.uploaded, report.present), (0, 17));
     assert!(!report.pointer_written);
     assert_eq!(server.count(Operation::Put), puts);
 }
@@ -184,7 +184,7 @@ fn an_interrupted_publication_converges() {
 
     server.refuse_after(None);
     let (pointer, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
-    assert_eq!(report.uploaded + report.present, 16);
+    assert_eq!(report.uploaded + report.present, 17);
     assert!(report.present >= 4);
     assert_eq!(
         server.object(POINTER),
@@ -304,10 +304,10 @@ fn a_publication_uploads_only_unrecorded_objects() {
     .unwrap();
     assert_eq!(server.count(Operation::Head), 0);
 
-    // Changing one member uploads only the 10 changed objects (1 member, 1 document, the shards
+    // Changing one member uploads only the 11 changed objects (1 member, 1 document, the shards
     // "a" and "a/two", the chunks of the directories and of 1 listing, the root, the chunk and
-    // root of the path index, and the directory tree): the 6
-    // unchanged objects of v1 are recorded as held. The bucket is never asked about an object.
+    // root of the path index, the directory tree and the version history): the 6 unchanged
+    // objects of v1 are recorded as held. The bucket is never asked about an object.
     let (_, report) = publish(
         &objects,
         &s3,
@@ -315,7 +315,7 @@ fn a_publication_uploads_only_unrecorded_objects() {
         &sample(&store, "v2", b"mask2"),
     )
     .unwrap();
-    assert_eq!((report.uploaded, report.present), (10, 6));
+    assert_eq!((report.uploaded, report.present), (11, 6));
     assert_eq!(server.count(Operation::Head), 0);
 }
 
@@ -350,7 +350,7 @@ fn a_listing_replaces_the_holdings_and_restores_lost_objects() {
         remote: &NoRemote,
     };
     let (_, report) = publish(&objects, &s3, "jp/canonical", &plan).unwrap();
-    assert_eq!((report.uploaded, report.present), (1, 15));
+    assert_eq!((report.uploaded, report.present), (1, 16));
     assert!(!report.pointer_written);
     assert_eq!(
         server.object(&lost),

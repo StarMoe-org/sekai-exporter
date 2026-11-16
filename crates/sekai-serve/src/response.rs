@@ -1,17 +1,46 @@
-//! Responses: what a request is answered with, given the file, directory or tree it names.
+//! Responses: what a request is answered with, given the file, directory or document it names.
 
 use std::fmt;
 use std::sync::Arc;
 
-use sekai_format::directory_tree;
 use sekai_format::paths::ChunkFile;
 use sekai_format::publication::is_name;
+use sekai_format::{directory_tree, version_history};
 
 use crate::listing::Listed;
-use crate::routes::{Delivery, Routes, is_header_value};
+use crate::routes::{Delivery, Document, Routes, is_header_value};
 
-/// The file name the directory tree of a view is delivered under.
-const TREE_FILE_NAME: &str = "directory-tree.json.gz";
+/// How a document of a publication is stored and delivered.
+struct DocumentFile {
+    /// The file name it is delivered under.
+    file_name: &'static str,
+    /// Its extension in the store.
+    extension: &'static str,
+    /// Its media type.
+    media_type: &'static str,
+}
+
+impl Document {
+    fn file(self) -> DocumentFile {
+        match self {
+            Self::Tree => DocumentFile {
+                file_name: "directory-tree.json.gz",
+                extension: directory_tree::EXTENSION,
+                media_type: directory_tree::MEDIA_TYPE,
+            },
+            Self::History => DocumentFile {
+                file_name: "version-history.json.gz",
+                extension: version_history::EXTENSION,
+                media_type: version_history::MEDIA_TYPE,
+            },
+            Self::Changes => DocumentFile {
+                file_name: "version-changes.json.gz",
+                extension: version_history::EXTENSION,
+                media_type: version_history::MEDIA_TYPE,
+            },
+        }
+    }
+}
 
 /// The methods the resolver answers.
 const ALLOW: &str = "GET, HEAD, OPTIONS";
@@ -101,11 +130,11 @@ impl ObjectId {
         }
     }
 
-    /// A directory tree, `<aa>/<sha256>.json.gz`.
-    pub(crate) fn tree(sha256: [u8; 32]) -> Self {
+    /// A document of a publication, `<aa>/<sha256>.<extension>`.
+    fn document(sha256: [u8; 32], extension: &str) -> Self {
         Self {
             sha256,
-            extension: directory_tree::EXTENSION.to_owned(),
+            extension: extension.to_owned(),
         }
     }
 
@@ -177,17 +206,28 @@ impl Routes {
         Ok(self.deliver(request, file, object))
     }
 
-    /// The response to `request` with the directory tree of a view, the object with the hash
+    /// The response to `request` with `document` of a publication, the object with the hash
     /// `sha256` and `size` bytes.
-    pub(crate) fn tree(&self, request: &Request<'_>, sha256: [u8; 32], size: u64) -> Response {
+    pub(crate) fn document(
+        &self,
+        request: &Request<'_>,
+        document: Document,
+        sha256: [u8; 32],
+        size: u64,
+    ) -> Response {
+        let delivered = document.file();
         let file = ChunkFile {
-            path: TREE_FILE_NAME,
+            path: delivered.file_name,
             sha256,
-            extension: directory_tree::EXTENSION,
+            extension: delivered.extension,
             size,
-            media_type: directory_tree::MEDIA_TYPE,
+            media_type: delivered.media_type,
         };
-        self.deliver(request, file, ObjectId::tree(sha256))
+        self.deliver(
+            request,
+            file,
+            ObjectId::document(sha256, delivered.extension),
+        )
     }
 
     /// The response to `request` with `file`, the object `object`, as the routes deliver files.

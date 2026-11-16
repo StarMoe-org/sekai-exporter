@@ -28,16 +28,19 @@ An ADX audio track can end before the sample count of its header. The whole fram
 | The file has several audio tracks, a track is neither ADX nor HCA, or an HCA track is encrypted | Error `unsupported` |
 | The file is damaged | Error `malformed` or `truncated` |
 | The `ffmpeg` program cannot be found | Error `encoder_unavailable` |
+| The video stream holds no picture | Error `encode_failed` |
 | The `ffmpeg` program fails | Error `encode_failed` |
 
 ## 4. Container
 
-The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 3) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
+The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 5) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
 
 | Stream | Parameters |
 |---|---|
-| Video | H.264 from `libx264`: preset `medium`, 4 Mb/s, a keyframe every 12 frames, up to 2 B-frames, `yuv420p`, 2 sliced threads, one output frame for each input frame. A picture with an odd width or height is padded to even |
+| Video | H.264 from `libx264`: preset `veryfast`, one and a half times the bitrate of the MPEG-1 stream (its size × 8 × frame rate / its number of pictures), a keyframe every 12 frames, up to 2 B-frames, `yuv420p`, 2 sliced threads, one output frame for each input frame. A picture with an odd width or height is padded to even |
 | Audio | AAC from the FFmpeg encoder at 192 kb/s, at the sample rate and channel count of the track |
+
+**Bitrate.** The MPEG-1 stream is already lossy, so encoding it again adds the errors of a second codec. H.264 keeps the same pictures in fewer bits than MPEG-1, so at one and a half times the source bitrate this second loss stays small. The bitrate follows the source, so a stream encoded at a low bitrate does not become a large file, and a large picture encoded at a high bitrate keeps its detail. Programs that analyse the pictures frame by frame, or train models on them, take the MPEG-1 stream from the USM file instead.
 
 The container carries no metadata. The same input and the same FFmpeg build give the same bytes. The thread count is fixed because `libx264` output depends on it, and the threads encode slices of the same frame, so the output does not depend on how they are timed, also when other work runs at the same time.
 

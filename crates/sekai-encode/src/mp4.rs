@@ -18,7 +18,7 @@ use crate::EncodeError;
 pub const NAME: &str = "mp4-h264-aac";
 
 /// The encoder version.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 
 /// The threads that decode the video stream. The stream decodes to the same frames whatever the
 /// count, and one keeps up with the encoder.
@@ -26,6 +26,10 @@ const DECODE_THREADS: &str = "1";
 /// The threads of one x264 encoder. They encode slices of the same frame, so the output does not
 /// depend on how the threads are timed.
 const VIDEO_THREADS: &str = "2";
+/// The H.264 bitrate as a fraction of the bitrate of the source stream. H.264 keeps the pictures
+/// of an MPEG-1 or MPEG-2 stream in fewer bits, so one and a half times the source leaves the loss
+/// of the second encoding small, and the size follows the source.
+const BITRATE_PER_SOURCE: (u64, u64) = (3, 2);
 /// The longest error text kept from the program.
 const MESSAGE_LEN: usize = 400;
 
@@ -104,15 +108,30 @@ fn wav(pcm: &Pcm) -> Result<Vec<u8>, EncodeError> {
     Ok(out)
 }
 
+/// The bitrate of the H.264 stream of `movie`, in bit/s.
+fn video_bitrate(movie: &Movie) -> Result<u64, EncodeError> {
+    let (numerator, denominator) = BITRATE_PER_SOURCE;
+    movie
+        .bitrate()
+        .and_then(|source| source.checked_mul(numerator))
+        .map(|bits| bits / denominator)
+        .ok_or_else(|| failed("the video stream has no pictures or no frame rate"))
+}
+
 /// The arguments that write `output` from the stream on standard input and the optional WAV at
 /// `audio`.
-fn arguments(movie: &Movie, audio: Option<&Path>, output: &Path) -> Vec<OsString> {
+fn arguments(
+    movie: &Movie,
+    audio: Option<&Path>,
+    output: &Path,
+) -> Result<Vec<OsString>, EncodeError> {
     fn add(args: &mut Vec<OsString>, values: &[&str]) {
         args.extend(values.iter().map(OsString::from));
     }
 
     let mut args = Vec::new();
     let framerate = format!("{}/{}", movie.framerate_n, movie.framerate_d);
+    let bitrate = video_bitrate(movie)?.to_string();
     add(
         &mut args,
         &[
@@ -152,7 +171,7 @@ fn arguments(movie: &Movie, audio: Option<&Path>, output: &Path) -> Vec<OsString
             "-preset",
             "veryfast",
             "-b:v",
-            "4M",
+            &bitrate,
             "-g",
             "12",
             "-bf",
@@ -176,7 +195,7 @@ fn arguments(movie: &Movie, audio: Option<&Path>, output: &Path) -> Vec<OsString
         ],
     );
     args.push(output.into());
-    args
+    Ok(args)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -212,7 +231,7 @@ pub fn encode_with(program: &OsStr, movie: &Movie) -> Result<Vec<u8>, EncodeErro
         movie,
         movie.audio.as_ref().map(|_| audio.as_path()),
         &output,
-    );
+    )?;
     let result = run(program, args, &movie.stream)?;
     if !result.status.success() {
         return Err(failed(failure(&result)));
@@ -273,9 +292,19 @@ fn run(
 mod tests {
     use super::*;
 
+    /// `pictures` pictures of 1000 bytes each.
+    fn stream(pictures: usize) -> Vec<u8> {
+        let mut stream = Vec::new();
+        for _ in 0..pictures {
+            stream.extend([0, 0, 1, 0]);
+            stream.extend([0x55; 996]);
+        }
+        stream
+    }
+
     fn movie(width: u32, audio: bool) -> Movie {
         Movie {
-            stream: vec![1, 2, 3],
+            stream: stream(30),
             width,
             height: 360,
             framerate_n: 30000,
@@ -286,6 +315,7 @@ mod tests {
 
     fn strings(movie: &Movie, audio: Option<&Path>) -> Vec<String> {
         arguments(movie, audio, Path::new("o"))
+            .unwrap()
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect()
@@ -319,6 +349,22 @@ mod tests {
     #[test]
     fn odd_sizes_are_padded() {
         assert!(strings(&movie(641, false), None).iter().any(|a| a == "-vf"));
+    }
+
+    #[test]
+    fn the_video_bitrate_is_one_and_a_half_times_the_source() {
+        // 30 pictures of 8000 bits at 30000/1001 frames per second: 239,760 bit/s.
+        let args = strings(&movie(640, false), None);
+        let rate = args.iter().position(|a| a == "-b:v").unwrap();
+        assert_eq!(args[rate + 1], "359640");
+    }
+
+    #[test]
+    fn a_stream_without_pictures_is_refused() {
+        let mut movie = movie(640, false);
+        movie.stream = vec![1, 2, 3];
+        let error = arguments(&movie, None, Path::new("o"));
+        assert!(matches!(error, Err(EncodeError::Failed { .. })));
     }
 
     #[test]

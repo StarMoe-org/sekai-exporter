@@ -151,6 +151,7 @@ pub fn run(
         &Stream {
             converters: &converters,
             naming: &InBundle,
+            loose: &[],
             store: &store,
             derivations: &derivations,
             indexes: &NoBundleIndexes,

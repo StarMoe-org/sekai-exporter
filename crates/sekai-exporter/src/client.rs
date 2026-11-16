@@ -12,6 +12,11 @@ use sha2::{Digest, Sha256};
 
 use crate::export::Source;
 
+/// The classes whose objects in a client package are assets even when no container path names
+/// them: the player data holds many sprites that the client shows without loading them by path,
+/// such as the default frames of honors.
+const LOOSE: &[&str] = &["Sprite"];
+
 /// A client package as its bundles, with the layouts their files are read with.
 pub(crate) struct Package {
     bundles: Bundles,
@@ -107,6 +112,7 @@ impl Package {
             manifest: self.bundles.manifest(),
             inputs: Box::new(self.bundles),
             classes: Box::new(self.layouts),
+            loose: LOOSE,
         }
     }
 }

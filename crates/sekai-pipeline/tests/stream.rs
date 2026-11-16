@@ -23,7 +23,7 @@ use sekai_pipeline::state::RegionState;
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Naming, Segment, Stream, Streamed};
 use sekai_pipeline::{BundleInput, Fusion, MemoryDerivations, NoBundleIndexes, Options, Version};
 use sekai_unity::index::BundleIndex;
-use sekai_unity::{NoBlockCache, NoClasses};
+use sekai_unity::{Bundle, ByteSource, NoBlockCache, NoClasses, StoredFile, store_files};
 use sha2::{Digest, Sha256};
 
 fn input(name: &str) -> BundleInput {
@@ -235,8 +235,9 @@ struct Run<'a> {
     options: Options,
     segment: Segment,
     naming: &'a dyn Naming,
+    loose: &'a [&'a str],
     fusion: Option<&'a dyn Fusion>,
-    inputs: &'a Fixtures,
+    inputs: &'a dyn Inputs,
     /// The indexes of the bundles that earlier runs left.
     indexes: &'a dyn EntryIndexes,
     limit: Option<u64>,
@@ -250,6 +251,7 @@ impl Default for Run<'_> {
             options: Options::threads(2),
             segment: Segment::default(),
             naming: &InBundle,
+            loose: &[],
             fusion: None,
             inputs: FIXTURES.get_or_init(Fixtures::default),
             indexes: &NoEntryIndexes,
@@ -284,6 +286,7 @@ fn stream_of<'a>(
     Stream {
         converters,
         naming: run.naming,
+        loose: run.loose,
         store,
         derivations,
         indexes: &NoBundleIndexes,
@@ -859,6 +862,159 @@ fn unreadable_bundles_and_unknown_dependencies_are_listed() {
         ]
     );
     assert!(!streamed.evaluation.outputs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// The names of the serialized files of the fixture bundles, by which they refer to each other.
+const DATA_FILE: &str = "CAB-2e6074037da702b660ee3dbd01c9ea62";
+const SCENE_FILE: &str = "CAB-9076adc37246e4c243c45fbc50ed10e1";
+
+/// One bundle named `player` that holds the serialized file of each fixture bundle under the
+/// name given with it, as the player data of a client package holds many serialized files.
+struct Player(&'static [(&'static str, &'static str)]);
+
+impl Player {
+    /// The serialized file of the fixture bundle `fixture`.
+    fn serialized_file(fixture: &str) -> Vec<u8> {
+        let input = input(fixture);
+        let bundle = Bundle::open(input.source, input.sha256).unwrap();
+        let entry = bundle
+            .entries()
+            .iter()
+            .position(|e| e.is_serialized())
+            .unwrap();
+        let size = usize::try_from(bundle.entries()[entry].size).unwrap();
+        bundle
+            .entry(entry, &NoBlockCache)
+            .read(0, size)
+            .unwrap()
+            .to_vec()
+    }
+}
+
+impl Inputs for Player {
+    fn open(&self, name: &str) -> io::Result<BundleInput> {
+        assert_eq!(name, "player");
+        let files: Vec<StoredFile> = self
+            .0
+            .iter()
+            .map(|&(path, fixture)| StoredFile {
+                path: path.to_owned(),
+                bytes: Self::serialized_file(fixture),
+                serialized: true,
+            })
+            .collect();
+        let bytes = store_files(&files).unwrap();
+        Ok(BundleInput {
+            name: name.to_owned(),
+            sha256: Sha256::digest(&bytes).into(),
+            source: Arc::new(Arc::<[u8]>::from(bytes)),
+        })
+    }
+}
+
+/// The `AssetBundle` objects, which no container path names, as a text member with their name.
+struct Named;
+
+impl Converter for Named {
+    fn name(&self) -> &'static str {
+        "named"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn is_root(&self, object: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
+        object.class == "AssetBundle"
+    }
+
+    fn convert(&self, root: ObjectId, cx: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+        Data.convert(root, cx)
+    }
+}
+
+/// A run over the bundle `player` of `inputs`, whose loose `AssetBundle` objects are roots.
+fn loose_run(inputs: &Player) -> Run<'_> {
+    let mut player = entry("player", &[]);
+    player.content = Some(stream::Content::Declared("p1".to_owned()));
+    Run {
+        manifest: vec![player],
+        loose: &["AssetBundle"],
+        inputs,
+        ..Run::default()
+    }
+}
+
+/// The name of each asset of `streamed` with the SHA-256 of its one member.
+fn named_members(root: &Path, streamed: &Streamed) -> Vec<(String, String)> {
+    let store = LocalStore::open(root).unwrap();
+    let outputs = streamed.evaluation.outputs.iter();
+    let member = |output: &sekai_pipeline::Output| {
+        let document = AssetDocument::from_bytes(&store.read(&output.document).unwrap()).unwrap();
+        let [member] = document.members.as_slice() else {
+            panic!("{} has one member", output.name);
+        };
+        (output.name.clone(), member.sha256.clone())
+    };
+    outputs.map(member).collect()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+#[test]
+fn loose_objects_at_one_path_id_in_two_files_are_assets_of_their_own() {
+    let root = scratch("loose");
+    let records = MemoryUnitRecords::default();
+    let converters: Vec<Box<dyn Converter>> = vec![Box::new(Named)];
+    let inputs = Player(&[(DATA_FILE, "fixture_data"), (SCENE_FILE, "fixture_scene")]);
+    let expected = [
+        ("player/loose/AssetBundle/fixture_data", "fixture_data"),
+        ("player/loose/AssetBundle/fixture_scene", "fixture_scene"),
+    ]
+    .map(|(name, text)| (name.to_owned(), sha256_hex(text.as_bytes())));
+
+    let run = loose_run(&inputs);
+    let (evaluated, reused, first) = streamed_reusing_with(&root, &run, &records, &converters);
+    assert_eq!((evaluated, reused), (vec!["player".to_owned()], 0));
+    assert!(first.evaluation.unnamed.is_empty());
+    assert_eq!(named_members(&root, &first), expected);
+
+    let (evaluated, reused, second) = streamed_reusing_with(&root, &run, &records, &converters);
+    assert_eq!((evaluated.len(), reused), (0, 1));
+    assert_eq!(named_members(&root, &second), expected);
+
+    // Without loose classes, an object no container path names is never a root.
+    let without = Run {
+        loose: &[],
+        ..loose_run(&inputs)
+    };
+    let (evaluated, _, none) = streamed_reusing_with(&root, &without, &records, &converters);
+    assert_eq!(evaluated, ["player"]);
+    assert!(none.evaluation.outputs.is_empty());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn loose_objects_that_share_a_name_are_left_unnamed() {
+    let root = scratch("loose-same");
+    let inputs = Player(&[("CAB-a", "fixture_data"), ("CAB-b", "fixture_data")]);
+    let converters: Vec<Box<dyn Converter>> = vec![Box::new(Named)];
+    let records = MemoryUnitRecords::default();
+    let (_, _, streamed) = streamed_reusing_with(&root, &loose_run(&inputs), &records, &converters);
+    assert!(streamed.evaluation.outputs.is_empty());
+    let unnamed: Vec<&str> = streamed
+        .evaluation
+        .unnamed
+        .iter()
+        .map(|(l, _)| l.as_str())
+        .collect();
+    assert_eq!(unnamed, ["player/loose/AssetBundle/fixture_data"; 2]);
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -65,6 +65,7 @@ fn the_in_memory_run_writes_what_a_native_run_writes() {
         &Stream {
             converters: &converters,
             naming: &InBundle,
+            loose: &[],
             store: &store,
             derivations: &MemoryDerivations::default(),
             indexes: &NoBundleIndexes,

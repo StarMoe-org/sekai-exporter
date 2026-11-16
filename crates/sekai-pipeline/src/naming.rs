@@ -31,6 +31,16 @@ pub fn path_in_bundle<'a>(bundle: &str, logical: &'a str) -> Cow<'a, str> {
     }
 }
 
+/// The logical path of an object without a container path, of the class `class` and named
+/// `name`: `loose/<class>/<name>` when its class is one of `classes`, and none for an object
+/// without a name.
+pub fn loose_path(class: &str, name: Option<&str>, classes: &[&str]) -> Option<String> {
+    let name = name.filter(|name| !name.is_empty())?;
+    classes
+        .contains(&class)
+        .then(|| format!("loose/{class}/{name}"))
+}
+
 /// A root that needs a name.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
@@ -212,6 +222,18 @@ mod tests {
         assert_eq!(path_in_bundle("a/b", "a/b"), "a/b");
         assert_eq!(path_in_bundle("a/b", "a/bc/d"), "a/b/a/bc/d");
         assert_eq!(path_in_bundle("a/b", "x/y"), "a/b/x/y");
+    }
+
+    #[test]
+    fn a_loose_object_of_a_named_class_is_named_by_class_and_name() {
+        let classes = ["Sprite"];
+        assert_eq!(
+            loose_path("Sprite", Some("frame"), &classes).as_deref(),
+            Some("loose/Sprite/frame")
+        );
+        assert_eq!(loose_path("Texture2D", Some("frame"), &classes), None);
+        assert_eq!(loose_path("Sprite", Some(""), &classes), None);
+        assert_eq!(loose_path("Sprite", None, &classes), None);
     }
 
     #[test]

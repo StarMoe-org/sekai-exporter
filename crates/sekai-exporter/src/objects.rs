@@ -73,6 +73,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         manifest,
         inputs,
         classes,
+        ..
     } = export::source(&options.input, &options.tables)?;
     let names: Vec<String> = manifest.into_iter().map(|entry| entry.name).collect();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);

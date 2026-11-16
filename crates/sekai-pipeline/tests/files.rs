@@ -113,6 +113,7 @@ fn evaluate(root: &Path, text: &[u8]) -> (Streamed, LocalStore) {
     let stream = Stream {
         converters: &converters,
         naming: &InBundle,
+        loose: &[],
         store: &store,
         derivations: &derivations,
         indexes: &NoBundleIndexes,

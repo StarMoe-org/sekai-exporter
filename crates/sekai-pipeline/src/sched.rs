@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn extreme_memory_needs_and_zero_budgets_do_not_overflow_or_overlap() {
-        let unbound = Scheduler::new(Limits::unbound(4));
+        let unbound = Scheduler::new(Limits::threads(4));
         let needs = memory_needs([10, u64::MAX, 0, u64::MAX]);
         assert_eq!(unbound.run(&needs, |i, _| i), vec![0, 1, 2, 3]);
 

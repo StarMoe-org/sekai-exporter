@@ -2,12 +2,13 @@
 
 [English](third-party.md)
 
-导出器的每个组件都依据一项上游来源：格式规范、所链接的库，或用于核对输出的参考实现。本文按组件列出这些来源，并为每一项注明使用方式：
+导出器的每个组件都依据一项上游来源：格式规范、所链接的库、用于核对输出的参考实现，或所沿用的做法。本文按组件列出这些来源，并为每一项注明使用方式：
 
 - **链接**：该库是某个 crate 的依赖，按其自身的许可证分发。
 - **规范**：该组件依据格式说明为本项目编写。
 - **参考**：该组件为本项目编写，其输出与所列实现逐值核对，不复制其代码。
 - **移植**：代码在其许可证允许的范围内由所列项目翻译而来，被移植的文件保留该项目的版权声明。
+- **借鉴**：该组件沿用所列项目的做法，不复制其代码，也不与其输出比对。
 
 条目与对应组件在同一次改动中加入，并在移除该组件的改动中删除。
 
@@ -65,6 +66,13 @@
 | `motion3.json` 分段到 Unity 关键帧的映射 | [Cubism SDK for Unity](https://github.com/Live2D/CubismUnityComponents) `5-r.5`（`CubismMotion3Json`） | 阅读其映射，见 [Live2D 动作](live2d-motion.zh-CN.md)；未复制代码 | Live2D Open Software License |
 | 为比较打包框架 | [`esbuild`](https://www.npmjs.com/package/esbuild) | 随比较脚本安装；不随本项目分发 | MIT |
 
+## 求值与发布
+
+| 组件 | 来源 | 使用方式 | 许可证 |
+|---|---|---|---|
+| 融合编码：解码图像的任务同时编码出它要发布的所有格式（[性能](performance.zh-CN.md)） | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | 借鉴：其在解码处就地编码的做法；其公开的基准是采用这一做法的参考 | MIT |
+| 推进版本指针前，逐一复核发布所引用的对象（[发布](publishing.zh-CN.md)） | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | 借鉴 | MIT |
+
 ## 输入、存储与命令行
 
 | 组件 | 来源 | 使用方式 | 许可证 |
@@ -79,3 +87,4 @@
 | 目录 | [`redb`](https://crates.io/crates/redb) | 启用 `catalog-db` feature 时链接 | MIT OR Apache-2.0 |
 | 命令行解析 | [`lexopt`](https://crates.io/crates/lexopt) | 链接 | MIT |
 | CPU 与内存采样 | [`sysinfo`](https://crates.io/crates/sysinfo)、[`cpu-time`](https://crates.io/crates/cpu-time) | 链接进命令行程序 | MIT；MIT OR Apache-2.0 |
+| 区服的版本接口不识别应用版本 `x.y.z` 时改用 `x.y.0`（[来源](sources.zh-CN.md)） | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | 借鉴 | MIT |

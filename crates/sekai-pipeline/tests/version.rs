@@ -64,9 +64,7 @@ impl ByteSource for Gone {
 
 /// Everything the index of a version says, in order.
 fn listing(version: &Version<'_>) -> String {
-    let bundles = version.index().bundles().len();
-    let hashes: Vec<_> = (0..bundles).map(|b| version.resource_hashes(b)).collect();
-    format!("{:?} {hashes:?}", version.index().bundles())
+    format!("{:?}", version.index().bundles())
 }
 
 #[test]

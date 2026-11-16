@@ -13,7 +13,7 @@ use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects, Store};
 use sekai_convert::Converter;
 use sekai_format::AssetDocument;
 use sekai_format::identity::VersionIdentity;
-use sekai_format::publication::{self, Pointer};
+use sekai_format::publication;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_pipeline::claims::Claims;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
@@ -27,7 +27,7 @@ use sekai_pipeline::stream::{self, Entry, InBundle, Segment, Stream};
 use sekai_pipeline::tables::{Built, TableStage};
 use sekai_publish::patch::{self, Change, Lookup, Previous};
 use sekai_publish::{Binding, Layout, Object, Publication};
-use sekai_unity::{BoundedBlockCache, NoClasses};
+use sekai_unity::{BoundedBlockCache, ClassLayouts, NoClasses};
 
 use crate::bucket::Bucket;
 use crate::budget;
@@ -64,6 +64,30 @@ struct Options {
     rebuild_tables: bool,
     /// Whether the version of the source is only compared with the last one recorded.
     check: bool,
+    /// Whether the run publishes the client package of the region instead of its assets.
+    client: bool,
+}
+
+impl Options {
+    /// The name the state of the run is kept under: the region, or `<region>-client` for its
+    /// client package, so that the two never share a state.
+    fn state_key(&self) -> String {
+        if self.client {
+            format!("{}-client", self.region)
+        } else {
+            self.region.clone()
+        }
+    }
+
+    /// The targets the run publishes, the one in the canonical layout first.
+    fn targets(&self) -> Vec<String> {
+        let region = &self.region;
+        if self.client {
+            vec![client_target(region)]
+        } else {
+            vec![canonical_target(region), storage_target(region)]
+        }
+    }
 }
 
 fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error> {
@@ -80,6 +104,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut verify = false;
     let mut rebuild_tables = false;
     let mut check = false;
+    let mut client = false;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -92,6 +117,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("verify") => verify = true,
             Long("rebuild-tables") => rebuild_tables = true,
             Long("check") => check = true,
+            Long("client") => client = true,
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
         }
@@ -111,6 +137,9 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
         return Err(format!("--check only compares the version, and {flag} acts on it").into());
     }
+    if client && rebuild_tables {
+        return Err("--rebuild-tables builds tables, and a client package has none".into());
+    }
     Ok(Options {
         region: region.string()?,
         output: PathBuf::from(output),
@@ -124,6 +153,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         verify,
         rebuild_tables,
         check,
+        client,
     })
 }
 
@@ -253,14 +283,37 @@ fn configuration(options: &Options) -> Result<(String, Region), String> {
     Ok((config, region))
 }
 
-/// The tables of `region`, when its configuration names a source for them.
-fn open_tables(region: &Region) -> Result<Option<Tables>, String> {
-    region
-        .tables
-        .as_ref()
+/// The tables of `region`, when its configuration names a source for them and the run publishes
+/// its assets.
+fn open_tables(options: &Options, region: &Region) -> Result<Option<Tables>, String> {
+    let source = region.tables.as_ref().filter(|_| !options.client);
+    source
         .map(|source| Tables::open(source, &region.network))
         .transpose()
         .map_err(|e| e.to_string())
+}
+
+/// What a run reads its bundles from, with the layouts they are read with.
+pub(crate) struct Supply {
+    pub(crate) source: Box<dyn Source>,
+    /// The layouts of the engine classes and scripts that the bundles store without them.
+    pub(crate) classes: Box<dyn ClassLayouts>,
+}
+
+/// The supply of the run: the client package of `region` with `--client`, and otherwise its
+/// distribution source, whose bundles carry their layouts.
+fn open_source(options: &Options, region: Region, secrets: &Secrets) -> Result<Supply, String> {
+    if options.client {
+        let package = region
+            .package
+            .ok_or_else(|| format!("the region {} has no package", options.region))?;
+        return crate::client::update_source(&package);
+    }
+    let source = cdn::open(region, secrets).map_err(|e| e.to_string())?;
+    Ok(Supply {
+        source,
+        classes: Box::new(NoClasses),
+    })
 }
 
 /// The current version of the region `name`, with the revision of its tables. What `source`
@@ -284,16 +337,17 @@ fn current_identity(
 /// bucket of the configuration when it names one, and otherwise in `options.output`. Returns
 /// whether it is unchanged. Nothing is downloaded or written.
 fn check(options: &Options) -> Result<bool, lexopt::Error> {
-    let name = options.region.as_str();
+    let key = options.state_key();
+    let name = key.as_str();
     let (config, region) = configuration(options)?;
     let bucket = Bucket::open(&config, options.secrets.as_deref())?;
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
     let previous = site::last_version(site.files(), name)?;
-    let tables = open_tables(&region)?;
+    let tables = open_tables(options, &region)?;
     let secrets = Secrets::new(options.secrets.clone());
-    let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
+    let Supply { source, .. } = open_source(options, region, &secrets)?;
     let identity = current_identity(
         name,
         source.as_ref(),
@@ -301,18 +355,18 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
         previous.as_ref(),
         &NoRecorder,
     )?;
-    let change = change(&site, name, previous.as_ref(), &identity)?;
+    let change = change(&site, &options.targets(), previous.as_ref(), &identity)?;
     let described = change.as_deref().unwrap_or("unchanged");
     println!("{name} {} {described}", identity.name());
     Ok(change.is_none())
 }
 
-/// What a run of the version `identity` would change at `site` after the `previous` one of
-/// `region`, or `None` when it has the same content and both views are published in the current
+/// What a run of the version `identity` would change at `site` after the `previous` one, or
+/// `None` when it has the same content and every target of the run is published in the current
 /// publication format.
 fn change(
     site: &Site<'_>,
-    region: &str,
+    targets: &[String],
     previous: Option<&VersionIdentity>,
     identity: &VersionIdentity,
 ) -> Result<Option<String>, String> {
@@ -322,8 +376,8 @@ fn change(
     if !previous.same_content(identity) {
         return Ok(Some(format!("changed from {}", previous.name())));
     }
-    for target in [canonical_target(region), storage_target(region)] {
-        let current = site.current(&target)?;
+    for target in targets {
+        let current = site.current(target)?;
         if current.is_none_or(|pointer| pointer.version != publication::VERSION) {
             return Ok(Some(format!("changed: {target} is in an earlier format")));
         }
@@ -384,27 +438,27 @@ fn export_version(
     site: &Site<'_>,
     monitor: &Monitor,
 ) -> Result<Outcome, lexopt::Error> {
-    let region_name = options.region.as_str();
+    let key = options.state_key();
     let opened = Opened::open(options, region)?;
     // A selection is not a version: it keeps no state and records nothing.
     let unkept = MemoryFiles::default();
     let selection = !options.only.is_empty();
     let files: &dyn StateFiles = if selection { &unkept } else { site.files() };
-    let previous = site::last_version(site.files(), region_name)?;
+    let previous = site::last_version(site.files(), &key)?;
     if selection && previous.is_some() {
         return Err("--only needs an <output> that holds no complete run".into());
     }
     let identity = current_identity(
-        region_name,
+        &key,
         opened.source.as_ref(),
         opened.tables.as_ref(),
         previous.as_ref(),
         monitor,
     )?;
     if !(options.force || options.verify)
-        && change(site, region_name, previous.as_ref(), &identity)?.is_none()
+        && change(site, &options.targets(), previous.as_ref(), &identity)?.is_none()
     {
-        println!("{region_name} {} unchanged", identity.name());
+        println!("{key} {} unchanged", identity.name());
         return Ok(Outcome::Unchanged(identity));
     }
 
@@ -425,8 +479,8 @@ fn export_version(
         requests,
     };
     let baseline = {
-        let _span = monitor.span("plan", "baseline", region_name);
-        Baseline::read(files, site, region_name, &objects, requests)?
+        let _span = monitor.span("plan", "baseline", &key);
+        Baseline::read(files, site, &key, &options.targets(), &objects, requests)?
     };
     let Baseline {
         mut state,
@@ -457,7 +511,7 @@ fn export_version(
     let views = context.publish(&identity.name(), &publications, &advance, &opened)?;
     let committed = context.commit(&outcome.results, state, root.as_ref(), &views, &identity)?;
     record_costs(opened.catalog.catalog(), monitor)?;
-    print_summary(region_name, &committed, &views, &outcome);
+    print_summary(&key, &committed, &views, &outcome);
     Ok(Outcome::Updated(identity))
 }
 
@@ -465,6 +519,8 @@ fn export_version(
 /// and the converters.
 struct Opened {
     source: Box<dyn Source>,
+    /// The layouts of the engine classes and scripts of the bundles of the source.
+    classes: Box<dyn ClassLayouts>,
     tables: Option<Tables>,
     /// The local store, which keeps the objects of the run and caches those of the site.
     store: LocalStore,
@@ -494,8 +550,8 @@ impl Opened {
         let hca_key = secrets
             .hca_key(&region.secrets)
             .map_err(|e| e.to_string())?;
-        let tables = open_tables(&region)?;
-        let source = cdn::open(region, &secrets).map_err(|e| e.to_string())?;
+        let tables = open_tables(options, &region)?;
+        let Supply { source, classes } = open_source(options, region, &secrets)?;
         let directory = |name: &str| {
             LocalStore::open(options.output.join(name))
                 .map_err(|e| format!("{}/{name}: {e}", options.output.display()))
@@ -506,6 +562,7 @@ impl Opened {
             .into_derivations();
         Ok(Self {
             source,
+            classes,
             tables,
             inputs: directory("inputs")?,
             store,
@@ -529,9 +586,9 @@ impl Opened {
         state: &RegionState,
         monitor: &Monitor,
     ) -> Result<Option<Evaluation>, lexopt::Error> {
-        let region = options.region.as_str();
+        let key = options.state_key();
         let all = {
-            let _span = monitor.span("manifest", "manifest", region);
+            let _span = monitor.span("manifest", "manifest", &key);
             self.source.manifest(identity).map_err(|e| e.to_string())?
         };
         let mut manifest = manifest_entries(&all);
@@ -542,7 +599,7 @@ impl Opened {
             catalog: self.catalog.catalog(),
             bundles: &state.bundles,
             earlier: &self.earlier,
-            region,
+            region: &key,
             monitor,
             fetched: Mutex::default(),
         };
@@ -569,7 +626,9 @@ impl Opened {
         } else {
             Vec::new()
         };
-        let fusion = crate::storage::Fusion::new(&self.store, backed, monitor);
+        let storage = crate::storage::Fusion::new(&self.store, backed, monitor);
+        // Only the assets of a region have a storage view, whose files fusion derives.
+        let fusion: Option<&dyn sekai_pipeline::Fusion> = (!options.client).then_some(&storage);
         let stream = Stream {
             converters: &self.converters,
             naming: &InBundle,
@@ -577,9 +636,9 @@ impl Opened {
             derivations: backed,
             indexes: &indexes,
             cache: &cache,
-            classes: &NoClasses,
+            classes: self.classes.as_ref(),
             recorder: monitor,
-            fusion: Some(&fusion),
+            fusion,
             options: budget::options(options.threads, options.memory, options.plain),
             segment: Segment::default(),
             ledger: Some(IGNORED),
@@ -679,37 +738,47 @@ struct Baseline {
     publications: Publications,
 }
 
-/// The publications of the views of a region that a run patches.
+/// The publications of the targets of a run that it patches, by target. A target without one is
+/// published anew.
 #[derive(Default)]
-struct Publications {
-    canonical: Previous,
-    storage: Previous,
+struct Publications(BTreeMap<String, Previous>);
+
+impl Publications {
+    /// The publication of `target`, or none.
+    fn of(&self, target: &str) -> &Previous {
+        static NONE: Previous = Previous {
+            index: None,
+            paths: None,
+            tree: None,
+        };
+        self.0.get(target).unwrap_or(&NONE)
+    }
 }
 
 impl Baseline {
-    /// The baseline of `region`, from the state in `files` and the publications of `site`, whose
-    /// documents are read from `store`, with up to `requests` reads at once.
+    /// The baseline of the state `key` and of `targets`, from the state in `files` and the
+    /// publications of `site`, whose documents are read from `store`, with up to `requests` reads
+    /// at once.
     fn read(
         files: &dyn StateFiles,
         site: &Site<'_>,
-        region: &str,
+        key: &str,
+        targets: &[String],
         store: &dyn Store,
         requests: usize,
     ) -> Result<Self, String> {
-        let read = RegionState::read(files, region, requests);
-        let read = read.map_err(|e| format!("the state of {region}: {e}"))?;
+        let read = RegionState::read(files, key, requests);
+        let read = read.map_err(|e| format!("the state of {key}: {e}"))?;
         let (state, root) = read.map_or_else(Default::default, |(state, root)| (state, Some(root)));
-        let canonical = site.current(&canonical_target(region))?;
-        let storage = site.current(&storage_target(region))?;
-        let agrees = |target: String, pointer: &Option<Pointer>| {
-            pointer.as_ref().map(|pointer| &pointer.revision) == state.published.get(&target)
-        };
-        if !(agrees(canonical_target(region), &canonical)
-            && agrees(storage_target(region), &storage))
-        {
-            println!(
-                "{region}: the state names other publications, so the views are published anew"
-            );
+        let pointers = targets
+            .iter()
+            .map(|target| Ok((target, site.current(target)?)))
+            .collect::<Result<Vec<_>, String>>()?;
+        let agrees = pointers.iter().all(|(target, pointer)| {
+            pointer.as_ref().map(|pointer| &pointer.revision) == state.published.get(*target)
+        });
+        if !agrees {
+            println!("{key}: the state names other publications, so the views are published anew");
             let state = RegionState {
                 bundles: state.bundles,
                 ..RegionState::default()
@@ -720,19 +789,17 @@ impl Baseline {
                 publications: Publications::default(),
             });
         }
-        let previous = |pointer: Option<Pointer>| {
-            pointer.map_or(Ok(Previous::default()), |pointer| {
-                Previous::read(store, &pointer).map_err(|e| e.to_string())
-            })
-        };
-        let publications = Publications {
-            canonical: previous(canonical)?,
-            storage: previous(storage)?,
-        };
+        let mut publications = BTreeMap::new();
+        for (target, pointer) in pointers {
+            if let Some(pointer) = pointer {
+                let previous = Previous::read(store, &pointer).map_err(|e| e.to_string())?;
+                publications.insert(target.clone(), previous);
+            }
+        }
         Ok(Self {
             state,
             root,
-            publications,
+            publications: Publications(publications),
         })
     }
 }
@@ -745,28 +812,28 @@ fn storage_target(region: &str) -> String {
     format!("{region}/storage")
 }
 
-/// The publications of the views of a version, and the assets it built from tables.
+fn client_target(region: &str) -> String {
+    format!("{region}/client")
+}
+
+/// The publications of a version and the assets it built from tables.
 struct Views {
-    canonical: Publication,
-    storage: Publication,
+    /// The publication of each target, in the order of [`Options::targets`], so the one in the
+    /// canonical layout comes first.
+    published: Vec<(String, Publication)>,
     tables: Vec<Built>,
 }
 
 impl Views {
-    /// The target of each view of `region`, with its publication.
-    fn published(&self, region: &str) -> [(String, &Publication); 2] {
-        [
-            (canonical_target(region), &self.canonical),
-            (storage_target(region), &self.storage),
-        ]
+    /// The publication in the canonical layout.
+    fn canonical(&self) -> &Publication {
+        &self.published[0].1
     }
 
     /// The objects that the publications refer to.
     fn objects(&self) -> impl Iterator<Item = Object> + '_ {
-        let publications = [&self.canonical, &self.storage];
-        publications
-            .into_iter()
-            .flat_map(|publication| publication.objects.iter().cloned())
+        let publications = self.published.iter().map(|(_, publication)| publication);
+        publications.flat_map(|publication| publication.objects.iter().cloned())
     }
 }
 
@@ -800,7 +867,8 @@ impl Context<'_> {
     }
 
     /// The publications of the version `name` that `advance` reaches, patched from the previous
-    /// `publications`, with the converters of `opened`.
+    /// `publications`, with the converters of `opened`: the view of a client package, or the
+    /// canonical and the storage view of the assets of a region with those built from tables.
     fn publish(
         &self,
         name: &str,
@@ -808,47 +876,65 @@ impl Context<'_> {
         advance: &Advance<'_>,
         opened: &Opened,
     ) -> Result<Views, String> {
+        let region = self.options.region.as_str();
         let owners = advance.owners()?;
-        let canonical = publications.canonical.lookup(self.objects);
-        let tables = self.build_tables(opened, advance.state, &owners, &canonical)?;
-        let (mut old, mut new) = advance.canonical_bindings(&canonical, &owners)?;
+        if self.options.client {
+            let target = client_target(region);
+            let previous = publications.of(&target);
+            let client = self.canonical("client", name, previous, advance, &owners, &[])?;
+            return Ok(Views {
+                published: vec![(target, client)],
+                tables: Vec::new(),
+            });
+        }
+        let target = canonical_target(region);
+        let previous = publications.of(&target);
+        let lookup = previous.lookup(self.objects);
+        let tables = self.build_tables(opened, advance.state, &owners, &lookup)?;
+        let canonical = self.canonical("canonical", name, previous, advance, &owners, &tables)?;
+
+        let (units, assets) = advance.storage_assets(&lookup, &owners)?;
+        let storage = storage_target(region);
+        let previous = publications.of(&storage);
+        let change = crate::storage::change(
+            &units,
+            &assets,
+            &previous.lookup(self.objects),
+            self.objects,
+            self.backed,
+            self.requests(),
+            self.monitor,
+        )?;
+        let storage_publication = self.apply("storage", name, Layout::Paths, previous, change)?;
+        Ok(Views {
+            published: vec![(target, canonical), (storage, storage_publication)],
+            tables,
+        })
+    }
+
+    /// The publication of `view` in the canonical layout as the version `name`: the assets that
+    /// `advance` reaches, owned as `owners` say, with `tables`, patched from `previous`.
+    fn canonical(
+        &self,
+        view: &str,
+        name: &str,
+        previous: &Previous,
+        advance: &Advance<'_>,
+        owners: &BTreeMap<String, Key>,
+        tables: &[Built],
+    ) -> Result<Publication, String> {
+        let lookup = previous.lookup(self.objects);
+        let (mut old, mut new) = advance.canonical_bindings(&lookup, owners)?;
         old.extend(table_bindings(&advance.state.tables)?);
         new.extend(tables.iter().map(|built| Binding {
             name: built.output.name.clone(),
             document: built.output.document.clone(),
         }));
-        let requests = self.requests();
         let change = {
             let _span = self.monitor.span("publish", "canonical change", "");
-            views::canonical_change(old, new, self.objects, requests)?
+            views::canonical_change(old, new, self.objects, self.requests())?
         };
-        let layout = self.site.layout();
-        let canonical_publication =
-            self.apply("canonical", name, layout, &publications.canonical, change)?;
-
-        let (units, assets) = advance.storage_assets(&canonical, &owners)?;
-        let previous = publications.storage.lookup(self.objects);
-        let change = crate::storage::change(
-            &units,
-            &assets,
-            &previous,
-            self.objects,
-            self.backed,
-            requests,
-            self.monitor,
-        )?;
-        let storage = self.apply(
-            "storage",
-            name,
-            Layout::Paths,
-            &publications.storage,
-            change,
-        )?;
-        Ok(Views {
-            canonical: canonical_publication,
-            storage,
-            tables,
-        })
+        self.apply(view, name, self.site.layout(), previous, change)
     }
 
     /// The assets that the converters of tables build, or keep from those the state lists unless
@@ -921,7 +1007,7 @@ impl Context<'_> {
         identity: &VersionIdentity,
     ) -> Result<Committed, String> {
         let requests = self.requests();
-        let region = self.options.region.as_str();
+        let key = self.options.state_key();
         let records = self.backed.records;
         let results: Vec<&UnitResult> = results.iter().collect();
         {
@@ -937,8 +1023,8 @@ impl Context<'_> {
         };
         let written = written.map_err(|e| format!("records: {e}"))?;
 
-        let published = views.published(region);
-        let revisions = published
+        let revisions = views
+            .published
             .iter()
             .map(|(target, publication)| (target.clone(), publication.pointer.revision.clone()));
         let state = RegionState {
@@ -949,13 +1035,13 @@ impl Context<'_> {
         };
         let chunks = {
             let _span = self.monitor.span("commit", "state", "");
-            state.write(self.files, region, root, requests)
+            state.write(self.files, &key, root, requests)
         };
-        let chunks = chunks.map_err(|e| format!("the state of {region}: {e}"))?;
-        for (target, publication) in &published {
+        let chunks = chunks.map_err(|e| format!("the state of {key}: {e}"))?;
+        for (target, publication) in &views.published {
             self.site.make_current(target, &publication.pointer)?;
         }
-        site::set_last_version(self.files, region, identity)?;
+        site::set_last_version(self.files, &key, identity)?;
         Ok(Committed {
             state,
             records: written,
@@ -975,7 +1061,7 @@ fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &r
         "{region} {} published revision {} assets {} errors {errors} unnamed {unnamed} \
          evaluated {} kept {} converted {} reused {} records {} state chunks {} bytes {}",
         state.version,
-        views.canonical.pointer.revision,
+        views.canonical().pointer.revision,
         owned.count() + views.tables.len(),
         outcome.results.len(),
         outcome.kept.len(),
@@ -1090,5 +1176,22 @@ mod tests {
         let selected = select(entries.clone(), &["a/".to_owned()]);
         assert_eq!(names(&selected), ["a/one", "c/shared", "d/deep"]);
         assert_eq!(select(entries, &[]).len(), 4);
+    }
+
+    fn options(args: &[&str]) -> Result<Options, lexopt::Error> {
+        let args = ["jp", "out", "--config", "regions.json"].iter().chain(args);
+        parse(args.map(OsString::from))
+    }
+
+    #[test]
+    fn a_client_run_keeps_its_own_state_and_publishes_one_target() {
+        let assets = options(&[]).unwrap();
+        assert_eq!(assets.state_key(), "jp");
+        assert_eq!(assets.targets(), ["jp/canonical", "jp/storage"]);
+        let client = options(&["--client"]).unwrap();
+        assert_eq!(client.state_key(), "jp-client");
+        assert_eq!(client.targets(), ["jp/client"]);
+        assert!(options(&["--client", "--check"]).is_ok());
+        assert!(options(&["--client", "--rebuild-tables"]).is_err());
     }
 }

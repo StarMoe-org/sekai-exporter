@@ -57,8 +57,8 @@ fn audio(hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
 
 #[cfg(not(feature = "audio"))]
 fn audio(_hca_key: Option<u64>) -> Vec<Box<dyn Converter>> {
-    use sekai_convert::roots::{Absent, audio};
-    vec![Absent::boxed("audio", audio)]
+    use sekai_convert::roots::{Absent, audio, audio_file};
+    vec![Absent::with_files("audio", audio, audio_file)]
 }
 
 #[cfg(feature = "text")]

@@ -10,6 +10,8 @@ Story players and exporters that draw the effects and the prefab backgrounds of 
 
 An asset starts at the object the game loads. An episode names an effect by its bundle and its name (see [`episode`](episode.md)), and the game loads the prefab of that name from the bundle: each prefab of an effect bundle is an asset. A prefab background is loaded through its build data, a `ScenarioBackgroundBuildData` whose `BackgroundPrefab` and `ForegroundPrefab` are the prefabs the game instantiates: the build data is the asset, so it holds both prefabs and the other fields the build data stores.
 
+The interface a story shows around its scenes, the transitions and the dialog of a choice, comes with the client, which loads each of these prefabs from its player data by load path: each is an asset.
+
 ## 2. Contents
 
 | Role | Content |
@@ -67,7 +69,14 @@ Field values are written as in [object documents](object-documents.md#24-field-v
 **Root objects:**
 
 - every `MonoBehaviour` (class 114) whose script is `Assembly-CSharp/Sekai.ScenarioBackgroundBuildData`, the build data of a prefab background;
-- every `GameObject` (class 1) that the container lists under a path that contains `/scenario/effect/` and ends in `.prefab`, compared without regard to case: the prefabs of the effect bundles `scenario/effect/<name>`.
+- every `GameObject` (class 1) that the container lists under a path that contains `/scenario/effect/` and ends in `.prefab`, compared without regard to case: the prefabs of the effect bundles `scenario/effect/<name>`;
+- every `GameObject` (class 1) that a container lists under exactly one of these load paths, compared without regard to case: the interface a story shows around its scenes, which the client loads from its player data.
+
+  | Load path | Referred to by | Prefab |
+  |---|---|---|
+  | `area/prefabs/sekaitransition/default/prefab/fx_transition_scenario` | `Sekai.ScenarioPlayer.sekaiTransitionPrefab` | The SEKAI transition |
+  | `effects/transition/prefab/fx_live_transition_v2_03_b` | `Sekai.ScenarioPlayer.sekaiTransitionPrefab3anv` | The SEKAI transition, third-anniversary variant |
+  | `dialog/answerchoicedialog` | No field; loaded by its path | The dialog of a choice |
 
 A background prefab is reached from its build data and is not a root of its own.
 

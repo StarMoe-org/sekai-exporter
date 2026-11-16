@@ -117,13 +117,12 @@ fn is_alternative_mix(bundle: &str, cue: &str) -> bool {
 
 /// The files of an asset in the view. An asset with an error has none.
 pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
-    let Some(source) = document.sources.first() else {
+    let Some(bundle) = document.bundle() else {
         return Vec::new();
     };
     if document.error.is_some() {
         return Vec::new();
     }
-    let bundle = source.bundle.as_str();
     let file = document
         .name
         .rsplit_once('/')

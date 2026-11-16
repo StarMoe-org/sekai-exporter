@@ -7,7 +7,9 @@
 use std::collections::BTreeMap;
 
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
-use sekai_unity::index::{BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file};
+use sekai_unity::index::{
+    BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file, index_resources,
+};
 use sekai_unity::{BlockCache, Bundle, ByteSource, ClassLayouts, SerializedFile, open_files};
 use sha2::{Digest, Sha256};
 
@@ -90,6 +92,7 @@ pub fn index(source: &Source<'_>, names: &[String], threads: usize) -> Indexed {
         Ok(BundleIndex {
             name: names[i].to_owned(),
             files,
+            resources: index_resources(&loaded.bundle, source.cache),
         })
     });
     let mut failed = Vec::new();

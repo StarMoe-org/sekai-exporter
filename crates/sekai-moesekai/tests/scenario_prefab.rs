@@ -609,7 +609,7 @@ fn index(class_id: i32) -> ObjectIndex {
 }
 
 #[test]
-fn roots_are_background_build_data_and_effect_prefabs() {
+fn roots_are_background_build_data_effect_prefabs_and_story_ui_prefabs() {
     let root = |class_id: i32, script: Option<&str>, path: &str| {
         roots::scenario_prefab(&index(class_id), script, &[path.to_owned()])
     };
@@ -628,4 +628,15 @@ fn roots_are_background_build_data_and_effect_prefabs() {
     assert!(!root(114, Some("Assembly-CSharp/Sekai.Other"), &background));
     let prefab = format!("{base}/background/bg_s000387/backgrounds000387.prefab");
     assert!(!root(1, None, &prefab));
+    for load_path in [
+        "area/prefabs/sekaitransition/default/prefab/fx_transition_scenario",
+        "effects/transition/prefab/fx_live_transition_v2_03_b",
+        "dialog/answerchoicedialog",
+    ] {
+        assert!(root(1, None, load_path));
+        assert!(root(1, None, &load_path.to_uppercase()));
+    }
+    assert!(!root(28, None, "dialog/answerchoicedialog"));
+    assert!(!root(1, None, "dialog/answerchoicedialog_other"));
+    assert!(!root(1, None, "dialog/commondialog"));
 }

@@ -23,9 +23,10 @@ pub struct AssetDocument {
     /// The fingerprint, as lowercase hexadecimal.
     pub fingerprint: String,
     /// The root object first, then the other objects the conversion read, ordered by bundle and
-    /// path ID.
+    /// path ID. An asset that starts from a file has none.
     pub sources: Vec<SourceObject>,
-    /// The resource files the conversion read, ordered by bundle and file.
+    /// The resource files the conversion read, ordered by bundle and file. For an asset that
+    /// starts from a file, the file alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<SourceResource>,
     /// The canonical file of each member, in the order the form defines.
@@ -46,6 +47,14 @@ impl AssetDocument {
     /// Reads a document.
     pub fn from_bytes(bytes: &[u8]) -> serde_json::Result<Self> {
         serde_json::from_slice(bytes)
+    }
+
+    /// The bundle the asset starts in: that of its root object, or of its file for an asset that
+    /// starts from a file. An asset built from tables has none.
+    pub fn bundle(&self) -> Option<&str> {
+        let object = self.sources.first().map(|source| &source.bundle);
+        let file = || self.resources.first().map(|resource| &resource.bundle);
+        object.or_else(file).map(String::as_str)
     }
 }
 

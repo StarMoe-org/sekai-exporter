@@ -10,6 +10,8 @@
 
 资产从游戏加载的对象开始。一话以资源包与名称指明一个特效（见 [`episode`](episode.zh-CN.md)），游戏从该资源包加载同名的预制体：特效资源包中的每个预制体都是一个资产。预制体背景经由其构建数据加载，即一个 `ScenarioBackgroundBuildData`，其 `BackgroundPrefab` 与 `ForegroundPrefab` 是游戏实例化的预制体：构建数据就是资产，因此它包含这两个预制体以及构建数据存储的其他字段。
 
+剧情在场景之间显示的界面（转场与选项对话框）随客户端提供，由客户端从其 player 数据按加载路径加载：每个都是一个资产。
+
 ## 2. 内容
 
 | 角色 | 内容 |
@@ -67,7 +69,14 @@ shader 与脚本只列出名称：引擎之外的渲染器按名称找到它们�
 **根对象：**
 
 - 脚本为 `Assembly-CSharp/Sekai.ScenarioBackgroundBuildData` 的每个 `MonoBehaviour`（类 114），即预制体背景的构建数据；
-- 容器列出的路径包含 `/scenario/effect/` 且以 `.prefab` 结尾（不区分大小写）的每个 `GameObject`（类 1）：特效资源包 `scenario/effect/<name>` 的预制体。
+- 容器列出的路径包含 `/scenario/effect/` 且以 `.prefab` 结尾（不区分大小写）的每个 `GameObject`（类 1）：特效资源包 `scenario/effect/<name>` 的预制体；
+- 容器恰好以下列加载路径之一（不区分大小写）列出的每个 `GameObject`（类 1）：剧情在场景之间显示的界面，由客户端从其 player 数据加载。
+
+  | 加载路径 | 引用字段 | 预制体 |
+  |---|---|---|
+  | `area/prefabs/sekaitransition/default/prefab/fx_transition_scenario` | `Sekai.ScenarioPlayer.sekaiTransitionPrefab` | SEKAI 转场 |
+  | `effects/transition/prefab/fx_live_transition_v2_03_b` | `Sekai.ScenarioPlayer.sekaiTransitionPrefab3anv` | SEKAI 转场（三周年版） |
+  | `dialog/answerchoicedialog` | 无字段，按路径加载 | 选项对话框 |
 
 背景预制体经由其构建数据到达，本身不是根对象。
 

@@ -11,7 +11,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use sekai_catalog::Derived;
 
 use crate::canonical::Files;
-use crate::eval::{self, Output};
+use crate::eval::{self, Output, RootKey};
 use crate::stream::{Entry, Inputs, PARSED_BYTES, Root, Stream, Units, plan_unit};
 use crate::version::{BundleError, Parsed, Version};
 
@@ -40,7 +40,7 @@ struct Opened<'a> {
     version: Version<'a>,
     /// The assets of the bundle, in name order.
     roots: Vec<Root<'a>>,
-    unnamed: Vec<(String, i64)>,
+    unnamed: Vec<(String, RootKey)>,
     errors: Vec<BundleError>,
 }
 
@@ -137,8 +137,8 @@ impl<'a> Lazy<'a> {
     }
 
     /// Roots of `bundle` that cannot be told apart from another root by name, as
-    /// `(logical path, path ID)`.
-    pub fn unnamed(&self, bundle: &str) -> io::Result<Vec<(String, i64)>> {
+    /// their logical paths and keys.
+    pub fn unnamed(&self, bundle: &str) -> io::Result<Vec<(String, RootKey)>> {
         Ok(self
             .bundle(bundle)?
             .map(|opened| opened.unnamed.clone())
@@ -184,7 +184,9 @@ impl<'a> Lazy<'a> {
         let Some(opened) = self.bundle(bundle)? else {
             return Ok(Vec::new());
         };
-        let positions = (0..opened.roots.len()).filter(|&i| opened.roots[i].path_id == path_id);
+        let root = RootKey::Object(path_id);
+        let positions =
+            (0..opened.roots.len()).filter(|&i| opened.roots[i].planned.subject.key() == root);
         positions
             .filter_map(|position| self.output(&opened, position).transpose())
             .collect()
@@ -295,7 +297,7 @@ impl<'a> Lazy<'a> {
         Ok(match derived {
             Derived::Document(document) => Some(Output {
                 name: root.planned.name.clone(),
-                bundle: opened.version.index().bundles()[root.planned.closure[0].bundle]
+                bundle: opened.version.index().bundles()[root.planned.subject.bundle()]
                     .name
                     .clone(),
                 form: root.planned.converter.name(),

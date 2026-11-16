@@ -4,10 +4,10 @@
 //! changes whenever the meaning or the layout of a record changes; a record of another format, or
 //! one that cannot be read, is ignored and the bundle is indexed again.
 
-use sekai_unity::index::{FileIndex, ObjectIndex, PPtr};
+use sekai_unity::index::{FileIndex, ObjectIndex, PPtr, ResourceFile};
 use sekai_unity::serialized::External;
 
-const FORMAT: u32 = 2;
+const FORMAT: u32 = 3;
 
 /// The streamed `.resS`/`.resource` slice referenced by one object, and the SHA-256 of its bytes
 /// when that slice is readable in the object's bundle.
@@ -30,8 +30,8 @@ pub(crate) struct StreamDigest {
 pub(crate) struct IndexRecord {
     /// The index of each serialized file, in directory order.
     pub(crate) files: Vec<FileIndex>,
-    /// The SHA-256 of each resource entry that can be read, in directory order.
-    pub(crate) resources: Vec<[u8; 32]>,
+    /// Each other entry that can be read, in directory order.
+    pub(crate) resources: Vec<ResourceFile>,
     /// Streamed resource slices for each serialized file, sorted by `path_id`.
     pub(crate) streams: Vec<Vec<StreamDigest>>,
 }
@@ -184,6 +184,14 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn resource(&mut self) -> Option<ResourceFile> {
+        Some(ResourceFile {
+            path: self.string()?,
+            size: self.u64()?,
+            sha256: self.array()?,
+        })
+    }
+
     fn stream_digest(&mut self) -> Option<StreamDigest> {
         Some(StreamDigest {
             path_id: self.i64()?,
@@ -211,7 +219,9 @@ impl IndexRecord {
         out.extend_from_slice(&FORMAT.to_le_bytes());
         put_u32(&mut out, self.resources.len());
         for resource in &self.resources {
-            out.extend_from_slice(resource);
+            put_str(&mut out, &resource.path);
+            out.extend_from_slice(&resource.size.to_le_bytes());
+            out.extend_from_slice(&resource.sha256);
         }
         put_u32(&mut out, self.files.len());
         for file in &self.files {
@@ -255,7 +265,7 @@ impl IndexRecord {
         if reader.u32()? != FORMAT {
             return None;
         }
-        let resources = reader.list(Reader::array)?;
+        let resources = reader.list(Reader::resource)?;
         let files = reader.list(Reader::file)?;
         let streams = reader.list(|r| r.list(Reader::stream_digest))?;
         if streams.len() != files.len() {
@@ -298,7 +308,11 @@ mod tests {
 
     fn record(error: Option<Error>) -> IndexRecord {
         IndexRecord {
-            resources: vec![[5; 32]],
+            resources: vec![ResourceFile {
+                path: "CAB-a.resS".to_owned(),
+                size: 192,
+                sha256: [5; 32],
+            }],
             files: vec![FileIndex {
                 path: "CAB-a".to_owned(),
                 externals: vec![External {

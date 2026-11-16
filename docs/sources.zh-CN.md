@@ -11,7 +11,7 @@
 | `cp` | 日服与美服所用分发服务的版本、清单与资源包 | `jp`、`en` |
 | `nuverse` | 国服、台服与韩服所用分发服务的版本、清单与资源包 | `cn`、`tw`、`kr` |
 | `dir` | 本地目录中已有的资源包 | 离线运行与测试 |
-| `apk` | 客户端安装包中的 player data，由 `export` 配合引擎类布局的 TPK 文件读取 | `client` feature |
+| `apk` | 客户端安装包中的 player data 与 streaming assets 的 cue sheet，配合引擎类布局的 TPK 文件读取：由 `export` 读取，或由 `update --client` 按区服的 `package` 项读取 | `client` feature |
 
 `dir` 区服从其目录取得资源包。`cp` 或 `nuverse` 区服下载清单与资源包，并记录在 `<输出目录>/inputs` 中，该目录存放游戏数据（参见[输入 store](#输入-store)）。
 
@@ -58,6 +58,18 @@
 | `manifest` | `profile`、`host_hash`、`asset_version`、`asset_hash`、`platform` | `host`、`application_version`、`platform`、`value` |
 | `bundle` | `manifest` 的全部名称，以及 `bundle` | `manifest` 的全部名称，以及 `download_path`、`bundle` |
 
+区服还可以在 `package` 项中指明其客户端安装包，供 `update --client` 读取：
+
+```json
+"package": {
+  "path": "clients/1.0.0/app.xapk",
+  "class_table": "layouts/classes.tpk",
+  "script_table": "layouts/scripts.jsonl.gz"
+}
+```
+
+`path` 是 APK 或 XAPK，`class_table` 是引擎类布局的 TPK 文件，`script_table` 是 gzip 压缩的脚本布局 JSON lines 文件，可以省略。player data 成为一个资源包 `player`。streaming assets 中的 cue sheet，即 `assets/` 下扩展名为 `.acb` 的文件，成为第二个资源包 `streamingassets`，其条目以它们在 `assets/` 下的路径命名。只有它们会被某种形式读取：音频形式只用 cue sheet 自身的字节转换，因此 wave bank、工程文件和影片等其他 CRI 文件不读取。安装包的内容是对每个资源包按上述顺序各写一行 `<资源包> <资源包的 SHA-256>` 后取的 SHA-256。版本名为 `<应用版本>-<内容的前 12 位十六进制>`，因此应用版本相同而内容不同的两个安装包是两个版本。
+
 ## 版本发现
 
 客户端身份的候选为：配置（给出应用版本、应用哈希、资源版本与资源哈希）、外部的当前版本信息源、上一次完整运行的客户端身份；应用版本相同时以配置为准。候选按应用版本从新到旧依次尝试，采用第一个经该区服的版本接口确认者。以 `force` 设定时，配置是唯一的候选。
@@ -70,7 +82,7 @@
 
 | 部分 | 字段 | 变化时 |
 |---|---|---|
-| **资产身份** | `cp`：asset version、asset hash、profile 与资源主机哈希。`nuverse`：分发路径所用的应用版本与版本端点返回的值 | 清单与资源包的地址改变，因此重新读取清单并运行 P1 至 P3 |
+| **资产身份** | `cp`：asset version、asset hash、profile 与资源主机哈希。`nuverse`：分发路径所用的应用版本与版本端点返回的值。`client`：安装包的 player settings 给出的应用版本，以及安装包的内容 | 清单与资源包的地址改变，因此重新读取清单并运行 P1 至 P3 |
 | **数据表身份** | 数据表修订号：转储仓库的提交号，或 `dir` 来源的文件哈希 | 只有数据表的记录可能不同。已存储的资源包及其索引被重用，只有记录发生变化的资产重新求值 |
 | **客户端身份** | 应用版本、应用哈希与多人游戏版本 | 随版本记录，没有资产依赖它。`cp` 的资源主机哈希要凭它查询，所以资产身份经由它读取 |
 

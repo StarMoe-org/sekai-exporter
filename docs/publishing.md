@@ -45,6 +45,10 @@ A `tree`, such as the one `export --tree` writes, cannot be switched atomically.
 
 The consistency this gives is bounded as follows. Each file is replaced atomically. While a version is being written, a reader can see files of the previous and the new version side by side. Running the publication again after an interruption converges to the new version. A file whose asset has an error keeps its previous bytes until a conversion succeeds.
 
+## The client view
+
+The `client` view holds the assets of a client package, which the client loads from the package instead of downloading them: from its player data, images, fonts and the prefabs of the interface it shows around the scenes of a story; from its streaming assets, cue sheets such as the sounds of its menus and the music of its title screen. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
+
 ## The publication protocol
 
 1. A version is published only when its run completed without a run failure: a failed download, a failed write or a crash. Asset errors do not stop publication; they are listed with the version.
@@ -99,6 +103,8 @@ A run knows which objects the bucket holds from the records it reads and the upl
 | `chunks/<aa>/<sha256>.json.gz` | The chunks of the states of every region: the bundles of the last version with their content and the files they hold, its units with their keys, the names its assets claim and which unit owns each, the assets built from tables with what each read, and the revision of each view's publication |
 | `records/units/<aa>/<key>.json` | What a unit gave, under the key of its bundles' content and the evaluation, for any region whose unit has the same key |
 | `records/derivations/<aa>/<fingerprint>.json` | The object a derivation made, with its size |
+
+A unit record lists each asset of the unit with the logical path of its root and `path_id`, which is the path ID of the root object, or `{"file": "<path>"}` for an asset whose root is a file of the bundle; each root left unnamed is a pair of its logical path and the same value.
 
 The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. A run writes, in this order, every new object, the records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
 

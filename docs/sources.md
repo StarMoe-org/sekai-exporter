@@ -11,7 +11,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 | `cp` | Versions, manifests and bundles from the distribution service used by the Japanese and English versions | `jp`, `en` |
 | `nuverse` | Versions, manifests and bundles from the distribution service used by the Chinese, Taiwanese and Korean versions | `cn`, `tw`, `kr` |
 | `dir` | Bundles already present in a local directory | Offline runs and tests |
-| `apk` | Player data from a client package, read by `export` with a TPK file of engine class layouts | The `client` feature |
+| `apk` | The player data and the cue sheets of the streaming assets of a client package, read with a TPK file of engine class layouts: by `export`, and by `update --client` from the `package` entry of a region | The `client` feature |
 
 A `dir` region takes its bundles from its directory. A `cp` or `nuverse` region downloads the manifest and the bundles and records them in `<output>/inputs`, which holds game data (see [The input store](#the-input-store)).
 
@@ -58,6 +58,18 @@ An address template replaces each `{name}` with its value:
 | `manifest` | `profile`, `host_hash`, `asset_version`, `asset_hash`, `platform` | `host`, `application_version`, `platform`, `value` |
 | `bundle` | The names of `manifest`, and `bundle` | The names of `manifest`, and `download_path`, `bundle` |
 
+A region can also name its client package in a `package` entry, which `update --client` reads:
+
+```json
+"package": {
+  "path": "clients/1.0.0/app.xapk",
+  "class_table": "layouts/classes.tpk",
+  "script_table": "layouts/scripts.jsonl.gz"
+}
+```
+
+`path` is an APK or an XAPK, `class_table` a TPK file of engine class layouts and `script_table`, which may be left out, a gzipped JSON lines file of script layouts. The player data becomes one bundle, `player`. The cue sheets of the streaming assets, the files under `assets/` with the extension `.acb`, become a second bundle, `streamingassets`, whose entries are named by their paths under `assets/`. They are the only streaming assets a form reads: the audio form converts a cue sheet from its own bytes, so the other CRI files, such as wave banks, the project file and movies, are not read. The content of the package is the SHA-256 of a line `<bundle> <SHA-256 of the bundle>` for each bundle, in that order. The version is named `<application version>-<the first 12 hexadecimal digits of the content>`, so two packages with the same application version and different contents are two versions.
+
 ## Version discovery
 
 The candidates for the client identity are the configuration (which gives application version, application hash, asset version and asset hash), the external feed of current versions, and the client identity of the last complete run; for one application version, the configuration alone. They are tried with the newest application version first, and the first that the region's version endpoint confirms is adopted. With `force`, the configuration is the only candidate.
@@ -70,7 +82,7 @@ The state of a region has three separate parts, and each decides something diffe
 
 | Part | Fields | When it changes |
 |---|---|---|
-| **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the application version of the distribution paths and the value of the version endpoint | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
+| **Asset identity** | `cp`: asset version, asset hash, profile and asset host hash. `nuverse`: the application version of the distribution paths and the value of the version endpoint. `client`: the application version that the player settings of the package give, and the content of the package | The addresses of the manifest and the bundles change, so the manifest is read again and P1 to P3 run |
 | **Table identity** | The table revision: the commit of the dump repository, or the hash of the files of a `dir` source | Only table rows can differ. Stored bundles and their indexes are reused, and only the assets whose rows changed are evaluated again |
 | **Client identity** | Application version, application hash and multiplayer version | Recorded with the version, and no asset depends on it. For `cp` it is the key that finds the asset host hash, so the asset identity is read through it |
 

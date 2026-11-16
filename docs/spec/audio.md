@@ -72,9 +72,13 @@ An arrangement states when each waveform of a cue built of tracks plays. The lay
 
 ## 3. Sources
 
-**Root objects:** every `TextAsset` (class 49) with a container path ending in `.acb.bytes`, compared without case. The form does not read game data tables.
+**Root objects:** every `TextAsset` (class 49) with a container path ending in `.acb.bytes`, compared without case.
 
-**Fields read:** `m_Script`, which holds the cue sheet.
+**Root files:** every entry of a bundle that is not a serialized file and whose path ends in `.acb`, compared without case, such as the cue sheets among the [streaming assets of a client package](../sources.md#region-configuration). The asset is named by the path of the file under the bundle, extension included.
+
+The form does not read game data tables.
+
+**Fields read:** `m_Script` of a root object, which holds the cue sheet. The bytes of a root file are the cue sheet.
 
 **Cue sheet.** The sheet is read from its `Header` table: `CueTable`, `CueNameTable`, `WaveformTable`, `WaveformExtensionDataTable` and the tables a cue's reference reaches (`SynthTable`, `SequenceTable`, `BlockSequenceTable`, `BlockTable`, `TrackTable`, `TrackEventTable`). Each waveform is an HCA stream in the sheet's memory bank (`AwbFile`, an AFS2 archive), found by its `MemoryAwbId`. A sheet whose `WaveformTable` is empty has no waveforms.
 

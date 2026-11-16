@@ -205,5 +205,7 @@ mod tests {
         assert_eq!(segment("a/b.usm.bytes"), None);
         assert_eq!(segment("a/b-1.usm.bytes"), None);
         assert_eq!(segment("a/b-001.acb.bytes"), None);
+        assert_eq!(segment("a/B-001.USM.BYTES"), Some(("a/B", 1)));
+        assert_eq!(segment("音音音音"), None);
     }
 }

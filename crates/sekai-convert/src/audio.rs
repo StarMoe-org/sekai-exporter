@@ -14,8 +14,8 @@ use sekai_unity::Value;
 
 use crate::roots;
 use crate::{
-    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
-    ObjectIndex,
+    Asset, Content, Context, ConvertError, Converter, Cost, CostClass, FileConverter, Member,
+    ObjectId, ObjectIndex,
 };
 
 /// The `EncodeType` of HCA waveforms.
@@ -64,6 +64,44 @@ impl Converter for Audio {
             .get("m_Script")
             .and_then(Value::as_bytes)
             .ok_or_else(|| malformed("m_Script is missing or is not a string"))?;
+        self.cue_sheet(data)
+    }
+
+    fn cost(&self, _root: ObjectId, object: &ObjectIndex, _cx: &dyn Context) -> Cost {
+        cue_sheet_cost(u64::from(object.size))
+    }
+
+    fn files(&self) -> Option<&dyn FileConverter> {
+        Some(self)
+    }
+}
+
+impl FileConverter for Audio {
+    fn is_file_root(&self, path: &str) -> bool {
+        roots::audio_file(path)
+    }
+
+    fn convert_file(&self, bytes: &[u8]) -> Result<Option<Asset>, ConvertError> {
+        self.cue_sheet(bytes)
+    }
+
+    fn file_cost(&self, size: u64) -> Cost {
+        cue_sheet_cost(size)
+    }
+}
+
+/// The cue sheet twice, a copy of the streams it holds, and their MP3 files, taken as twice the
+/// streams, for a cue sheet of `size` bytes.
+fn cue_sheet_cost(size: u64) -> Cost {
+    Cost {
+        class: CostClass::Heavy,
+        memory: size.saturating_mul(5),
+    }
+}
+
+impl Audio {
+    /// The asset of the cue sheet `data`.
+    fn cue_sheet(&self, data: &[u8]) -> Result<Option<Asset>, ConvertError> {
         let acb = read_acb(data)?;
         let mut members = Vec::new();
         let mut cues = Vec::new();
@@ -136,52 +174,6 @@ impl Converter for Audio {
         Ok(Some(Asset { members }))
     }
 
-    /// The cue sheet twice, a copy of the streams it holds, and their MP3 files, taken as
-    /// twice the streams.
-    fn cost(&self, _root: ObjectId, object: &ObjectIndex, _cx: &dyn Context) -> Cost {
-        Cost {
-            class: CostClass::Heavy,
-            memory: u64::from(object.size).saturating_mul(5),
-        }
-    }
-}
-
-/// `arrangement` with each waveform given by the role of its member. `roles` has every waveform
-/// the cue plays, and an arrangement names no others.
-fn cue_arrangement(arrangement: &Arrangement, roles: &BTreeMap<usize, String>) -> CueArrangement {
-    let notes = |notes: &[Note]| {
-        notes
-            .iter()
-            .map(|note| CueNote {
-                at_us: note.at_us,
-                role: roles[&note.waveform].clone(),
-                volume: note.volume,
-            })
-            .collect::<Vec<_>>()
-    };
-    let layers = arrangement.layers.iter().map(|layer| CueLayer {
-        control: layer.control.as_ref().map(|control| CueVolumeControl {
-            name: control.name.clone(),
-            default: control.default,
-            points: control.points.clone(),
-        }),
-        notes: notes(&layer.notes),
-    });
-    let blocks = arrangement.blocks.iter().map(|block| CueBlock {
-        length_us: block.length_us,
-        looping: block.looping,
-        repeats: block.repeats,
-        transition_parts: block.transition_parts,
-        relative: block.relative,
-        layers: block.layers.iter().map(|layer| notes(layer)).collect(),
-    });
-    CueArrangement {
-        layers: layers.collect(),
-        blocks: blocks.collect(),
-    }
-}
-
-impl Audio {
     /// The stream of waveform `index` of `acb`, which cue `cue` plays.
     fn waveform(&self, acb: &Acb<'_>, index: usize, cue: &str) -> Result<Hca, ConvertError> {
         let waveform = acb.waveforms.get(index).ok_or_else(|| {
@@ -225,6 +217,41 @@ impl Audio {
             ),
             e => ConvertError::from(e),
         })
+    }
+}
+
+/// `arrangement` with each waveform given by the role of its member. `roles` has every waveform
+/// the cue plays, and an arrangement names no others.
+fn cue_arrangement(arrangement: &Arrangement, roles: &BTreeMap<usize, String>) -> CueArrangement {
+    let notes = |notes: &[Note]| {
+        notes
+            .iter()
+            .map(|note| CueNote {
+                at_us: note.at_us,
+                role: roles[&note.waveform].clone(),
+                volume: note.volume,
+            })
+            .collect::<Vec<_>>()
+    };
+    let layers = arrangement.layers.iter().map(|layer| CueLayer {
+        control: layer.control.as_ref().map(|control| CueVolumeControl {
+            name: control.name.clone(),
+            default: control.default,
+            points: control.points.clone(),
+        }),
+        notes: notes(&layer.notes),
+    });
+    let blocks = arrangement.blocks.iter().map(|block| CueBlock {
+        length_us: block.length_us,
+        looping: block.looping,
+        repeats: block.repeats,
+        transition_parts: block.transition_parts,
+        relative: block.relative,
+        layers: block.layers.iter().map(|layer| notes(layer)).collect(),
+    });
+    CueArrangement {
+        layers: layers.collect(),
+        blocks: blocks.collect(),
     }
 }
 

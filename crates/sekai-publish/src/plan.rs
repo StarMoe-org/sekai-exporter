@@ -174,10 +174,9 @@ fn contribution(store: &dyn Store, binding: &Binding) -> Result<Contribution, Pu
             })
         }
     };
-    let bundle = document.sources.first().map(|source| source.bundle.clone());
     let asset = PublishedAsset {
         name: binding.name.clone(),
-        bundle: bundle.unwrap_or_default(),
+        bundle: document.bundle().unwrap_or_default().to_owned(),
         document: binding.document.clone(),
         form: document.form,
         form_version: document.form_version,

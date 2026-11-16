@@ -38,17 +38,39 @@ pub fn scenario_background(object: &ObjectIndex, script: Option<&str>, _paths: &
 /// The directory of the effect bundles of stories, `scenario/effect/<name>`, in container paths.
 const EFFECT_DIRECTORY: &str = "/scenario/effect/";
 
+/// The load paths of the prefabs a story shows around its scenes, which the client loads from its
+/// player data: the SEKAI transition (`Sekai.ScenarioPlayer.sekaiTransitionPrefab`), its
+/// third-anniversary variant (`sekaiTransitionPrefab3anv`) and the dialog of a choice, which the
+/// client loads by its path.
+const STORY_UI_PREFABS: &[&str] = &[
+    "area/prefabs/sekaitransition/default/prefab/fx_transition_scenario",
+    "effects/transition/prefab/fx_live_transition_v2_03_b",
+    "dialog/answerchoicedialog",
+];
+
 /// The roots of the `scenario-prefab` form: what the game loads to show a prefab background (its
-/// build data) or an effect (a prefab of an effect bundle, which an episode names by bundle and
-/// name).
+/// build data), an effect (a prefab of an effect bundle, which an episode names by bundle and
+/// name) or the interface of a story (a prefab of the player data).
 pub fn scenario_prefab(object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
     scenario_background(object, script, paths)
-        || (object.class_id == GAME_OBJECT && paths.iter().any(|path| is_effect_prefab(path)))
+        || (object.class_id == GAME_OBJECT && paths.iter().any(|path| is_loaded_prefab(path)))
+}
+
+/// Whether the game loads the prefab at `path` to show it in a story.
+fn is_loaded_prefab(path: &str) -> bool {
+    is_effect_prefab(path) || is_story_ui_prefab(path)
 }
 
 fn is_effect_prefab(path: &str) -> bool {
     let path = path.to_ascii_lowercase();
     path.contains(EFFECT_DIRECTORY) && path.ends_with(".prefab")
+}
+
+/// Whether `path` is exactly one of [`STORY_UI_PREFABS`], without regard to case.
+fn is_story_ui_prefab(path: &str) -> bool {
+    STORY_UI_PREFABS
+        .iter()
+        .any(|prefab| path.eq_ignore_ascii_case(prefab))
 }
 
 /// The directories of the character models of the 3D screens.

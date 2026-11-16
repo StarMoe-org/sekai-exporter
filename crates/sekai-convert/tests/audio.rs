@@ -407,3 +407,17 @@ fn the_cost_is_five_times_the_sheet() {
         }
     );
 }
+
+#[test]
+fn a_cue_sheet_stored_as_a_file_is_the_asset_of_its_object_form() {
+    let data = sheet(&[(1, 0, "mono"), (2, 0, "variations")], 0);
+    let audio = Audio::new(None);
+    let files = audio.files().expect("audio starts from files");
+    assert!(files.is_file_root("MenuCommon.acb"));
+    let from_file = files.convert_file(&data).unwrap().unwrap();
+    let from_object = convert(audio, data).unwrap().unwrap();
+    assert_eq!(members(&from_file), members(&from_object));
+    assert_eq!(cue_table(&from_file), cue_table(&from_object));
+    let cost = files.file_cost(1000);
+    assert_eq!((cost.class, cost.memory), (CostClass::Heavy, 5 * 1000));
+}

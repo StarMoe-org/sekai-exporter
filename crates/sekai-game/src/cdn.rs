@@ -15,7 +15,7 @@ use std::fmt;
 use sekai_format::identity::VersionIdentity;
 
 pub use crypto::Secrets;
-pub use region::{Client, Kind, Network, Region, SecretNames, Urls};
+pub use region::{Client, Kind, Network, Package, Region, SecretNames, Urls};
 pub use tables::{TableSource, Tables};
 
 use crate::sink::Sink;
@@ -33,7 +33,8 @@ pub struct SourceError {
 }
 
 impl SourceError {
-    pub(crate) fn new(code: &'static str, message: impl fmt::Display) -> Self {
+    /// A failure of the kind `code`, described by `message`.
+    pub fn new(code: &'static str, message: impl fmt::Display) -> Self {
         Self {
             code,
             message: message.to_string(),

@@ -117,6 +117,19 @@ impl Default for Network {
     }
 }
 
+/// A client package of a region, whose player data `update --client` publishes.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Package {
+    /// The package, an APK or an XAPK.
+    pub path: PathBuf,
+    /// A TPK file of the layouts of engine classes.
+    pub class_table: PathBuf,
+    /// A gzipped JSON lines file of the layouts of scripts.
+    #[serde(default)]
+    pub script_table: Option<PathBuf>,
+}
+
 /// One region of the configuration.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -158,6 +171,9 @@ pub struct Region {
     /// How the source uses the network.
     #[serde(default)]
     pub network: Network,
+    /// The client package of the region.
+    #[serde(default)]
+    pub package: Option<Package>,
 }
 
 impl Region {

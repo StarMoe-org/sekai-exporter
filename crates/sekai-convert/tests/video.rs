@@ -234,8 +234,8 @@ fn the_cost_of_a_movie_counts_its_segments() {
     };
     let bundle = Bundle(vec![
         ("a/m-002.usm.bytes".into(), Vec::new()),
-        ("a/m-001.usm.bytes".into(), Vec::new()),
-        ("a/m-003.usm.bytes".into(), Vec::new()),
+        ("a/M-001.USM.BYTES".into(), Vec::new()),
+        ("a/M-003.USM.BYTES".into(), Vec::new()),
         ("a/other-001.usm.bytes".into(), Vec::new()),
         ("a/single.usm.bytes".into(), Vec::new()),
     ]);

@@ -183,13 +183,15 @@ fn segments(root: ObjectId, cx: &dyn Context) -> Option<u64> {
     let entries = cx.container(root).ok()?;
     let (path, _) = entries
         .iter()
-        .find(|(path, id)| *id == root && path.ends_with(SUFFIX))?;
+        .find(|(path, id)| *id == root && path.to_ascii_lowercase().ends_with(SUFFIX))?;
     let Some((base, _)) = segment(path) else {
         return Some(1);
     };
     let count = entries
         .iter()
-        .filter(|(path, _)| segment(path).is_some_and(|(other, _)| other == base))
+        .filter(|(path, _)| {
+            segment(path).is_some_and(|(other, _)| other.eq_ignore_ascii_case(base))
+        })
         .count();
     Some(count as u64)
 }

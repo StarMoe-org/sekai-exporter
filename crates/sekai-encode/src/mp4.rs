@@ -102,8 +102,13 @@ fn wav(pcm: &Pcm) -> Result<Vec<u8>, EncodeError> {
     out.extend(16u16.to_le_bytes());
     out.extend(b"data");
     out.extend(size.to_le_bytes());
-    for sample in pcm.samples() {
-        out.extend(sample.to_le_bytes());
+    for chunk in pcm.samples().chunks(4096) {
+        let mut bytes = [0u8; 8192];
+        let used = &mut bytes[..chunk.len() * 2];
+        for (dst, &sample) in used.as_chunks_mut::<2>().0.iter_mut().zip(chunk) {
+            *dst = sample.to_le_bytes();
+        }
+        out.extend_from_slice(used);
     }
     Ok(out)
 }

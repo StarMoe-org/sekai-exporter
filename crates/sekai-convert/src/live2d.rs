@@ -106,7 +106,7 @@ impl Converter for Model {
                     .textures
                     .iter()
                     .map(|&t| texture_memory(t, cx).unwrap_or(0))
-                    .sum::<u64>()
+                    .fold(0u64, u64::saturating_add)
             })
             .unwrap_or(0);
         Cost {

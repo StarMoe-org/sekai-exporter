@@ -26,6 +26,13 @@ fn be_uint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |value, &b| value << 8 | u64::from(b))
 }
 
+fn header_offset(bytes: &[u8]) -> Result<usize, DecodeError> {
+    usize::try_from(be_uint(bytes))
+        .ok()
+        .and_then(|offset| offset.checked_add(8))
+        .ok_or_else(|| malformed("an offset overflows"))
+}
+
 fn read_string(strings: &[u8], offset: usize) -> Result<&str, DecodeError> {
     let tail = strings
         .get(offset..)
@@ -92,7 +99,7 @@ impl<'a> Table<'a> {
         if &table[..4] != b"@UTF" {
             return Err(malformed("no @UTF signature"));
         }
-        let size = be_uint(&table[4..8]) as usize + 8;
+        let size = header_offset(&table[4..8])?;
         if table.len() < size {
             return Err(DecodeError::Truncated {
                 what: "@UTF table",
@@ -100,12 +107,13 @@ impl<'a> Table<'a> {
                 available: table.len(),
             });
         }
-        let rows_offset = be_uint(&table[0x0A..0x0C]) as usize + 8;
-        let strings_offset = be_uint(&table[0x0C..0x10]) as usize + 8;
-        let data_offset = be_uint(&table[0x10..0x14]) as usize + 8;
+        let rows_offset = header_offset(&table[0x0A..0x0C])?;
+        let strings_offset = header_offset(&table[0x0C..0x10])?;
+        let data_offset = header_offset(&table[0x10..0x14])?;
         let column_count = be_uint(&table[0x18..0x1A]) as usize;
         let row_width = be_uint(&table[0x1A..0x1C]) as usize;
-        let rows = be_uint(&table[0x1C..0x20]) as usize;
+        let rows = usize::try_from(be_uint(&table[0x1C..0x20]))
+            .map_err(|_| malformed("row count overflows"))?;
         if !(HEADER_SIZE <= rows_offset
             && rows_offset <= strings_offset
             && strings_offset <= data_offset
@@ -178,7 +186,12 @@ impl<'a> Table<'a> {
             Source::Default(offset) => range(self.schema, offset, size)?,
             // A row can reach past its width into the rows that follow; tables written by
             // version 3 tools do this for trailing columns.
-            Source::Row(offset) => range(self.rows_section, row * self.row_width + offset, size)?,
+            Source::Row(offset) => {
+                let start = (row * self.row_width)
+                    .checked_add(offset)
+                    .ok_or_else(|| malformed("a value lies past the end of its section"))?;
+                range(self.rows_section, start, size)?
+            }
         };
         let raw = be_uint(bytes);
         Ok(Some(match column.kind {
@@ -188,12 +201,18 @@ impl<'a> Table<'a> {
             5 => Value::Int(i64::from(raw as u32 as i32)),
             7 => Value::Int(raw as i64),
             8 => Value::Float(f32::from_bits(raw as u32)),
-            10 => Value::Text(read_string(self.strings, raw as usize)?),
-            _ => Value::Data(range(
-                self.data,
-                be_uint(&bytes[..4]) as usize,
-                be_uint(&bytes[4..]) as usize,
-            )?),
+            10 => {
+                let offset = usize::try_from(raw)
+                    .map_err(|_| malformed("a string lies past the end of its section"))?;
+                Value::Text(read_string(self.strings, offset)?)
+            }
+            _ => {
+                let offset = usize::try_from(be_uint(&bytes[..4]))
+                    .map_err(|_| malformed("a value lies past the end of its section"))?;
+                let length = usize::try_from(be_uint(&bytes[4..]))
+                    .map_err(|_| malformed("a value lies past the end of its section"))?;
+                Value::Data(range(self.data, offset, length)?)
+            }
         }))
     }
 

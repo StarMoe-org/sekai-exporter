@@ -2,12 +2,13 @@
 
 [中文](third-party.zh-CN.md)
 
-Every component of the exporter rests on an upstream source: a format specification, a library it links, or a reference implementation its output is checked against. This document lists them by component. Each entry states how the source is used:
+Every component of the exporter rests on an upstream source: a format specification, a library it links, a reference implementation its output is checked against, or a practice it follows. This document lists them by component. Each entry states how the source is used:
 
 - **Linked**: the library is a dependency of a crate and is distributed under its own licence.
 - **Specification**: the component is written for this project from the description of the format.
 - **Reference**: the component is written for this project; its output is checked value by value against the named implementation, and no code is copied from it.
 - **Ported**: code is translated from the named project with the permission its licence gives, and the project's notice is kept in the ported files.
+- **Practice**: the component follows a practice of the named project; no code is copied and no output is compared.
 
 An entry is added in the same change that adds the component, and removed in the change that removes it.
 
@@ -65,6 +66,13 @@ An entry is added in the same change that adds the component, and removed in the
 | Mapping of `motion3.json` segments to Unity keyframes | [Cubism SDK for Unity](https://github.com/Live2D/CubismUnityComponents) `5-r.5` (`CubismMotion3Json`) | Read for the mapping described in [Live2D motions](live2d-motion.md); no code is copied | Live2D Open Software License |
 | Bundling the framework for the comparison | [`esbuild`](https://www.npmjs.com/package/esbuild) | Installed with the comparison script; not distributed | MIT |
 
+## Evaluation and publishing
+
+| Component | Source | Use | Licence |
+|---|---|---|---|
+| Fused encoding: an image is encoded in every format it is published in by the job that decodes it ([Performance](performance.md)) | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | Practice: it encodes where it decodes; its published benchmarks were a reference for adopting this | MIT |
+| Checking every object a publication refers to before the pointer of the version advances ([Publishing](publishing.md)) | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | Practice | MIT |
+
 ## Inputs, storage and the command line
 
 | Component | Source | Use | Licence |
@@ -79,3 +87,4 @@ An entry is added in the same change that adds the component, and removed in the
 | Catalog | [`redb`](https://crates.io/crates/redb) | Linked when the `catalog-db` feature is enabled | MIT OR Apache-2.0 |
 | Command-line parsing | [`lexopt`](https://crates.io/crates/lexopt) | Linked | MIT |
 | CPU and memory sampling | [`sysinfo`](https://crates.io/crates/sysinfo), [`cpu-time`](https://crates.io/crates/cpu-time) | Linked in the command-line program | MIT; MIT OR Apache-2.0 |
+| Retrying an application version `x.y.z` that the region's version endpoint does not recognize as `x.y.0` ([Sources](sources.md)) | [Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater) | Practice | MIT |

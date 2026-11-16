@@ -135,6 +135,15 @@ The documents in [`docs/`](docs/) describe the design that the code implements.
 
 This repository contains no game data, and the exporter contains no addresses, application identifiers or client identities: each deployer supplies them in its own configuration. Inputs are read from the user's own downloads or client install, and outputs are written outside the repository. Tests use synthetic inputs.
 
+## Acknowledgements
+
+Much of this project's understanding of the game, and part of its design, came from the four projects below. Thanks to all of them:
+
+- **[Moe_Assets_updater_NEXT](https://github.com/StarMoe-org/Moe_Assets_updater_NEXT)**: StarMoe's asset updater, based on an early version of Haruki-Sekai-Asset-Updater, which builds the asset storage that sites read for every region. The `storage` view reproduces the layout of that storage, down to conventions such as `music/long` leaving out the `_VR` and `_SCREEN` tracks.
+- **SekaiExtraRipper** and **SekaiStoryExporter** ([@TONY-All](https://github.com/TONY-All), [@SnowGlow-aww](https://github.com/SnowGlow-aww)): the first unpacks story and 3D costume assets into a lossless, versioned format, and the second renders Live2D stories from it into auto-play videos that match the game. Along the way they worked out how a story finds its assets: bundles follow the `scenarioId` of the table row, not the ID the scene data records, and area conversations replay the way the character archive does. They also settled the exact length and volume of an ACB cue, kept Live2D motions as the clip's lossless curves, and established how 3D costume parts are named and combined.
+- **[moly-root](https://github.com/empty-sekai/moly-root)**: an asset extractor that works without the Unity engine and prepares the assets of [moly](https://github.com/empty-sekai/moly), a MySekai recreation. It worked out the game semantics MySekai needs to run: furniture and sites, characters and the player avatar, actions and talks, weather, performances and cameras, and the interface and its shaders. This project's furniture and site forms follow its structure; for example, attachment points come from the start and end locators paired in `_attachPoints`, and where a site sits on its floor is kept as data rather than baked into the model.
+- **[Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater)** (Team Haruki): the asset extractor and exporter that accompanies HarukiBot, with a model and architecture entirely different from this project's. Its exploration of performance offered some ideas, and its published measurements served as a reference: this project's [fused encoding](docs/performance.md) follows its practice of encoding where it decodes, which its benchmarks show cuts peak memory sharply. Checking every object a publication refers to before its pointer advances, and retrying an application version `x.y.z` that is not recognized as `x.y.0`, follow it as well.
+
 ## License
 
 MIT, see [LICENSE](LICENSE).

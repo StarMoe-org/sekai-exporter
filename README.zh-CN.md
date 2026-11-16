@@ -135,6 +135,15 @@ sekai-exporter gc <output> --config <file> --secrets <dir>
 
 本仓库不包含任何游戏数据，导出器本身也不含任何地址、应用标识或客户端身份，这些由部署者在自己的配置中提供。输入读取自使用者自行下载的内容或安装的客户端，输出写在仓库之外。测试使用合成输入。
 
+## 致谢
+
+本项目对游戏语义的还原与一部分设计，来自以下四个项目，在此致谢：
+
+- **[Moe_Assets_updater_NEXT](https://github.com/StarMoe-org/Moe_Assets_updater_NEXT)**：StarMoe 基于 Haruki-Sekai-Asset-Updater 早期版本维护的资源更新器，为各区服生成网站读取的资源存储。`storage` 视图复现的正是这份存储的布局，包括 `music/long` 不收录 `_VR` 与 `_SCREEN` 音轨这样的约定。
+- **SekaiExtraRipper** 与 **SekaiStoryExporter**（[@TONY-All](https://github.com/TONY-All)、[@SnowGlow-aww](https://github.com/SnowGlow-aww)）：前者把剧情与 3D 服装资源解包为无损、带版本的格式，后者据此把 Live2D 剧情渲染成与游戏一致的自动播放视频。为此它们理清了剧情如何找到它的资源：资源包按数据表中的 `scenarioId` 定位，而非剧本自身记录的 ID；区域对话按角色档案的方式回放。它们还确定了 ACB cue 的精确时长与音量、Live2D 动作应保留为 clip 的无损曲线，以及 3D 服装部件的命名与组合规则。
+- **[moly-root](https://github.com/empty-sekai/moly-root)**：不依赖 Unity 引擎的资源提取工具，为 MySekai 复刻运行时 [moly](https://github.com/empty-sekai/moly) 准备资源。它还原了 MySekai 运行所需的游戏语义，涵盖家具与场地、角色与玩家形象、动作与对话、天气、演出与镜头、界面与着色器。本项目的家具与场地形式沿用了它的结构，例如挂接位置取自 `_attachPoints` 中成对的起止定位点，场地在楼层中的位置作为数据保存而不烘焙进模型。
+- **[Haruki-Sekai-Asset-Updater](https://github.com/Team-Haruki/Haruki-Sekai-Asset-Updater)**（Team Haruki）：HarukiBot 配套的资源提取与导出工具，模型与架构和本项目完全不同。它在性能上的探索提供了一些思路，公开的实测数据也带来了一定参考：本项目的[融合编码](docs/performance.zh-CN.md)借鉴了它在解码处就地编码的做法，其基准显示这一做法大幅降低了峰值内存。发布前逐一复核所引用的对象、应用版本 `x.y.z` 不被识别时改用 `x.y.0`，同样借鉴自它。
+
 ## 许可
 
 MIT，参见 [LICENSE](LICENSE)。

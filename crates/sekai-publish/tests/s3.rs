@@ -458,8 +458,8 @@ fn the_bucket_keeps_state_files_outside_its_publications() {
     assert_eq!(cache_control, "private, no-store");
 }
 
-/// Bytes of 33 MiB and a few more, which make three parts.
-fn large_state() -> Vec<u8> {
+/// Bytes of 33 MiB and a few more, which make three parts of an upload.
+fn three_parts() -> Vec<u8> {
     (0..(33u32 << 20) + 5).map(|i| (i % 253) as u8).collect()
 }
 
@@ -467,7 +467,7 @@ fn large_state() -> Vec<u8> {
 fn a_large_state_file_is_written_in_parts() {
     let server = Server::start();
     let s3 = client(&server, SECRET_KEY);
-    let bytes = large_state();
+    let bytes = three_parts();
 
     s3.write_state("regions/jp.json", &bytes).unwrap();
     let name = "out/state/regions/jp.json";
@@ -484,9 +484,69 @@ fn a_failed_upload_in_parts_is_aborted() {
     let s3 = client(&server, SECRET_KEY);
     server.refuse_after(Some(1));
 
-    assert!(s3.write_state("regions/jp.json", &large_state()).is_err());
+    assert!(s3.write_state("regions/jp.json", &three_parts()).is_err());
     assert_eq!(server.object("out/state/regions/jp.json"), None);
     assert!(server.uploads_in_progress() == 0);
+}
+
+#[test]
+fn a_large_object_is_uploaded_in_parts() {
+    let s = Scratch::new("large");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let large = three_parts();
+    let plan = sample(&store, "v1", &large);
+
+    publish(
+        &objects,
+        &client(&server, SECRET_KEY),
+        "jp/canonical",
+        &plan,
+    )
+    .unwrap();
+    let key = store.put(&large, "webp").unwrap();
+    let name = object_name(&key);
+    assert!(server.object(&name) == Some(large), "{name}");
+    let cache_control = server.cache_control(&name).unwrap();
+    assert_eq!(cache_control, "public, max-age=31536000, immutable");
+    assert_eq!(server.count(Operation::PutPart), 3);
+    assert!(server.uploads_in_progress() == 0);
+    assert!(server.object(POINTER).is_some());
+}
+
+#[test]
+fn a_large_object_whose_bytes_changed_is_not_uploaded() {
+    let s = Scratch::new("large-changed");
+    let store = s.store();
+    let held = MemoryHoldings::default();
+    let objects = Objects {
+        local: &store,
+        held: &held,
+        remote: &NoRemote,
+    };
+    let server = Server::start();
+    let large = three_parts();
+    let plan = sample(&store, "v1", &large);
+    let key = store.put(&large, "webp").unwrap();
+    std::fs::write(store.path(&key), vec![0; large.len()]).unwrap();
+
+    let e = publish(
+        &objects,
+        &client(&server, SECRET_KEY),
+        "jp/canonical",
+        &plan,
+    )
+    .unwrap_err();
+    assert_eq!(e.stage, "files");
+    assert_eq!(server.object(&object_name(&key)), None);
+    assert!(server.uploads_in_progress() == 0);
+    assert!(server.object(POINTER).is_none());
 }
 
 #[test]

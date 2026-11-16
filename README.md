@@ -9,7 +9,8 @@
 An exporter for Project SEKAI COLORFUL STAGE! feat. Hatsune Miku. It reads the game's Unity asset bundles and client package, converts what they hold into open formats, and keeps a published copy of every region up to date, one version after another. Every file it writes is recorded with the objects it came from, so a reader can always find out what a file is.
 
 > [!TIP]
-> **Start with [Objects and assets](docs/objects-and-assets.md).** It explains what exporting Unity content means, why this project converts rather than unpacks, and what it produces.
+> - **Using the published files?** Read [Using the published assets](docs/using-the-assets.md): what each view and file is, how to link to a file so the link keeps working, and how much the audio and video lose against the game's own streams.
+> - **New to the project?** Start with [Objects and assets](docs/objects-and-assets.md). It explains what exporting Unity content means, why this project converts rather than unpacks, and what it produces.
 
 ## What it produces
 
@@ -32,7 +33,7 @@ The files take these forms:
 | Live2D | Cubism models with their textures, physics and motions ([Live2D](docs/spec/live2d.md)) |
 | Documents | JSON for scenarios, episodes, virtual live scripts, action sets, animation curves and the other forms in the [specifications](docs/spec/README.md) |
 
-The audio and video are encoded again from lossy sources. They are copies for listening and viewing; programs that analyse or train on the samples or pictures decode the HCA and MPEG-1 streams from the bundles with `sekai-codec`.
+The audio and video are encoded again from lossy sources. They are copies for listening and viewing; programs that analyse or train on the samples or pictures decode the HCA streams with `sekai-codec` and take the MPEG-1 streams out of the USM files. [Using the published assets](docs/using-the-assets.md#questions-about-audio-and-video) gives the measurements and how to repeat them.
 
 ## How it works
 
@@ -114,6 +115,7 @@ The documents in [`docs/`](docs/) describe the design that the code implements.
 
 | Document | Contents |
 |---|---|
+| [Using the published assets](docs/using-the-assets.md) | **For readers of the files.** Views, files, addresses, and what the audio and video lose |
 | [Objects and assets](docs/objects-and-assets.md) | **Start here.** What exporting Unity content means and why this project is an exporter |
 | [Architecture](docs/architecture.md) | The derivation model, evaluation strategies and the crate structure |
 | [Pipeline](docs/pipeline.md) | The stages of a run and the invariant each stage keeps |

@@ -9,7 +9,8 @@
 面向《世界计划 彩色舞台 feat. 初音未来》（Project SEKAI COLORFUL STAGE! feat. Hatsune Miku）的导出器。它读取游戏的 Unity 资源包与客户端安装包，把其中的内容转换为开放格式，并随游戏逐个版本更新每个区服的发布副本。它写出的每个文件都记录了来源对象，读者总能查明一个文件是什么。
 
 > [!TIP]
-> **请先阅读[对象与资产](docs/objects-and-assets.zh-CN.md)。** 它说明导出 Unity 内容意味着什么、本项目为何以转换而非解包为核心，以及产出哪些内容。
+> - **要使用发布的文件？** 请读[使用发布的资产](docs/using-the-assets.zh-CN.md)：每种视图和文件是什么，怎样引用文件才能长期有效，以及音频与视频相对游戏原始流损失了多少。
+> - **初次了解本项目？** 请从[对象与资产](docs/objects-and-assets.zh-CN.md)读起。它说明导出 Unity 内容意味着什么、本项目为何以转换而非解包为核心，以及产出哪些内容。
 
 ## 产出什么
 
@@ -32,7 +33,7 @@
 | Live2D | Cubism 模型，含贴图、物理与动作（[Live2D](docs/spec/live2d.zh-CN.md)） |
 | 文档 | 剧本、剧集、虚拟演唱会剧本、动作集、动画曲线，以及[规范](docs/spec/README.zh-CN.md)中其他形式的 JSON |
 
-音频与视频是由有损来源再次编码的，是供收听与观看的副本。需要分析采样或画面、或用其训练模型的程序，应使用 `sekai-codec` 从资源包中解码 HCA 与 MPEG-1 流。
+音频与视频是由有损来源再次编码的，是供收听与观看的副本。需要分析采样或画面、或用其训练模型的程序，应使用 `sekai-codec` 解码 HCA 流，并从 USM 文件中取出 MPEG-1 流。测量结果及复现方法见[使用发布的资产](docs/using-the-assets.zh-CN.md#关于音频与视频的问题)。
 
 ## 工作方式
 
@@ -114,6 +115,7 @@ sekai-exporter gc <output> --config <file> --secrets <dir>
 
 | 文档 | 内容 |
 |---|---|
+| [使用发布的资产](docs/using-the-assets.zh-CN.md) | **写给文件的读者。** 视图、文件、地址，以及音频与视频的损失 |
 | [对象与资产](docs/objects-and-assets.zh-CN.md) | **从这里开始。** 导出 Unity 内容的含义，以及本项目定位为导出器的原因 |
 | [架构](docs/architecture.zh-CN.md) | 派生模型、求值策略与 crate 结构 |
 | [管线](docs/pipeline.zh-CN.md) | 一次运行的各个阶段及每个阶段保持的不变式 |

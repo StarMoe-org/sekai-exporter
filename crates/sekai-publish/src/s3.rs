@@ -1069,13 +1069,46 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// `text` with the five predefined XML entities replaced by their characters.
+/// `text` with XML named and numeric character references replaced by their characters.
 fn unescape(text: &str) -> String {
-    text.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        if let Some((entity, tail)) = after.split_once(';')
+            && let Some(ch) = decode_entity(entity)
+        {
+            out.push(ch);
+            rest = tail;
+        } else {
+            out.push('&');
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn decode_entity(entity: &str) -> Option<char> {
+    match entity {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "amp" => Some('&'),
+        _ => {
+            let code = if let Some(hex) = entity
+                .strip_prefix("#x")
+                .or_else(|| entity.strip_prefix("#X"))
+            {
+                u32::from_str_radix(hex, 16).ok()?
+            } else {
+                entity.strip_prefix('#')?.parse::<u32>().ok()?
+            };
+            char::from_u32(code)
+        }
+    }
 }
 
 /// The time of a request, `YYYYMMDDTHHMMSSZ` in UTC.
@@ -1195,9 +1228,9 @@ mod tests {
         let xml = "<ListBucketResult><IsTruncated>true</IsTruncated>\
             <Contents><Key>p/store/ab/a&amp;b.json</Key>\
             <LastModified>1970-01-01T00:00:01.000Z</LastModified><Size>12</Size></Contents>\
-            <Contents><Key>p/store/ab/c.png</Key>\
+            <Contents><Key>p/store/ab/c&#43;&#x3d;.png</Key>\
             <LastModified>1970-01-01T00:01:00Z</LastModified><Size>3</Size></Contents>\
-            <NextContinuationToken>t+1/=</NextContinuationToken></ListBucketResult>";
+            <NextContinuationToken>t&#43;1&#x2F;=</NextContinuationToken></ListBucketResult>";
         let file = |name: &str, size, seconds| Listed {
             name: name.to_owned(),
             size,
@@ -1208,7 +1241,7 @@ mod tests {
             Ok(Page {
                 files: vec![
                     file("p/store/ab/a&b.json", 12, 1),
-                    file("p/store/ab/c.png", 3, 60)
+                    file("p/store/ab/c+=.png", 3, 60)
                 ],
                 next: Some("t+1/=".to_owned()),
             })

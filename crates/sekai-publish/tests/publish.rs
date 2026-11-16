@@ -264,6 +264,66 @@ fn a_removed_file_leaves_the_tree_one_publication_later() {
 }
 
 #[test]
+fn an_interrupted_tree_publication_still_retires_removed_files() {
+    let s = Scratch::new("interrupted-tree");
+    let store = s.store();
+    let root = s.0.join("tree");
+    let a = asset(&store, "a", &[("image", b"1")]);
+    let b = asset(&store, "b", &[("image", b"2")]);
+
+    let one = plan("v1", &[a.clone(), b], &store, 2).unwrap();
+    tree::publish(&store, &root, &one, 2).unwrap();
+
+    // Simulate a crash during v2 right after `_listing.json` was replaced and before final
+    // `_state.json` promotion: `retiring` holds the files removed from v1.
+    let two = plan("v2", std::slice::from_ref(&a), &store, 2).unwrap();
+    tree::publish(&store, &root, &two, 2).unwrap();
+    std::fs::write(
+        root.join("_state.json"),
+        br#"{"pending_delete":[],"retiring":["b.asset.json","b.webp"]}"#,
+    )
+    .unwrap();
+
+    // Re-running v2 keeps `b` for one cycle and promotes it to `pending_delete`.
+    assert_eq!(tree::publish(&store, &root, &two, 2).unwrap().deleted, 0);
+    assert!(root.join("b.webp").exists());
+
+    // Publishing v3 then deletes `b`.
+    let three = plan("v3", &[a], &store, 2).unwrap();
+    assert_eq!(tree::publish(&store, &root, &three, 2).unwrap().deleted, 2);
+    assert!(!root.join("b.webp").exists());
+}
+
+#[test]
+fn a_tree_replaces_a_retired_file_with_a_directory_and_back() {
+    let s = Scratch::new("file-dir-tree");
+    let store = s.store();
+    let root = s.0.join("tree");
+    let file_key = store.put(b"file", "txt").unwrap();
+    let child_key = store.put(b"child", "txt").unwrap();
+    let item = |path: &str, key: &Key, size| File {
+        path: path.to_owned(),
+        key: key.clone(),
+        size,
+        media_type: "text/plain".to_owned(),
+        asset: path.to_owned(),
+        role: "file".to_owned(),
+    };
+
+    let as_file = files_plan("v1", vec![item("node", &file_key, 4)]);
+    tree::publish(&store, &root, &as_file, 1).unwrap();
+    assert_eq!(read_tree(&root, "node"), b"file");
+
+    let as_dir = files_plan("v2", vec![item("node/leaf.txt", &child_key, 5)]);
+    tree::publish(&store, &root, &as_dir, 1).unwrap();
+    assert_eq!(read_tree(&root, "node/leaf.txt"), b"child");
+
+    let back_to_file = files_plan("v3", vec![item("node", &file_key, 4)]);
+    tree::publish(&store, &root, &back_to_file, 1).unwrap();
+    assert_eq!(read_tree(&root, "node"), b"file");
+}
+
+#[test]
 fn a_failed_asset_keeps_its_previous_files() {
     let s = Scratch::new("failed");
     let store = s.store();

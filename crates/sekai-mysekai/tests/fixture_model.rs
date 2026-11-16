@@ -9,8 +9,18 @@ use serde_json::{Value as Json, json};
 
 type Fields = Vec<(&'static str, Value)>;
 
-/// One bundle with one file, holding the given objects.
-struct File(Vec<Object>);
+/// One bundle with one file, holding `objects`, whose container lists the root game object under
+/// the path `prefab`.
+struct File {
+    prefab: &'static str,
+    objects: Vec<Object>,
+}
+
+/// The container paths of a piece and of an attachment.
+const PIECE: &str =
+    "assets/sekai/assetbundle/resources/ondemand/mysekai/fixture/piece/piece.prefab";
+const ATTACHMENT: &str =
+    "assets/sekai/assetbundle/resources/ondemand/mysekai/custom_fixture_attach/badge/badge.prefab";
 
 fn id(path_id: i64) -> ObjectId {
     ObjectId {
@@ -22,7 +32,7 @@ fn id(path_id: i64) -> ObjectId {
 
 impl Context for File {
     fn object(&self, id: ObjectId) -> Result<Object, ConvertError> {
-        self.0
+        self.objects
             .iter()
             .find(|object| object.id == id)
             .cloned()
@@ -45,7 +55,7 @@ impl Context for File {
     }
 
     fn container(&self, _from: ObjectId) -> Result<Vec<(String, ObjectId)>, ConvertError> {
-        Ok(Vec::new())
+        Ok(vec![(self.prefab.to_owned(), id(ROOT))])
     }
 
     fn file_name(&self, _from: ObjectId) -> Result<&str, ConvertError> {
@@ -55,7 +65,7 @@ impl Context for File {
 
 impl File {
     fn object_mut(&mut self, path_id: i64) -> &mut Object {
-        self.0
+        self.objects
             .iter_mut()
             .find(|object| object.id.path_id == path_id)
             .unwrap_or_else(|| panic!("object {path_id} exists"))
@@ -505,7 +515,7 @@ const BODY_TRANSFORM: i64 = 11;
 /// body has a mesh renderer and a mesh filter, a box collider and a mesh collider that uses the
 /// same mesh as the body, and the root has a navigation obstacle.
 fn piece() -> File {
-    File(vec![
+    let objects = vec![
         game_object(ROOT, "fixture", true, &[ROOT_TRANSFORM, VIEW, 30]),
         transform(ROOT_TRANSFORM, ROOT, [0.0, 0.0, 0.0], &[BODY_TRANSFORM]),
         behaviour(
@@ -525,7 +535,36 @@ fn piece() -> File {
         material(21, "body_mat", 22, 23),
         shader(22, "Mysekai/Fixture/Basic"),
         texture(23, "body_C"),
-    ])
+    ];
+    File {
+        prefab: PIECE,
+        objects,
+    }
+}
+
+/// The objects of the piece as an attachment, whose root carries no `FixtureView`.
+fn attachment() -> File {
+    let mut file = piece();
+    file.prefab = ATTACHMENT;
+    without_fixture_view(&mut file);
+    file
+}
+
+/// Takes the `FixtureView` off the root game object of `file`.
+fn without_fixture_view(file: &mut File) {
+    file.object_mut(ROOT).fields = s(vec![
+        (
+            "m_Component",
+            list(vec![
+                s(vec![("component", r(ROOT_TRANSFORM))]),
+                s(vec![("component", r(30))]),
+            ]),
+        ),
+        ("m_Layer", i(0)),
+        ("m_Name", text("fixture")),
+        ("m_IsActive", Value::Bool(true)),
+    ]);
+    file.objects.retain(|object| object.id.path_id != VIEW);
 }
 
 /// A GLB file read back: its JSON and its binary chunk.
@@ -642,17 +681,75 @@ fn a_piece_is_the_prefab_named_after_its_directory() {
 }
 
 #[test]
+fn an_attachment_is_the_prefab_named_after_its_directory() {
+    assert!(is_root(ATTACHMENT));
+    assert!(is_root(
+        "a/resources/ondemand/MySekai/Custom_Fixture_Attach/Badge/BADGE.prefab"
+    ));
+    assert!(!is_root(
+        "a/resources/ondemand/mysekai/custom_fixture_attach/badge/fbx/badge.prefab"
+    ));
+}
+
+#[test]
+fn an_attachment_without_a_fixture_view_is_placed_by_its_prefab_root() {
+    let asset = attachment().convert().expect("the attachment converts");
+    let roles: Vec<&str> = asset.members.iter().map(|m| m.role.as_str()).collect();
+    assert_eq!(roles, ["model", "texture/0"]);
+    let glb = read_glb(&asset);
+    let root = extras(&glb.json, "fixture");
+    assert_eq!(root["fixtureViewRoot"], true);
+    assert!(root["fixtureCollision"]["geometry"].is_array());
+    for name in ["fixture", "body"] {
+        let record = &extras(&glb.json, name)["sourceCollision"];
+        assert_eq!(record["fixtureNavLayer"], false, "{name}");
+    }
+    let attributes = &glb.json["meshes"][0]["primitives"][0]["attributes"];
+    let values = |key: &str| float_values(&glb, attributes[key].as_u64().unwrap() as usize);
+    assert_eq!(
+        values("POSITION"),
+        [-0.0, 1.0, 2.0, -1.0, 2.0, 3.0, -2.0, 3.0, 4.0]
+    );
+    assert_eq!(values("TEXCOORD_0"), [0.25, 0.25, 0.0, 0.0, 1.5, 1.25]);
+}
+
+#[test]
+fn an_attachment_with_a_fixture_view_has_its_attach_points() {
+    let mut file = piece();
+    file.prefab = ATTACHMENT;
+    let asset = file.convert().expect("the attachment converts");
+    assert_eq!(attach_points(&asset)["points"], json!([]));
+    let glb = read_glb(&asset);
+    assert_eq!(
+        extras(&glb.json, "fixture")["sourceCollision"]["fixtureNavLayer"],
+        true
+    );
+}
+
+#[test]
+fn a_fixture_view_below_the_root_of_an_attachment_is_malformed() {
+    let mut file = attachment();
+    file.objects
+        .push(behaviour(VIEW, BODY, "FixtureView", Vec::new()));
+    set(
+        file.object_mut(BODY),
+        "m_Component",
+        list(
+            [BODY_TRANSFORM, 12, 13, 14, 15, VIEW]
+                .map(|component| s(vec![("component", r(component))]))
+                .to_vec(),
+        ),
+    );
+    let error = file
+        .convert()
+        .expect_err("the FixtureView is below the root");
+    assert_eq!(error.code, "malformed");
+}
+
+#[test]
 fn a_root_without_a_fixture_view_is_malformed() {
     let mut file = piece();
-    file.object_mut(ROOT).fields = s(vec![
-        (
-            "m_Component",
-            list(vec![s(vec![("component", r(ROOT_TRANSFORM))])]),
-        ),
-        ("m_Layer", i(0)),
-        ("m_Name", text("fixture")),
-        ("m_IsActive", Value::Bool(true)),
-    ]);
+    without_fixture_view(&mut file);
     let error = file.convert().expect_err("the root has no FixtureView");
     assert_eq!(error.code, "malformed");
 }
@@ -903,7 +1000,7 @@ fn point(start: i64, end: i64) -> Value {
 /// without, and with the body's mesh collider as the collider of its `FixtureView`.
 fn piece_with_points() -> File {
     let mut file = piece();
-    file.0.extend([
+    file.objects.extend([
         game_object(START, "loc_start001", true, &[START_TRANSFORM]),
         transform(START_TRANSFORM, START, [1.0, 0.0, 2.0], &[]),
         game_object(END, "loc_end001", true, &[END_TRANSFORM]),

@@ -1,5 +1,5 @@
-//! The keys of every node of a piece: the keys of every MySekai model, the road cell of a node and
-//! the placement root with the collision document of the piece.
+//! The keys of every node of a piece or an attachment: the keys of every MySekai model, the road
+//! cell of a node and the placement root with the collision document of the prefab.
 
 use std::collections::BTreeMap;
 
@@ -8,32 +8,38 @@ use sekai_convert::{Context, ConvertError, Object, ObjectId, Value};
 use serde_json::{Value as Json, json};
 
 use crate::model_keys::{Collision, is_script, source_keys};
+use crate::roots::FixturePrefab;
 use crate::scripts::malformed;
 use crate::stored::{array, field, stored_code};
 
 /// The script class of the behaviour of the game object the game places.
-pub(super) const FIXTURE_VIEW: &str = ".FixtureView";
+const FIXTURE_VIEW: &str = ".FixtureView";
 /// The script class of the behaviour of a road.
 const ROAD_VIEW: &str = ".RoadView";
 
-/// The keys of the nodes of a piece.
+/// The keys of the nodes of a piece or an attachment.
 pub(super) struct PieceNodes<'a> {
     prefab: &'a Prefab,
     collision: &'a Collision,
+    /// Whether the root carries a `FixtureView`, which puts every node on the fixture layer.
+    fixture_view: bool,
     /// The road cell type of each game object that is a road cell.
     cells: BTreeMap<ObjectId, i64>,
 }
 
 impl<'a> PieceNodes<'a> {
-    /// The keys of the nodes of `prefab`, whose collision is `collision`.
+    /// The keys of the nodes of `prefab`, whose collision is `collision` and whose root carries
+    /// a `FixtureView` when `fixture_view` is set.
     pub(super) fn read(
         prefab: &'a Prefab,
         collision: &'a Collision,
+        fixture_view: bool,
         cx: &dyn Context,
     ) -> Result<Self, ConvertError> {
         Ok(Self {
             prefab,
             collision,
+            fixture_view,
             cells: road_cells(prefab, cx)?,
         })
     }
@@ -51,8 +57,9 @@ impl NodeKeys for PieceNodes<'_> {
             .ok_or_else(|| malformed("a node is not a game object of the prefab"))?;
         let mut keys = source_keys(self.prefab, node, self.collision, cx)?;
         if let Some(record) = keys.get_mut("sourceCollision") {
-            // Every node of a piece is the FixtureView game object or below it.
-            record["fixtureNavLayer"] = json!(true);
+            // Every node is the root or below it, so it is on the fixture layer when the root
+            // carries the FixtureView.
+            record["fixtureNavLayer"] = json!(self.fixture_view);
         }
         if let Some(&cell) = self.cells.get(&object) {
             keys.insert("roadCellType".to_owned(), json!(cell));
@@ -74,20 +81,33 @@ impl PieceNodes<'_> {
     }
 }
 
-/// Fails unless the root game object of `prefab` carries a `FixtureView` and no game object below
-/// it does: the root is the game object the game places, and its collision is read from it down.
-pub(super) fn check_placement(prefab: &Prefab) -> Result<(), ConvertError> {
-    let has_view = |node: &Node| node.components().iter().any(|c| is_script(c, FIXTURE_VIEW));
-    match prefab.nodes().split_first() {
-        Some((root, _)) if !has_view(root) => {
-            Err(malformed("the root game object has no FixtureView"))
-        }
-        Some((_, below)) if below.iter().any(has_view) => {
-            Err(malformed("a FixtureView is below the root game object"))
-        }
-        Some(_) => Ok(()),
-        None => Err(malformed("the prefab has no game object")),
+/// The `FixtureView` of the root game object of `prefab`, a prefab of the kind `kind`. The root is
+/// the game object the game places, and its collision is read from it down, so a `FixtureView`
+/// below the root fails, and so does a piece whose root has none; an attachment is placed by its
+/// root either way.
+pub(super) fn placement(
+    prefab: &Prefab,
+    kind: FixturePrefab,
+) -> Result<Option<&Object>, ConvertError> {
+    let (root, below) = prefab
+        .nodes()
+        .split_first()
+        .ok_or_else(|| malformed("the prefab has no game object"))?;
+    let view = fixture_view(root);
+    if view.is_none() && kind == FixturePrefab::Piece {
+        return Err(malformed("the root game object has no FixtureView"));
     }
+    if below.iter().any(|node| fixture_view(node).is_some()) {
+        return Err(malformed("a FixtureView is below the root game object"));
+    }
+    Ok(view)
+}
+
+/// The `FixtureView` of the game object of `node`, if it has one.
+fn fixture_view(node: &Node) -> Option<&Object> {
+    node.components()
+        .iter()
+        .find(|component| is_script(component, FIXTURE_VIEW))
 }
 
 /// The road cell type of each game object that is a cell of a `RoadView` of `prefab`. Each entry

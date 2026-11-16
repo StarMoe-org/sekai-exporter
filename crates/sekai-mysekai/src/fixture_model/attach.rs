@@ -5,25 +5,23 @@ use sekai_convert::model::{Node, Prefab};
 use sekai_convert::{Context, ConvertError, Object, ObjectId, Value};
 use serde_json::{Value as Json, json};
 
-use super::nodes::FIXTURE_VIEW;
-use crate::model_keys::{is_script, source_object};
+use crate::model_keys::source_object;
 use crate::scripts::malformed;
 use crate::stored::{array, field};
 
 /// The class ID of `MeshCollider`.
 const MESH_COLLIDER: i32 = 64;
 
-/// The `attach-points` document of `prefab`, whose root carries the `FixtureView`.
-pub(super) fn document(prefab: &Prefab, cx: &dyn Context) -> Result<Json, ConvertError> {
-    let (root, _) = prefab
+/// The `attach-points` document of `prefab`, whose root carries the `FixtureView` `view`.
+pub(super) fn document(
+    prefab: &Prefab,
+    view: &Object,
+    cx: &dyn Context,
+) -> Result<Json, ConvertError> {
+    let root = prefab
         .nodes()
-        .split_first()
+        .first()
         .ok_or_else(|| malformed("the prefab has no game object"))?;
-    let view = root
-        .components()
-        .iter()
-        .find(|c| is_script(c, FIXTURE_VIEW))
-        .ok_or_else(|| malformed("the root game object has no FixtureView"))?;
     let points = array(field(&view.fields, "_attachPoints")?, "_attachPoints")?
         .iter()
         .map(|point| {

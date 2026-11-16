@@ -2,7 +2,7 @@
 
 [English](fixture-model.md)
 
-`fixture-model` 形式是一件 MySekai 家具在住居站点上如运行时呈现的样子：其几何、其材质及其值，以及站点为它读取的碰撞体与导航数据。转换器：`sekai-mysekai` 中的 `fixture-model`。相关页面：[模型文件](model.zh-CN.md)说明本形式共用的部分，[贴图](texture.zh-CN.md)说明每个图像。
+`fixture-model` 形式是一件 MySekai 家具，或自定义家具的一个附件，在住居站点上如运行时呈现的样子：其几何、其材质及其值，以及站点为它读取的碰撞体与导航数据。转换器：`sekai-mysekai` 中的 `fixture-model`。相关页面：[模型文件](model.zh-CN.md)说明本形式共用的部分，[贴图](texture.zh-CN.md)说明每个图像。
 
 ## 1. 运行时
 
@@ -14,6 +14,8 @@
 
 它还读取角色使用该家具时所站的位置，即挂点（2.6）。它一次读取一个版本全部家具的挂点，来源是合并后的[家具挂点](fixture-attach-points.zh-CN.md)文档，这样在加载任何模型之前就能规划角色的去处。除该文档外，它通过本形式不读取文件之外的任何其他内容：碰撞文档与全部渲染器状态都在 GLB 之内，其旁仅有它的图像。哪些家具有模型、每件使用哪个文件，它从已发布集合的资产列表中获知。
 
+自定义家具是一件底座家具加上其上的附件，例如带徽章的立架、带唱片的展板。底座是一件家具，附件是 `custom_fixture_attach/` 下自成一体的预制体，游戏数据为每件自定义家具指明二者。运行时从本形式加载两部分各自的模型，并把二者都放在自定义家具的放置姿态上；附件在底座上再移动或转动多少由运行时决定，本形式按各部分自身的坐标系给出它们。
+
 ## 2. 内容
 
 成员：
@@ -24,13 +26,13 @@
 | `texture/<n>` | 模型文件的第 `n` 个图像，从 0 开始计数，形式与[贴图形式](texture.zh-CN.md)的 `image` 成员相同。角色按 `n` 的顺序出现 |
 | `attach-points` | 该家具的挂点（2.6），UTF-8 JSON 文档，扩展名 `json` |
 
-只有预制体带有 `FixtureView` 的家具才有 `fixture-model` 资产（3.1）。
+只有预制体带有 `FixtureView` 的家具才有 `fixture-model` 资产；附件无论其预制体是否带有 `FixtureView` 都有该资产（3.1）。`attach-points` 成员只为带有 `FixtureView` 的预制体写出。
 
 ### 2.1 场景
 
 文件有一个场景，它也是默认场景（`scene` 为 0）。场景根是 `extras.fixtureViewRoot` 设为 `true` 的节点，其 `Transform` 子树即文件的每个节点。没有节点在场景之外。
 
-游戏放置一件家具时，找到唯一带有 `FixtureView` 的 GameObject，把该 GameObject 的位置与旋转设为放置姿态，并保持其缩放。该 GameObject 就是预制体根，因此：
+**放置根**是游戏所放置的 GameObject：唯一带有 `FixtureView` 的 GameObject；预制体没有 `FixtureView` 时（附件）则是预制体根。游戏把它的位置与旋转设为放置姿态，并保持其缩放。放置根就是预制体根，因此：
 
 - 根在 GLB 中的局部 `translation` 与 `rotation` 为零与单位值，其局部 `scale` 为作者所设的缩放；
 - 在预制体中没有父级的 `Transform`，是根 `Transform` 的子节点。
@@ -45,7 +47,7 @@
 
 | 键 | 值 | 写在 |
 |---|---|---|
-| `fixtureViewRoot` | `true` | 根：其 `FixtureView` 是游戏所放置的实例根的 GameObject |
+| `fixtureViewRoot` | `true` | 根：放置根（2.1），即带有 `FixtureView` 的 GameObject；预制体没有 `FixtureView` 时为预制体根 |
 | `sourceObject` | `{ "file": <序列化文件名>, "gameObjectId": "<带符号的 64 位 id>", "transformId": "<带符号的 64 位 id>" }`。两个 id 都是十进制字符串，因为这些值超出 JSON 数字能精确表示的范围 | 每个节点 |
 | `sourceComponentIds` | 节点游戏对象上每个组件的源组件 id 的十进制字符串，按该游戏对象存储它们的顺序排列 | 每个节点 |
 | `sourceChildOrder` | 每个子节点变换 id 的十进制字符串，按 `Transform` 存储它们的顺序排列 | 每个节点 |
@@ -77,7 +79,7 @@
 | `activeSelf` | 游戏对象是否激活（`m_IsActive`） |
 | `activeInHierarchy` | 游戏对象及其所有祖先是否都激活 |
 | `authoredLayer` | 游戏对象的层（`m_Layer`） |
-| `fixtureNavLayer` | 节点为 `FixtureView` 游戏对象或其之下时为 `true` |
+| `fixtureNavLayer` | 节点为 `FixtureView` 游戏对象或其之下时为 `true`，因此在没有 `FixtureView` 的预制体的每个节点上为 `false` |
 | `colliders` | 节点的碰撞体，按组件顺序排列（见下文） |
 | `geometryIds` | 其碰撞体各不相同的 `geometryId`，已排序 |
 | `modifiers` | 其 `NavMeshModifier` 组件：`{ "componentId", "enabled", "overrideArea", "area", "ignoreFromBuild", "affectedAgents" }` |
@@ -142,7 +144,7 @@
 
 挂点是角色使用该家具时所站的位置：角色走到挂点的起点；挂点有终点时，再从起点移到终点。游戏把一件家具的挂点存为其 `FixtureView` 上的一个列表，并按列表中的位置找到挂点。每个挂点有一个起点定位器和一个终点定位器，都是预制体的 GameObject，游戏读取各自的世界位置与旋转。
 
-`attach-points` 成员是一个 JSON 对象：
+`attach-points` 成员是一个 JSON 对象。没有 `FixtureView` 的预制体没有挂点，也没有该成员。
 
 | 键 | 值 |
 |---|---|
@@ -172,12 +174,13 @@
 | 资产 | 容器路径 |
 |---|---|
 | 一件家具的模型 | `…/resources/ondemand/mysekai/fixture/<name>/<name>.prefab` |
+| 一个附件的模型 | `…/resources/ondemand/mysekai/custom_fixture_attach/<name>/<name>.prefab` |
 
-根是容器在该路径下列出的 GameObject；`is_root` 选定它。列出该路径的资源包是该家具的模型包，其名称为 `<prefix><name>`（上述路径把 `/` 写作 `__` 并去掉 `.prefab`）。资产的名称是容器路径。该包中的其他对象——预制体由其制作而来的导入模型文件（`.fbx`），以及其他文件夹的预制体——都不是根，本形式不为它们写资产。
+根是容器在该路径下列出的 GameObject；`is_root` 选定它。列出其中一个路径的资源包是该家具或该附件的模型包，其名称为 `<prefix><name>`（上述路径把 `/` 写作 `__` 并去掉 `.prefab`）。资产的名称是容器路径。该包中的其他对象——预制体由其制作而来的导入模型文件（`.fbx`），以及其他文件夹的预制体——都不是根，本形式不为它们写资产。
 
-`<name>` 是该家具模型包的名称，其目录与其预制体共用它。
+`<name>` 是该模型包的名称，其目录与其预制体共用它。
 
-预制体根有一个脚本类为 `FixtureView` 的 `MonoBehaviour`，并且只有该预制体根的 GameObject 是根。`FixtureView` 位于其根之下的预制体是错误（3.3），因为放置与碰撞图都定义在预制体根上。
+家具的预制体根有一个脚本类为 `FixtureView` 的 `MonoBehaviour`。附件的预制体根可以有一个，无论有无都是放置根。只有预制体根的 GameObject 是根。`FixtureView` 位于其根之下的预制体是错误（3.3），因为放置与碰撞图都定义在预制体根上。
 
 模型文件含有根的 `Transform` 子树、其游戏对象的组件、渲染器所引用的一切（网格、材质、着色器与贴图，它们可能位于其他资源包中），以及同一子树的碰撞图（2.3）。
 
@@ -212,7 +215,7 @@
 | 碰撞体的网格无法解析，或不是 `Mesh` | 错误 `malformed` |
 | 挂点的 `StartLoc` 为空，或定位器、`_collider` 未解析到预制体中所指类的对象 | 错误 `malformed` |
 | 定位器的 GameObject 不是根的子节点 | 错误 `unsupported`：其姿态需经二者之间的各变换合成 |
-| 根的预制体没有 `FixtureView` GameObject | 错误 `malformed`（本形式对这样的包没有资产） |
+| 家具预制体的根游戏对象没有 `FixtureView` | 错误 `malformed`（本形式对这样的包没有资产） |
 | 节点的网格数据使用了[模型文件](model.zh-CN.md)未列出的格式、分量数、拓扑或顶点通道 | 模型文件的 `unsupported` |
 | 某个贴图无法解码 | [贴图形式](texture.zh-CN.md)的错误 |
 
@@ -235,12 +238,12 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 
 当下列各项都成立时，文件对运行时是正确的：
 
-1. 它有一个场景，即默认场景，且恰有一个节点带有 `fixtureViewRoot`；该节点是场景唯一的根节点，并且是预制体根。
+1. 它有一个场景，即默认场景，且恰有一个节点带有 `fixtureViewRoot`；该节点是场景唯一的根节点，并且是预制体根与放置根。
 2. 每个节点带有 `sourceObject`，其值是该节点所写出源对象的 id，且没有两个节点具有相同的 `(file, gameObjectId, transformId)`。
 3. 根带有 `fixtureCollision`；碰撞体所命名的每个 `geometryId` 都是该文档中的一个几何；导航构建所读取的每个节点都具有带 2.3 所述键的 `sourceCollision`。
 4. 每个材质都有 `shader`、`renderQueue`、`keywords`、`floats`、`ints`、`colors` 与 `textures`，且每个贴图属性都在 `textures` 中；程序由 2.4.4 给出运行时材质的每个材质，都持有该程序的材质代码从 extras 读取的每个键；`textures` 中的每个贴图索引都命名一个贴图，每个贴图都命名一个作为该资产成员的图像；每个图像都是 PNG 且可解码。
 5. 文件没有 `animations`；文件中的任何对象都不带版本字段、坐标约定，或单位或 UV 约定字符串。
-6. `attach-points` 成员按存储顺序列出 `_attachPoints` 的每一项；其中每个 `sourceObject` 都是文件中某个节点的 `sourceObject`；每个定位器的 `position` 与 `rotation` 等于其节点的 `translation` 与 `rotation`；`root.scale` 等于根节点的 `scale`；`collider` 不为空时，指向该节点 `sourceCollision` 中的一个碰撞体。
+6. 预制体根带有 `FixtureView` 时才有 `attach-points` 成员；它按存储顺序列出 `_attachPoints` 的每一项；其中每个 `sourceObject` 都是文件中某个节点的 `sourceObject`；每个定位器的 `position` 与 `rotation` 等于其节点的 `translation` 与 `rotation`；`root.scale` 等于根节点的 `scale`；`collider` 不为空时，指向该节点 `sourceCollision` 中的一个碰撞体。
 
 **检查。**
 
@@ -248,15 +251,16 @@ GLB：带有一个二进制块的 glTF 2.0，含有 2.1 的场景、其节点、
 - 节点身份、变换、extras 键、材质表（extras 与源属性的对照）、碰撞文档与节点记录，都与同一资源包的独立导出结果逐值比较，每处差异均予以说明。
 - PNG 图像按解码后的像素与源贴图比较。
 - 对抽取的家具有样本，游戏自身导航构建从源读取的每个节点与碰撞体，都通过 `sourceObject` 从本文件重新找到，其形状一致。
+- 一个版本的每个附件，其每个网格与源网格比较顶点数、位置与第一组贴图坐标。
 - 一个版本每件家具的挂点，与从同一批资源包的对象文档独立读出的其 `FixtureView` 的 `_attachPoints` 比较：数量、顺序、定位器的名字与身份，以及姿态。
 - 同一资源包在单线程与多线程下，以及在原生与 Web 目标上，给出的字节都相同。
 
 ## 6. 版本
 
-形式版本：4。版本 2 增加了 `attach-points` 成员；版本 3 跟随模型文件的版本 2；版本 4 按模型文件的方式写出贴图坐标。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表、挂点）的改动，都会改变本形式每种资产的版本。
+形式版本：4。版本 2 增加了 `attach-points` 成员；版本 3 跟随模型文件的版本 2；版本 4 按模型文件的方式写出贴图坐标，并且也把自定义家具的附件作为根，这只增加资产，家具的资产不变。上述任何内容的改动，或本形式所用任何格式（模型文件、贴图、碰撞记录、材质表、挂点）的改动，都会改变本形式每种资产的版本。
 
 ## 7. 为节点命名
 
 该家具中命名节点的每份文档，都以节点的 `sourceObject` 命名它：`file`、`gameObjectId` 与 `transformId`，即该节点所带（2.2）的同样三个值。同级名称会重复，因此节点的名称并不标识它。
 
-哪些家具有模型、每件使用哪个文件，读取方从已发布集合的资产列表中获知：本形式只为带有 `FixtureView` 的预制体产生资产，因此凡以 `fixture-model` 资产列出的家具都有它。
+哪些家具有模型、每件使用哪个文件，读取方从已发布集合的资产列表中获知：本形式只在家具的预制体带有 `FixtureView` 时为它产生资产，因此凡以 `fixture-model` 资产列出的家具都有它。附件以其在 `custom_fixture_attach/` 下的容器路径列出。

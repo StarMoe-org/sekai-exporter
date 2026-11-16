@@ -21,6 +21,8 @@ const FIXTURE_REACTIONS: &str = "Assembly-CSharp/Sekai.Mysekai.FixtureReactionDa
 
 /// The directory of the furniture pieces, each in a directory of its own.
 const FIXTURE_MODELS: &str = "/resources/ondemand/mysekai/fixture/";
+/// The directory of the attachments of custom furniture, each in a directory of its own.
+const FIXTURE_ATTACHMENTS: &str = "/resources/ondemand/mysekai/custom_fixture_attach/";
 
 /// The directory of the packages of the MySekai places.
 const SITES: &str = "/resources/ondemand/mysekai/site/";
@@ -43,25 +45,36 @@ pub fn field_camera(object: &ObjectIndex, _script: Option<&str>, paths: &[String
             .any(|path| path.to_ascii_lowercase().ends_with(FIELD_CAMERA))
 }
 
-/// The roots of the `fixture-model` form: the prefabs of the furniture pieces, which the container
-/// lists as `…/resources/ondemand/mysekai/fixture/<name>/<name>.prefab`.
-pub fn fixture_model(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
-    object.class_id == GAME_OBJECT && paths.iter().any(|path| is_fixture_model(path))
+/// What a prefab of the `fixture-model` form is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixturePrefab {
+    /// A piece of furniture, which the game places by its `FixtureView`.
+    Piece,
+    /// An attachment of a custom piece, placed with its base by its prefab root.
+    Attachment,
 }
 
-/// Whether `path`, compared without regard to case, is `…/<FIXTURE_MODELS><name>/<name>.prefab`.
-fn is_fixture_model(path: &str) -> bool {
+/// The roots of the `fixture-model` form: the prefabs of the furniture pieces and of the
+/// attachments of custom furniture, which the container lists as
+/// `…/resources/ondemand/mysekai/fixture/<name>/<name>.prefab` and
+/// `…/resources/ondemand/mysekai/custom_fixture_attach/<name>/<name>.prefab`.
+pub fn fixture_model(object: &ObjectIndex, _script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == GAME_OBJECT && paths.iter().any(|path| fixture_prefab(path).is_some())
+}
+
+/// What the prefab at `path` is, when `path`, compared without regard to case, is
+/// `…<FIXTURE_MODELS><name>/<name>.prefab` or `…<FIXTURE_ATTACHMENTS><name>/<name>.prefab`.
+pub fn fixture_prefab(path: &str) -> Option<FixturePrefab> {
     let path = path.to_ascii_lowercase();
-    let Some((directory, name)) = path
-        .strip_suffix(".prefab")
-        .and_then(|stem| stem.rsplit_once('/'))
-    else {
-        return false;
-    };
-    !name.is_empty()
-        && directory
-            .strip_suffix(name)
-            .is_some_and(|parent| parent.ends_with(FIXTURE_MODELS))
+    let (directory, name) = path.strip_suffix(".prefab")?.rsplit_once('/')?;
+    let parent = directory.strip_suffix(name)?;
+    if parent.ends_with(FIXTURE_MODELS) {
+        Some(FixturePrefab::Piece)
+    } else if parent.ends_with(FIXTURE_ATTACHMENTS) {
+        Some(FixturePrefab::Attachment)
+    } else {
+        None
+    }
 }
 
 /// The roots of the `site-model` form: every prefab of a package of the MySekai places, the map
@@ -132,5 +145,19 @@ mod tests {
             None,
             &paths("Assets/MySekai/Effect/Emoticon/001/001.Prefab")
         ));
+    }
+
+    #[test]
+    fn fixture_prefabs_are_pieces_and_attachments_in_directories_of_their_own() {
+        let ondemand = "assets/sekai/assetbundle/resources/ondemand/mysekai";
+        let prefab = |path: &str| fixture_prefab(&format!("{ondemand}/{path}"));
+        assert_eq!(prefab("fixture/a/A.prefab"), Some(FixturePrefab::Piece));
+        assert_eq!(
+            prefab("Custom_Fixture_Attach/b/b.prefab"),
+            Some(FixturePrefab::Attachment)
+        );
+        assert_eq!(prefab("fixture/a/b.prefab"), None);
+        assert_eq!(prefab("custom_fixture_attach/b/fbx/b.prefab"), None);
+        assert_eq!(prefab("site/a/a.prefab"), None);
     }
 }

@@ -111,6 +111,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 | `field-camera` | Done | [Field camera](spec/field-camera.md) |
 | `fixture-model`: furniture with materials, colliders and navigation data | Done | [Furniture models](spec/fixture-model.md) |
 | Furniture attach points: the `attach-points` member of `fixture-model`, and `fixture-attach-points` joining them | Done | [Furniture models](spec/fixture-model.md#26-attach-points), [Fixture attach points](spec/fixture-attach-points.md) |
+| Attachments of custom furniture as `fixture-model` assets | Done | [Furniture models](spec/fixture-model.md#31-the-input) |
 | Furniture gimmicks | Planned | The moving and interactive parts of furniture |
 | Character models | Planned | Built on the model file writer shared with costumes and furniture |
 | Motion library | Planned | The character motions a runtime plays, with an index |

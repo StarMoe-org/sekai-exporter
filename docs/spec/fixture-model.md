@@ -2,7 +2,7 @@
 
 [中文](fixture-model.zh-CN.md)
 
-The `fixture-model` form is one piece of MySekai furniture as a runtime shows it on a housing site: its geometry, its materials and their values, and the collider and navigation data the site reads for it. Converter: `fixture-model` in `sekai-mysekai`. Related pages: [model files](model.md) for the parts this form shares, [texture](texture.md) for each image.
+The `fixture-model` form is one piece of MySekai furniture, or one attachment of a custom piece, as a runtime shows it on a housing site: its geometry, its materials and their values, and the collider and navigation data the site reads for it. Converter: `fixture-model` in `sekai-mysekai`. Related pages: [model files](model.md) for the parts this form shares, [texture](texture.md) for each image.
 
 ## 1. Runtime
 
@@ -14,6 +14,8 @@ A runtime that reproduces MySekai housing sites, and an editor of its furniture,
 
 It also reads where characters stand to use the piece, its attach points (2.6). It reads them for every piece of a version at once, from the joined [fixture attach points](fixture-attach-points.md) document, so that it can plan where characters go before it loads any model. Apart from that document, it reads nothing outside the file through this form: the collision document and all renderer state travel inside the GLB, and the only files beside it are its images. Which pieces have a model, and which file each uses, it learns from the asset list of the published set.
 
+A custom piece is a base piece with an attachment on it, such as a stand with a badge or a board with a record. The base is a piece of furniture, and the attachment is a prefab of its own under `custom_fixture_attach/`, which the game data names for each custom piece. The runtime loads the model of each part from this form and places both at the placement pose of the custom piece; how far the attachment is moved or turned on its base is the runtime's, and this form gives each part in its own frame.
+
 ## 2. Contents
 
 Members:
@@ -24,13 +26,13 @@ Members:
 | `texture/<n>` | The `n`th image of the model file, counted from 0, in the form of the `image` member of the [texture form](texture.md). Roles appear in order of `n` |
 | `attach-points` | The attach points of the piece (2.6), a UTF-8 JSON document with the extension `json` |
 
-A piece has a `fixture-model` asset only when its prefab has a `FixtureView` (3.1).
+A piece has a `fixture-model` asset only when its prefab has a `FixtureView`; an attachment has one whether or not its prefab has a `FixtureView` (3.1). The `attach-points` member is written only for a prefab with a `FixtureView`.
 
 ### 2.1 The scene
 
 The file has one scene, which is also its default scene (`scene` is 0). The scene root is a node with `extras.fixtureViewRoot` set to `true`, and its `Transform` subtree is every node of the file. No node is outside the scene.
 
-The game places a piece by finding the one GameObject with a `FixtureView` and setting that GameObject's position and rotation to the placement pose while keeping its scale. That GameObject is the prefab root, so:
+The **placement root** is the GameObject the game places: the one GameObject with a `FixtureView`, or the prefab root when the prefab has none (an attachment). The game sets its position and rotation to the placement pose while keeping its scale. The placement root is the prefab root, so:
 
 - the root's local `translation` and `rotation` in the GLB are zero and identity, and its local `scale` is the authored scale;
 - a `Transform` that is parentless in the prefab is a child of the root's `Transform`.
@@ -45,7 +47,7 @@ The `extras` of a node is the key-value table [model files](model.md) write for 
 
 | Key | Value | Written on |
 |---|---|---|
-| `fixtureViewRoot` | `true` | The root: the GameObject whose `FixtureView` is the instance root the game places |
+| `fixtureViewRoot` | `true` | The root: the placement root (2.1), which is the GameObject with the `FixtureView`, or the prefab root when the prefab has none |
 | `sourceObject` | `{ "file": <serialized file name>, "gameObjectId": "<signed 64-bit id>", "transformId": "<signed 64-bit id>" }`. Both ids are decimal strings, because the values are outside what a JSON number holds exactly | Every node |
 | `sourceComponentIds` | The decimal string of the source component id of each component on the node's game object, in the order the game object stores them | Every node |
 | `sourceChildOrder` | The decimal string of each child's transform id, in the order the `Transform` stores them | Every node |
@@ -77,7 +79,7 @@ The collision document is the `fixtureCollision` key of the root node's `extras`
 | `activeSelf` | Whether the game object is active (`m_IsActive`) |
 | `activeInHierarchy` | Whether the game object and all its ancestors are active |
 | `authoredLayer` | The game object's layer (`m_Layer`) |
-| `fixtureNavLayer` | `true` when the node is the `FixtureView` game object or below it |
+| `fixtureNavLayer` | `true` when the node is the `FixtureView` game object or below it, so `false` on every node of a prefab without a `FixtureView` |
 | `colliders` | The node's colliders, in component order (below) |
 | `geometryIds` | The distinct `geometryId` of its colliders, sorted |
 | `modifiers` | Its `NavMeshModifier` components: `{ "componentId", "enabled", "overrideArea", "area", "ignoreFromBuild", "affectedAgents" }` |
@@ -142,7 +144,7 @@ This version of the form writes no animations: the GLB has no `animations` array
 
 An attach point is a place where a character stands to use the piece: it walks to the start of the point, and when the point has an end, it moves from there to the end. The game stores the points of a piece as a list on its `FixtureView`, and finds a point by its position in that list. Each point has a start locator and an end locator, which are game objects of the prefab, and the game reads the world position and rotation of each.
 
-The `attach-points` member is a JSON object:
+The `attach-points` member is a JSON object. A prefab without a `FixtureView` has no attach points and no member.
 
 | Key | Value |
 |---|---|
@@ -172,12 +174,13 @@ The root is a `GameObject` with a container path, compared without regard to cas
 | Asset | Container path |
 |---|---|
 | A piece's model | `…/resources/ondemand/mysekai/fixture/<name>/<name>.prefab` |
+| An attachment's model | `…/resources/ondemand/mysekai/custom_fixture_attach/<name>/<name>.prefab` |
 
-The root is the GameObject the container lists under that path; `is_root` selects it. A bundle that lists this path is the piece's model package, and its name is `<prefix><name>` (the path above with `/` spelled `__` and without `.prefab`). The asset's name is the container path. Other objects of the package — the imported model files (`.fbx`) the prefab was made from, and the prefabs of other folders — are not roots, and this form writes no asset for them.
+The root is the GameObject the container lists under that path; `is_root` selects it. A bundle that lists one of these paths is the model package of the piece or the attachment, and its name is `<prefix><name>` (the path above with `/` spelled `__` and without `.prefab`). The asset's name is the container path. Other objects of the package — the imported model files (`.fbx`) the prefab was made from, and the prefabs of other folders — are not roots, and this form writes no asset for them.
 
-`<name>` is the name of the piece's model package, which its directory and its prefab share.
+`<name>` is the name of the model package, which its directory and its prefab share.
 
-The prefab root has one `MonoBehaviour` whose script class is `FixtureView`, and only the GameObject of that prefab root is a root. A prefab whose `FixtureView` sits below its root is an error (3.3), because placement and the collision graph are defined on the prefab root.
+The prefab root of a piece has one `MonoBehaviour` whose script class is `FixtureView`. The prefab root of an attachment may have one, and is the placement root either way. Only the GameObject of the prefab root is a root. A prefab whose `FixtureView` sits below its root is an error (3.3), because placement and the collision graph are defined on the prefab root.
 
 The model file holds the root's `Transform` subtree, the components of its game objects, everything the renderers reach (meshes, materials, shaders, textures, which may be in other bundles), and the collision graph of the same subtree (2.3).
 
@@ -212,7 +215,7 @@ A component can name an object in another bundle of the same package set (a mate
 | A collider's mesh does not resolve, or is not a `Mesh` | Error `malformed` |
 | A point's `StartLoc` is null, or a locator or `_collider` does not resolve to an object of the prefab of the class it names | Error `malformed` |
 | A locator's game object is not a child of the root | Error `unsupported`: its pose would have to be composed through the transforms between them |
-| The root's prefab has no `FixtureView` GameObject | Error `malformed` (the form has no asset for such a package) |
+| The root game object of a piece's prefab has no `FixtureView` | Error `malformed` (the form has no asset for such a package) |
 | A node's mesh data uses a format, a component count, a topology or a vertex channel that [model files](model.md) does not list | The model file's `unsupported` |
 | A texture cannot be decoded | The error of the [texture form](texture.md) |
 
@@ -235,12 +238,12 @@ GLB: glTF 2.0 with one binary chunk, holding the scene of 2.1, its nodes, its me
 
 A file is correct for the runtime when each of these holds:
 
-1. It has one scene, which is the default scene, and exactly one node carries `fixtureViewRoot`; that node is the scene's only root node, and it is the prefab root.
+1. It has one scene, which is the default scene, and exactly one node carries `fixtureViewRoot`; that node is the scene's only root node, and it is the prefab root and the placement root.
 2. Every node carries `sourceObject` with the ids of the source object it was written from, and no two nodes share the same `(file, gameObjectId, transformId)`.
 3. The root carries `fixtureCollision`; every `geometryId` a collider names is a geometry of that document; every node that the navigation build reads has `sourceCollision` with the keys of 2.3.
 4. Every material has `shader`, `renderQueue`, `keywords`, `floats`, `ints`, `colors` and `textures`, with every texture property in `textures`; every material whose program 2.4.4 gives a runtime material holds every key that program's material code reads from the extras; every texture index in `textures` names a texture, and every texture names an image that is a member of the asset; every image is PNG and decodes.
 5. The file has no `animations`; no object of the file carries a version field, a coordinate contract, or a unit or UV convention string.
-6. The `attach-points` member lists every entry of `_attachPoints` in stored order; every `sourceObject` in it is the `sourceObject` of a node of the file; each locator's `position` and `rotation` equal its node's `translation` and `rotation`; `root.scale` equals the root node's `scale`; and `collider`, when set, names a collider in the `sourceCollision` of that node.
+6. The `attach-points` member is present exactly when the prefab root has a `FixtureView`; it lists every entry of `_attachPoints` in stored order; every `sourceObject` in it is the `sourceObject` of a node of the file; each locator's `position` and `rotation` equal its node's `translation` and `rotation`; `root.scale` equals the root node's `scale`; and `collider`, when set, names a collider in the `sourceCollision` of that node.
 
 **Checks.**
 
@@ -248,15 +251,16 @@ A file is correct for the runtime when each of these holds:
 - Node identities, transforms, extras keys, the material table (extras against the source properties), the collision document and the node records are compared value by value with an independent export of the same bundle, and every difference is explained.
 - The PNG images are compared by decoded pixels with the source textures.
 - For a sample of pieces, each node and collider the game's own navigation build reads from the source is found again from this file by `sourceObject`, and its shape agrees.
+- For every attachment of a version, each mesh is compared with the source mesh by vertex count, positions and first texture coordinates.
 - The attach points of every piece of a version are compared with the `_attachPoints` of its `FixtureView`, read independently from the object documents of the same bundles: the count, the order, the locator names and identities, and the poses.
 - The same bundle gives the same bytes with one thread and with many, and on native and on the web target.
 
 ## 6. Version
 
-Form version: 4. Version 2 adds the `attach-points` member; version 3 follows version 2 of model files; version 4 writes texture coordinates as model files do. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
+Form version: 4. Version 2 adds the `attach-points` member; version 3 follows version 2 of model files; version 4 writes texture coordinates as model files do, and also covers the attachments of custom pieces as roots, which add assets and leave the assets of pieces unchanged. A change to any of the above, or to a format it uses (model files, texture, the collision record, the material table, the attach points), changes the version of every asset of the form.
 
 ## 7. Naming nodes
 
 Every document of a piece that names a node names it by the node's `sourceObject`: `file`, `gameObjectId` and `transformId`, the same three values the node carries (2.2). Sibling names repeat, so a node's name does not identify it.
 
-Which pieces have a model, and which file each uses, a reader learns from the asset list of the published set: the form produces an asset only for a prefab with a `FixtureView`, so every piece listed with a `fixture-model` asset has one.
+Which pieces have a model, and which file each uses, a reader learns from the asset list of the published set: the form produces an asset for a piece only when its prefab has a `FixtureView`, so every piece listed with a `fixture-model` asset has one. An attachment is listed by its own container path under `custom_fixture_attach/`.

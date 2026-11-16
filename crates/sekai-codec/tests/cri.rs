@@ -1076,7 +1076,7 @@ fn overflowing_utf_and_track_counts_are_rejected() {
     bad_utf[4..8].copy_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
     assert!(read_acb(&bad_utf).is_err());
 
-    for count in [Cell::U32(0x8000_0001), I32(-1)] {
+    for count in [U32(0x8000_0001), I32(-1)] {
         let data = utf(
             "Header",
             &["CueTable", "SequenceTable", "TrackTable"],

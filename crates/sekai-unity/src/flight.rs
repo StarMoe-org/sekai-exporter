@@ -102,7 +102,7 @@ mod tests {
     fn a_panicking_caller_leaves_nothing_running() {
         let flights: Flights<u32, &'static str> = Flights::default();
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            flights.run(&7, || panic!("boom"))
+            flights.run(&7, || -> &'static str { panic!("boom") })
         }));
         assert!(panicked.is_err());
         assert!(flights.running().is_empty());

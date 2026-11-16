@@ -163,12 +163,13 @@ fn mp3_decodes_to_the_samples_closely_and_to_their_length_exactly() {
 
 #[test]
 fn the_bitrate_follows_the_source() {
-    // One and a half times the source, rounded up to a bitrate of the MPEG version.
-    assert_eq!(mp3::bitrate(44_100, Some(113_000)), Ok(192));
-    assert_eq!(mp3::bitrate(44_100, Some(64_000)), Ok(96));
-    assert_eq!(mp3::bitrate(48_000, Some(256_000)), Ok(320));
-    assert_eq!(mp3::bitrate(24_000, Some(48_000)), Ok(80));
-    assert_eq!(mp3::bitrate(22_050, Some(160_000)), Ok(160));
+    // Twice the source, rounded up to a bitrate of the MPEG version.
+    assert_eq!(mp3::bitrate(44_100, Some(117_600)), Ok(256));
+    assert_eq!(mp3::bitrate(44_100, Some(70_300)), Ok(160));
+    assert_eq!(mp3::bitrate(44_100, Some(64_000)), Ok(128));
+    assert_eq!(mp3::bitrate(48_000, Some(176_000)), Ok(320));
+    assert_eq!(mp3::bitrate(24_000, Some(48_000)), Ok(96));
+    assert_eq!(mp3::bitrate(22_050, Some(96_000)), Ok(160));
     // Decoded samples take the highest bitrate.
     assert_eq!(mp3::bitrate(44_100, None), Ok(320));
     assert_eq!(mp3::bitrate(16_000, None), Ok(160));

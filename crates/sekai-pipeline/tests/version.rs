@@ -7,8 +7,10 @@ use std::sync::{Arc, Mutex};
 
 use sekai_convert::image::Texture;
 use sekai_convert::{Content, Context, Converter, PPtr};
+use sekai_pipeline::version::{indexed_bundle, indexed_files};
 use sekai_pipeline::{BundleIndexes, BundleInput, NoBundleIndexes, Version};
-use sekai_unity::{ByteSource, Chunk, NoBlockCache, NoClasses};
+use sekai_unity::serialized::TypeTree;
+use sekai_unity::{ByteSource, Chunk, ClassLayouts, NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
 fn input(file: &str, name: &str) -> BundleInput {
@@ -196,4 +198,56 @@ fn bundles_that_share_a_name_are_left_out() {
         ]
     );
     assert_eq!(version.index().bundles().len(), 1);
+}
+
+#[test]
+fn stored_indexes_depend_on_class_layout_identity() {
+    struct Tagged([u8; 32]);
+
+    impl ClassLayouts for Tagged {
+        fn class_tree(&self, _: &str, _: i32) -> Option<TypeTree> {
+            None
+        }
+
+        fn identity(&self) -> Option<[u8; 32]> {
+            Some(self.0)
+        }
+    }
+
+    let indexes = MemoryIndexes::default();
+    let sample = input("fixture_data", "fixture_data");
+    let sha256 = sample.sha256;
+    Version::open_indexed(vec![sample], &NoBlockCache, &Tagged([1; 32]), &indexes, 1).unwrap();
+
+    let unread = || {
+        vec![BundleInput {
+            source: Arc::new(Gone),
+            ..input("fixture_data", "fixture_data")
+        }]
+    };
+    let (_, errors) =
+        Version::open_indexed(unread(), &NoBlockCache, &Tagged([1; 32]), &indexes, 1).unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+
+    // Another ClassLayouts identity cannot reuse the stored record and must read the bundle.
+    let (_, errors) =
+        Version::open_indexed(unread(), &NoBlockCache, &Tagged([2; 32]), &indexes, 1).unwrap();
+    assert_eq!(errors.len(), 1);
+
+    assert!(
+        indexed_bundle("fixture_data", &sha256, &Tagged([1; 32]), &indexes)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        indexed_bundle("fixture_data", &sha256, &Tagged([2; 32]), &indexes)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        indexed_bundle("fixture_data", &sha256, &NoClasses, &indexes)
+            .unwrap()
+            .is_none()
+    );
+    assert!(indexed_files(&sha256, &indexes).unwrap().is_some());
 }

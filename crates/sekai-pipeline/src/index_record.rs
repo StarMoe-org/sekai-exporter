@@ -7,7 +7,7 @@
 use sekai_unity::index::{FileIndex, ObjectIndex, PPtr, ResourceFile};
 use sekai_unity::serialized::External;
 
-const FORMAT: u32 = 3;
+const FORMAT: u32 = 4;
 
 /// The streamed `.resS`/`.resource` slice referenced by one object, and the SHA-256 of its bytes
 /// when that slice is readable in the object's bundle.
@@ -28,6 +28,9 @@ pub(crate) struct StreamDigest {
 /// What indexing a bundle produced.
 #[derive(Debug)]
 pub(crate) struct IndexRecord {
+    /// The identity of the external [`ClassLayouts`](sekai_unity::ClassLayouts) the bundle was
+    /// indexed with, when one was given.
+    pub(crate) classes: Option<[u8; 32]>,
     /// The index of each serialized file, in directory order.
     pub(crate) files: Vec<FileIndex>,
     /// Each other entry that can be read, in directory order.
@@ -217,6 +220,10 @@ impl IndexRecord {
         }
         let mut out = Vec::new();
         out.extend_from_slice(&FORMAT.to_le_bytes());
+        out.push(u8::from(self.classes.is_some()));
+        if let Some(classes) = self.classes {
+            out.extend_from_slice(&classes);
+        }
         put_u32(&mut out, self.resources.len());
         for resource in &self.resources {
             put_str(&mut out, &resource.path);
@@ -265,6 +272,11 @@ impl IndexRecord {
         if reader.u32()? != FORMAT {
             return None;
         }
+        let classes = if reader.flag()? {
+            Some(reader.array()?)
+        } else {
+            None
+        };
         let resources = reader.list(Reader::resource)?;
         let files = reader.list(Reader::file)?;
         let streams = reader.list(|r| r.list(Reader::stream_digest))?;
@@ -272,6 +284,7 @@ impl IndexRecord {
             return None;
         }
         let record = Self {
+            classes,
             resources,
             files,
             streams,
@@ -308,6 +321,7 @@ mod tests {
 
     fn record(error: Option<Error>) -> IndexRecord {
         IndexRecord {
+            classes: Some([7; 32]),
             resources: vec![ResourceFile {
                 path: "CAB-a.resS".to_owned(),
                 size: 192,

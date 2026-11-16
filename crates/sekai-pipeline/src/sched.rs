@@ -67,6 +67,10 @@ struct State {
     cpu: usize,
     /// The memory held by running jobs.
     memory: u64,
+    /// The jobs currently running.
+    running: usize,
+    /// The running jobs whose need exceeds `limits.memory`.
+    oversized: usize,
 }
 
 /// The jobs of one run that have not started.
@@ -180,18 +184,25 @@ impl Scheduler {
     }
 
     /// Whether `need` can start now. The memory of the process is read at most once into
-    /// `probed`. A job that needs memory starts when nothing else holds memory, whatever the
-    /// limits, so every job gets to run.
+    /// `probed`. A job that needs more than the budget runs alone rather than never.
     fn fits(&self, state: &State, need: &Need, probed: &OnceCell<u64>) -> bool {
-        let held = self.held(need);
-        let memory = state.memory + held <= self.limits.memory;
+        if state.oversized > 0 {
+            return false;
+        }
+        if need.memory > self.limits.memory {
+            return state.running == 0;
+        }
+        let memory = state
+            .memory
+            .checked_add(need.memory)
+            .is_some_and(|total| total <= self.limits.memory);
         // The running jobs count with their whole needs, whether or not they have allocated yet.
         let resident = || match self.limits.resident {
-            Some(resident) if held > 0 && state.memory > 0 => {
+            Some(resident) if need.memory > 0 && state.running > 0 => {
                 probed
                     .get_or_init(resident.probe)
                     .saturating_add(state.memory)
-                    .saturating_add(held)
+                    .saturating_add(need.memory)
                     <= resident.limit
             }
             _ => true,
@@ -256,6 +267,10 @@ impl Scheduler {
                 } else {
                     queue.overtaken + 1
                 };
+                state.running += 1;
+                if need.memory > self.limits.memory {
+                    state.oversized += 1;
+                }
                 state.memory += self.held(need);
                 drop(state);
                 // The next first job may be passed over anew, and without one the run ends.
@@ -286,6 +301,10 @@ impl Scheduler {
 
     fn release(&self, need: &Need) {
         let mut state = self.lock();
+        state.running -= 1;
+        if need.memory > self.limits.memory {
+            state.oversized -= 1;
+        }
         state.memory -= self.held(need);
         drop(state);
         self.changed.notify_all();
@@ -508,5 +527,21 @@ mod tests {
         assert!(outcome.is_err());
         let state = scheduler.lock();
         assert_eq!((state.cpu, state.memory), (0, 0));
+    }
+
+    #[test]
+    fn extreme_memory_needs_and_zero_budgets_do_not_overflow_or_overlap() {
+        let unbound = Scheduler::new(Limits::unbound(4));
+        let needs = memory_needs([10, u64::MAX, 0, u64::MAX]);
+        assert_eq!(unbound.run(&needs, |i, _| i), vec![0, 1, 2, 3]);
+
+        let zero_budget = Scheduler::new(limits(4, 0));
+        let running = Peak::default();
+        zero_budget.run(&memory_needs([10, 10, 10, 10]), |_, slots| {
+            running.add(1);
+            slots.cpu(1, pause);
+            running.sub(1);
+        });
+        assert_eq!(running.most(), 1);
     }
 }

@@ -711,6 +711,7 @@ impl Opened {
         let earlier = Earlier::new(state, backed);
         let known = KnownIndexes {
             fetcher: &fetcher,
+            classes: self.classes.as_ref(),
             indexes: &indexes,
         };
         let evaluating = if self.listed {

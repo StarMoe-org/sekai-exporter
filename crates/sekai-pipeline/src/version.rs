@@ -56,7 +56,11 @@ impl Opened {
         metadata.saturating_mul(PARSED_PER_METADATA_BYTE)
     }
 
-    fn record(&self, cache: &dyn BlockCache) -> sekai_unity::Result<IndexRecord> {
+    fn record(
+        &self,
+        cache: &dyn BlockCache,
+        classes: Option<[u8; 32]>,
+    ) -> sekai_unity::Result<IndexRecord> {
         let mut files = Vec::with_capacity(self.files.len());
         let mut streams = Vec::with_capacity(self.files.len());
         for (entry, file, layouts) in &self.files {
@@ -72,6 +76,7 @@ impl Opened {
             files.push(indexed);
         }
         Ok(IndexRecord {
+            classes,
             files,
             resources: index_resources(&self.bundle, cache),
             streams,
@@ -199,15 +204,17 @@ fn record(
     classes: &dyn ClassLayouts,
     indexes: &dyn BundleIndexes,
 ) -> io::Result<sekai_unity::Result<IndexRecord>> {
+    let identity = classes.identity();
     if let Some(record) = indexes
         .get(&input.sha256)?
         .as_deref()
         .and_then(IndexRecord::decode)
+        .filter(|record| record.classes == identity)
     {
         return Ok(Ok(record));
     }
     let record = Opened::open(input.source.clone(), input.sha256, cache, classes)
-        .and_then(|opened| opened.record(cache));
+        .and_then(|opened| opened.record(cache, identity));
     if let Some(bytes) = record.as_ref().ok().and_then(IndexRecord::encode) {
         indexes.put(input.sha256, bytes)?;
     }
@@ -259,14 +266,18 @@ pub fn indexed_files(
 }
 
 /// The index of the bundle `name` whose bytes have the SHA-256 `bundle`, from its stored index,
-/// when `indexes` holds one.
+/// when `indexes` holds one built for `classes`.
 pub fn indexed_bundle(
     name: &str,
     bundle: &[u8; 32],
+    classes: &dyn ClassLayouts,
     indexes: &dyn BundleIndexes,
 ) -> io::Result<Option<BundleIndex>> {
     let record = indexes.get(bundle)?;
-    let record = record.as_deref().and_then(IndexRecord::decode);
+    let record = record
+        .as_deref()
+        .and_then(IndexRecord::decode)
+        .filter(|record| record.classes == classes.identity());
     Ok(record.map(|record| BundleIndex {
         name: name.to_owned(),
         files: record.files,
@@ -281,18 +292,21 @@ fn external_paths(externals: Vec<sekai_unity::serialized::External>) -> Vec<Stri
         .collect()
 }
 
-/// The most recently used parsed bundles, by content hash, within an estimate of their memory.
+type ParsedKey = ([u8; 32], Option<[u8; 32]>);
+
+/// The most recently used parsed bundles, by content hash and class layout identity, within an
+/// estimate of their memory.
 #[derive(Default)]
 struct Recent {
     tick: u64,
     /// The estimated memory of the bundles held.
     bytes: u64,
-    bundles: HashMap<[u8; 32], (Arc<Opened>, u64, u64)>,
-    order: BTreeMap<u64, [u8; 32]>,
+    bundles: HashMap<ParsedKey, (Arc<Opened>, u64, u64)>,
+    order: BTreeMap<u64, ParsedKey>,
 }
 
 impl Recent {
-    fn get(&mut self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
+    fn get(&mut self, bundle: &ParsedKey) -> Option<Arc<Opened>> {
         let tick = self.tick;
         self.tick += 1;
         let (opened, used, _) = self.bundles.get_mut(bundle)?;
@@ -304,7 +318,7 @@ impl Recent {
 
     /// Holds `opened`, then lets go of the least recently used bundles until the rest fit in
     /// `limit`. The newest bundle stays, whatever its size.
-    fn insert(&mut self, bundle: [u8; 32], opened: Arc<Opened>, limit: u64) {
+    fn insert(&mut self, bundle: ParsedKey, opened: Arc<Opened>, limit: u64) {
         self.remove(&bundle);
         let tick = self.tick;
         self.tick += 1;
@@ -322,21 +336,33 @@ impl Recent {
         }
     }
 
-    fn remove(&mut self, bundle: &[u8; 32]) {
+    fn remove(&mut self, bundle: &ParsedKey) {
         if let Some((_, used, bytes)) = self.bundles.remove(bundle) {
             self.order.remove(&used);
             self.bytes -= bytes;
         }
     }
+
+    fn forget_bundle(&mut self, bundle: &[u8; 32]) {
+        let keys: Vec<ParsedKey> = self
+            .bundles
+            .keys()
+            .filter(|(sha256, _)| sha256 == bundle)
+            .copied()
+            .collect();
+        for key in keys {
+            self.remove(&key);
+        }
+    }
 }
 
 /// Parsed bundles, which versions over the same bundles can share. A bundle is held by the hash of
-/// its bytes, and the least recently used ones are let go once the estimate of their memory
-/// exceeds a limit.
+/// its bytes and the identity of its class layouts, and the least recently used ones are let go
+/// once the estimate of their memory exceeds a limit.
 pub(crate) struct Parsed {
     limit: u64,
     recent: Mutex<Recent>,
-    opening: Flights<[u8; 32], Result<Arc<Opened>, ConvertError>>,
+    opening: Flights<ParsedKey, Result<Arc<Opened>, ConvertError>>,
 }
 
 impl Parsed {
@@ -349,32 +375,35 @@ impl Parsed {
         }
     }
 
-    fn get(&self, bundle: &[u8; 32]) -> Option<Arc<Opened>> {
+    fn get(&self, bundle: &ParsedKey) -> Option<Arc<Opened>> {
         self.recent.lock().unwrap().get(bundle)
     }
 
-    /// The parsed bundle whose bytes hash to `bundle`: the one held, or the one `open` returns,
-    /// which is held from then on. Callers that miss it at the same time open it once.
+    /// The parsed bundle whose bytes hash to `bundle` under `classes`: the one held, or the one
+    /// `open` returns, which is held from then on. Callers that miss it at the same time open it
+    /// once.
     fn get_or_open(
         &self,
         bundle: [u8; 32],
+        classes: Option<[u8; 32]>,
         open: impl FnOnce() -> Result<Opened, ConvertError>,
     ) -> Result<Arc<Opened>, ConvertError> {
-        if let Some(opened) = self.get(&bundle) {
+        let key = (bundle, classes);
+        if let Some(opened) = self.get(&key) {
             return Ok(opened);
         }
-        self.opening.run(&bundle, || {
+        self.opening.run(&key, || {
             // A caller that has just opened the bundle may hold it since.
-            if let Some(opened) = self.get(&bundle) {
+            if let Some(opened) = self.get(&key) {
                 return Ok(opened);
             }
             let opened = Arc::new(open()?);
-            self.insert(bundle, opened.clone());
+            self.insert(key, opened.clone());
             Ok(opened)
         })
     }
 
-    fn insert(&self, bundle: [u8; 32], opened: Arc<Opened>) {
+    fn insert(&self, bundle: ParsedKey, opened: Arc<Opened>) {
         self.recent
             .lock()
             .unwrap()
@@ -383,7 +412,7 @@ impl Parsed {
 
     /// Lets go of the bundle whose bytes hash to `bundle`.
     pub(crate) fn forget(&self, bundle: &[u8; 32]) {
-        self.recent.lock().unwrap().remove(bundle);
+        self.recent.lock().unwrap().forget_bundle(bundle);
     }
 
     /// The estimated memory of the bundles held, in bytes.
@@ -532,14 +561,15 @@ impl<'c> Version<'c> {
     /// The parsed form of a bundle.
     fn opened(&self, bundle: usize) -> Result<Arc<Opened>, ConvertError> {
         let (source, sha256) = &self.bundles[bundle];
-        self.parsed.get_or_open(*sha256, || {
-            Ok(Opened::open(
-                source.clone(),
-                *sha256,
-                self.cache,
-                self.classes,
-            )?)
-        })
+        self.parsed
+            .get_or_open(*sha256, self.classes.identity(), || {
+                Ok(Opened::open(
+                    source.clone(),
+                    *sha256,
+                    self.cache,
+                    self.classes,
+                )?)
+            })
     }
 
     /// `size` bytes at `offset` of the entry `name` of bundle `bundle`, or `None` when the bundle
@@ -760,8 +790,9 @@ mod tests {
 
     #[test]
     fn parsed_bundles_stay_within_their_estimated_memory() {
-        let (a, first) = opened("fixture_scene");
-        let (b, second) = opened("fixture_data");
+        let (raw_a, first) = opened("fixture_scene");
+        let (raw_b, second) = opened("fixture_data");
+        let (a, b) = ((raw_a, None), (raw_b, None));
         let (size_a, size_b) = (first.bytes(), second.bytes());
         assert!(size_a > 0 && size_b > 0);
 
@@ -777,7 +808,7 @@ mod tests {
         both.insert(b, second);
         assert!(both.get(&a).is_some());
         assert_eq!(both.bytes(), size_a + size_b);
-        both.forget(&a);
+        both.forget(&raw_a);
         assert!(both.get(&a).is_none());
         assert_eq!(both.bytes(), size_b);
 

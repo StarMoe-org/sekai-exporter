@@ -12,7 +12,7 @@ use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects, Store};
 use sekai_convert::Converter;
 use sekai_format::AssetDocument;
-use sekai_format::identity::VersionIdentity;
+use sekai_format::identity::{RecordedVersion, VersionIdentity};
 use sekai_format::publication;
 use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_pipeline::claims::Claims;
@@ -47,6 +47,9 @@ use files::KnownIndexes;
 use site::Site;
 use tables::{build_tables, table_bindings, table_converters};
 use views::Advance;
+
+/// The size limit of the assets of a run: none.
+const LIMIT: Option<u64> = None;
 
 struct Options {
     region: String,
@@ -316,6 +319,31 @@ fn open_source(options: &Options, region: Region, secrets: &Secrets) -> Result<S
     })
 }
 
+/// The converters of a run on `region`, with the secrets of `secrets`.
+fn converters_of(region: &Region, secrets: &Secrets) -> Result<Vec<Box<dyn Converter>>, String> {
+    let hca_key = secrets
+        .hca_key(&region.secrets)
+        .map_err(|e| e.to_string())?;
+    Ok(converters(hca_key))
+}
+
+/// What the assets of a run with `converters` and the class layouts `classes` follow from
+/// besides its inputs, by part: the identity of the evaluation of its units and, when it builds
+/// assets from tables, the form and version of each table converter.
+fn evaluation_identity(
+    converters: &[Box<dyn Converter>],
+    classes: &dyn ClassLayouts,
+    tables: bool,
+) -> BTreeMap<String, String> {
+    let mut identity = reuse::evaluation_identity(converters, classes, LIMIT);
+    if tables {
+        identity.extend(sekai_pipeline::tables::evaluation_identity(
+            &table_converters(),
+        ));
+    }
+    identity
+}
+
 /// The current version of the region `name`, with the revision of its tables. What `source`
 /// looks up may depend on the `previous` version.
 fn current_identity(
@@ -347,34 +375,48 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
     let previous = site::last_version(site.files(), name)?;
     let tables = open_tables(options, &region)?;
     let secrets = Secrets::new(options.secrets.clone());
-    let Supply { source, .. } = open_source(options, region, &secrets)?;
-    let identity = current_identity(
-        name,
-        source.as_ref(),
-        tables.as_ref(),
-        previous.as_ref(),
-        &NoRecorder,
-    )?;
-    let change = change(&site, &options.targets(), previous.as_ref(), &identity)?;
+    let converters = converters_of(&region, &secrets)?;
+    let Supply { source, classes } = open_source(options, region, &secrets)?;
+    let recorded = RecordedVersion {
+        identity: current_identity(
+            name,
+            source.as_ref(),
+            tables.as_ref(),
+            previous.as_ref().map(|recorded| &recorded.identity),
+            &NoRecorder,
+        )?,
+        evaluation: evaluation_identity(&converters, classes.as_ref(), tables.is_some()),
+    };
+    let change = change(&site, &options.targets(), previous.as_ref(), &recorded)?;
     let described = change.as_deref().unwrap_or("unchanged");
-    println!("{name} {} {described}", identity.name());
+    println!("{name} {} {described}", recorded.identity.name());
     Ok(change.is_none())
 }
 
-/// What a run of the version `identity` would change at `site` after the `previous` one, or
-/// `None` when it has the same content and every target of the run is published in the current
-/// publication format.
+/// What a run that would record `current` would change at `site` after the run that recorded
+/// `previous`, or `None` when the version has the same content, the evaluation the same identity
+/// and every target of the run is published in the current publication format.
 fn change(
     site: &Site<'_>,
     targets: &[String],
-    previous: Option<&VersionIdentity>,
-    identity: &VersionIdentity,
+    previous: Option<&RecordedVersion>,
+    current: &RecordedVersion,
 ) -> Result<Option<String>, String> {
     let Some(previous) = previous else {
         return Ok(Some("changed".to_owned()));
     };
-    if !previous.same_content(identity) {
-        return Ok(Some(format!("changed from {}", previous.name())));
+    if !previous.identity.same_content(&current.identity) {
+        return Ok(Some(format!("changed from {}", previous.identity.name())));
+    }
+    if previous.evaluation.is_empty() {
+        return Ok(Some(
+            "changed: the last run recorded no evaluation".to_owned(),
+        ));
+    }
+    let parts = previous.changed_parts(&current.evaluation);
+    if !parts.is_empty() {
+        let parts = parts.join(", ");
+        return Ok(Some(format!("changed: the evaluation of {parts} differs")));
     }
     for target in targets {
         let current = site.current(target)?;
@@ -448,18 +490,21 @@ fn export_version(
     if selection && previous.is_some() {
         return Err("--only needs an <output> that holds no complete run".into());
     }
-    let identity = current_identity(
-        &key,
-        opened.source.as_ref(),
-        opened.tables.as_ref(),
-        previous.as_ref(),
-        monitor,
-    )?;
+    let recorded = RecordedVersion {
+        identity: current_identity(
+            &key,
+            opened.source.as_ref(),
+            opened.tables.as_ref(),
+            previous.as_ref().map(|recorded| &recorded.identity),
+            monitor,
+        )?,
+        evaluation: opened.evaluation_identity(),
+    };
     if !(options.force || options.verify)
-        && change(site, &options.targets(), previous.as_ref(), &identity)?.is_none()
+        && change(site, &options.targets(), previous.as_ref(), &recorded)?.is_none()
     {
-        println!("{key} {} unchanged", identity.name());
-        return Ok(Outcome::Unchanged(identity));
+        println!("{key} {} unchanged", recorded.identity.name());
+        return Ok(Outcome::Unchanged(recorded.identity));
     }
 
     let Listed { held, unit_records } = listed(options, site, monitor)?;
@@ -487,7 +532,14 @@ fn export_version(
         root,
         publications,
     } = baseline;
-    let evaluation = opened.evaluate(options, &identity, &objects, &backed, &state, monitor)?;
+    let evaluation = opened.evaluate(
+        options,
+        &recorded.identity,
+        &objects,
+        &backed,
+        &state,
+        monitor,
+    )?;
     let Some(Evaluation { outcome, bundles }) = evaluation else {
         return Ok(Outcome::Incomplete);
     };
@@ -508,11 +560,12 @@ fn export_version(
         results: &outcome.results,
         records: &backed,
     };
-    let views = context.publish(&identity.name(), &publications, &advance, &opened)?;
-    let committed = context.commit(&outcome.results, state, root.as_ref(), &views, &identity)?;
+    let name = recorded.identity.name();
+    let views = context.publish(&name, &publications, &advance, &opened)?;
+    let committed = context.commit(&outcome.results, state, root.as_ref(), &views, &recorded)?;
     record_costs(opened.catalog.catalog(), monitor)?;
     print_summary(&key, &committed, &views, &outcome);
-    Ok(Outcome::Updated(identity))
+    Ok(Outcome::Updated(recorded.identity))
 }
 
 /// What a run reads from: the source of the region and its tables, the directories of the output
@@ -547,9 +600,7 @@ impl Opened {
             .map(|output| EarlierRun::open(output))
             .collect::<Result<Vec<_>, _>>()?;
         let secrets = Secrets::new(options.secrets.clone());
-        let hca_key = secrets
-            .hca_key(&region.secrets)
-            .map_err(|e| e.to_string())?;
+        let converters = converters_of(&region, &secrets)?;
         let tables = open_tables(options, &region)?;
         let Supply { source, classes } = open_source(options, region, &secrets)?;
         let directory = |name: &str| {
@@ -568,10 +619,19 @@ impl Opened {
             store,
             catalog,
             earlier,
-            converters: converters(hca_key),
+            converters,
             listed,
             concurrency,
         })
+    }
+
+    /// The identity of the evaluation of a run, as [`evaluation_identity`] gives it.
+    fn evaluation_identity(&self) -> BTreeMap<String, String> {
+        evaluation_identity(
+            &self.converters,
+            self.classes.as_ref(),
+            self.tables.is_some(),
+        )
     }
 
     /// Evaluates the units of the version `identity` that changed since the run that left
@@ -642,7 +702,7 @@ impl Opened {
             options: budget::options(options.threads, options.memory, options.plain),
             segment: Segment::default(),
             ledger: Some(IGNORED),
-            limit: None,
+            limit: LIMIT,
         };
         let earlier = Earlier::new(state, backed);
         let known = KnownIndexes {
@@ -997,14 +1057,14 @@ impl Context<'_> {
     /// Commits the version `identity` that `views` publish, in this order: puts at the site every
     /// object of the views and of the records of `results`, then writes the records, the state
     /// that `advanced` becomes with the views (the chunks that `root` does not name, and the
-    /// root), the pointers of the views and the last version.
+    /// root), the pointers of the views and `recorded`, as the last version.
     fn commit(
         &self,
         results: &[UnitResult],
         advanced: RegionState,
         root: Option<&Root>,
         views: &Views,
-        identity: &VersionIdentity,
+        recorded: &RecordedVersion,
     ) -> Result<Committed, String> {
         let requests = self.requests();
         let key = self.options.state_key();
@@ -1028,7 +1088,7 @@ impl Context<'_> {
             .iter()
             .map(|(target, publication)| (target.clone(), publication.pointer.revision.clone()));
         let state = RegionState {
-            version: identity.name(),
+            version: recorded.identity.name(),
             published: revisions.collect(),
             tables: views.tables.iter().map(TableOutput::of).collect(),
             ..advanced
@@ -1041,7 +1101,7 @@ impl Context<'_> {
         for (target, publication) in &views.published {
             self.site.make_current(target, &publication.pointer)?;
         }
-        site::set_last_version(self.files, &key, identity)?;
+        site::set_last_version(self.files, &key, recorded)?;
         Ok(Committed {
             state,
             records: written,

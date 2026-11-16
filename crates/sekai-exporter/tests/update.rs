@@ -119,6 +119,48 @@ fn a_version_published_in_an_earlier_format_is_published_again() {
 }
 
 #[test]
+fn a_version_evaluated_differently_is_published_again() {
+    let scratch = Scratch::new("update-other-evaluation");
+    succeeded(&scratch.update(&[]));
+    let pointer = scratch.pointer();
+    let recorded = scratch.output().join("state/versions/local.json");
+    let mut version: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&recorded).unwrap()).unwrap();
+    version["evaluation"]["unit"] = serde_json::json!("unit 0\n");
+    std::fs::write(&recorded, version.to_string()).unwrap();
+
+    let checked = changed(&scratch.update(&["--check"]));
+    assert!(
+        checked.ends_with(" changed: the evaluation of unit differs\n"),
+        "{checked}"
+    );
+    let again = succeeded(&scratch.update(&[]));
+    assert!(!again.contains("unchanged"), "{again}");
+    assert_eq!(scratch.pointer()["revision"], pointer["revision"]);
+    let after = succeeded(&scratch.update(&[]));
+    assert!(after.contains("unchanged"), "{after}");
+}
+
+#[test]
+fn a_version_recorded_without_its_evaluation_is_published_again() {
+    let scratch = Scratch::new("update-no-evaluation");
+    succeeded(&scratch.update(&[]));
+    let recorded = scratch.output().join("state/versions/local.json");
+    let mut version: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&recorded).unwrap()).unwrap();
+    version.as_object_mut().unwrap().remove("evaluation");
+    std::fs::write(&recorded, version.to_string()).unwrap();
+
+    let checked = changed(&scratch.update(&["--check"]));
+    assert!(
+        checked.ends_with(" changed: the last run recorded no evaluation\n"),
+        "{checked}"
+    );
+    let again = succeeded(&scratch.update(&[]));
+    assert!(!again.contains("unchanged"), "{again}");
+}
+
+#[test]
 fn a_check_of_an_output_without_a_catalog_reports_a_change_and_writes_nothing() {
     let scratch = Scratch::new("update-check-fresh");
     let checked = changed(&scratch.update(&["--check"]));

@@ -121,7 +121,8 @@ commands:
       private, and new objects go to <output>/store. The canonical and the
       storage view are published at the site with their path indexes: in the
       bucket, or under <output>/published. A version that matches the last
-      complete run is left alone unless --force or --verify is given.
+      complete run, evaluated with the same converters, is left alone unless
+      --force or --verify is given.
       The site keeps the state of each region under state/: the units, names,
       bundles and publications of its last version, and the records of units
       and derivations that later runs take, so <output> needs nothing from
@@ -144,7 +145,8 @@ commands:
       their dependencies. A selection is neither recorded as a version nor sent
       to a bucket; it publishes under <output>/published and needs an <output>
       without a complete run. --check only looks up the current version and
-      prints whether it differs from the last one the site recorded. It exits
+      prints whether it or the evaluation differs from the last one the site
+      recorded. It exits
       with 0 when the version is unchanged and 1 when it changed, downloads and
       writes nothing, and cannot be combined with --force, --verify,
       --rebuild-tables or --only. --client publishes the client package that

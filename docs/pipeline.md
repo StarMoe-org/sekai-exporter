@@ -8,7 +8,7 @@ The pipeline evaluates the [derivation graph](architecture.md) bundle by bundle,
 
 | Stage | Work | Output |
 |---|---|---|
-| P0 Plan | Read the [asset identity and table identity](sources.md#version-identity) of each region | Nothing to do if both match the last complete run. When either changed, the manifest is read again; bundles whose declared hash is unchanged keep their stored bytes and their index |
+| P0 Plan | Read the [asset identity and table identity](sources.md#version-identity) of each region, and the identity of the evaluation: the revision of units, the class layouts, and the identity of each converter and table converter | Nothing to do if all three match the last complete run. When the asset or table identity changed, the manifest is read again; bundles whose declared hash is unchanged keep their stored bytes and their index. When only the evaluation changed, the run evaluates the units whose results it no longer holds for, such as those with roots of a converter of a new version |
 | P1 Manifest | Download and parse the manifest; select bundles by name, with their dependencies | The bundle list with declared hashes, sizes and dependencies |
 | P2 Fetch | Download each selected bundle, deobfuscate it and hash it while it streams, and write it to the store | Bundle inputs, identified by content hash |
 | P3 Index | For each bundle, when the first unit that needs it opens it, read every object's fields, skipping large arrays by length; record class, name, container path, content hash and references. The index is stored by the content hash of the bundle and reused | Object rows and reference edges |

@@ -1,5 +1,7 @@
 //! What identifies the state of a region.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use serde::{Deserialize, Serialize};
 
 /// What decides the addresses of a manifest and its bundles.
@@ -108,6 +110,34 @@ impl VersionIdentity {
     }
 }
 
+/// A version as a run records it: its identity, and the identity of the evaluation that gave its
+/// assets, by part.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedVersion {
+    /// The identity of the version.
+    #[serde(flatten)]
+    pub identity: VersionIdentity,
+    /// The identity of the evaluation, by part. A record without it comes from a run that
+    /// evaluated differently from any other.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub evaluation: BTreeMap<String, String>,
+}
+
+impl RecordedVersion {
+    /// The parts of the evaluation `evaluation` whose identity differs from that of the recorded
+    /// one, in name order.
+    pub fn changed_parts<'a>(&'a self, evaluation: &'a BTreeMap<String, String>) -> Vec<&'a str> {
+        let parts: BTreeSet<&str> = self
+            .evaluation
+            .keys()
+            .chain(evaluation.keys())
+            .map(String::as_str)
+            .collect();
+        let changed = |part: &&str| self.evaluation.get(*part) != evaluation.get(*part);
+        parts.into_iter().filter(changed).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +175,63 @@ mod tests {
         let text = serde_json::to_string(&asset).unwrap();
         assert!(text.contains(r#""kind":"client""#), "{text}");
         assert_eq!(serde_json::from_str::<AssetIdentity>(&text).unwrap(), asset);
+    }
+
+    fn dir_version() -> VersionIdentity {
+        VersionIdentity {
+            asset: AssetIdentity::Dir {
+                value: "ab".to_owned(),
+            },
+            client: ClientIdentity {
+                application_version: "1.0.0".to_owned(),
+                application_hash: None,
+                multiplayer_version: None,
+            },
+            tables: None,
+        }
+    }
+
+    fn evaluation(parts: &[(&str, &str)]) -> BTreeMap<String, String> {
+        let owned = parts
+            .iter()
+            .map(|(part, identity)| (part.to_string(), identity.to_string()));
+        owned.collect()
+    }
+
+    #[test]
+    fn a_recorded_version_keeps_the_fields_of_its_identity_beside_its_evaluation() {
+        let recorded = RecordedVersion {
+            identity: dir_version(),
+            evaluation: evaluation(&[("form audio", "audio 5\n"), ("unit", "unit 3\n")]),
+        };
+        let value = serde_json::to_value(&recorded).unwrap();
+        assert_eq!(value["asset"]["kind"], "dir", "{value}");
+        assert_eq!(value["evaluation"]["unit"], "unit 3\n", "{value}");
+        assert_eq!(
+            serde_json::from_value::<RecordedVersion>(value).unwrap(),
+            recorded
+        );
+    }
+
+    #[test]
+    fn a_version_identity_reads_as_a_version_recorded_without_its_evaluation() {
+        let text = serde_json::to_string(&dir_version()).unwrap();
+        let recorded: RecordedVersion = serde_json::from_str(&text).unwrap();
+        assert_eq!(recorded.identity, dir_version());
+        assert!(recorded.evaluation.is_empty());
+    }
+
+    #[test]
+    fn the_changed_parts_are_those_that_differ_or_are_on_one_side_only() {
+        let recorded = RecordedVersion {
+            identity: dir_version(),
+            evaluation: evaluation(&[("form a", "1"), ("form b", "1"), ("unit", "3")]),
+        };
+        let current = evaluation(&[("form a", "1"), ("form b", "2"), ("form c", "1")]);
+        assert_eq!(
+            recorded.changed_parts(&current),
+            ["form b", "form c", "unit"]
+        );
+        assert!(recorded.changed_parts(&recorded.evaluation).is_empty());
     }
 }

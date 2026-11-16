@@ -103,7 +103,7 @@ impl Output {
         let root = self.put(&serde_json::to_vec(&index).unwrap(), "json");
         let pointer = Pointer {
             format: "pointer".to_owned(),
-            version: sekai_format::publication::VERSION,
+            version: sekai_format::publication::POINTER_VERSION,
             published_version: version.to_owned(),
             revision: "0".repeat(8),
             root: None,

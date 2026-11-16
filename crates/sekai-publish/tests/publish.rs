@@ -6,7 +6,7 @@ use sekai_catalog::{
     Holdings, Key, LocalStore, MemoryHoldings, MemoryStore, NoRemote, Objects, Store,
 };
 use sekai_format::asset::{FORMAT, VERSION};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{POINTER_VERSION, Pointer};
 use sekai_format::{AssetDocument, AssetError, MemberFile};
 use sekai_publish::history::NoVersions;
 use sekai_publish::patch::{self, Change, Edition, Previous};
@@ -413,6 +413,36 @@ fn a_change_gives_the_publication_of_the_new_assets() {
             whole.objects.len()
         );
     }
+}
+
+#[test]
+fn a_change_to_a_publication_of_an_earlier_pointer_format_gives_the_whole_publication() {
+    let s = Scratch::new("earlier-pointer");
+    let store = s.store();
+    let old = many(&store, 3000, "x");
+    let mut new = old.clone();
+    new[5] = failed(&store, &new[5].name);
+    new[100] = asset(&store, &new[100].name, &[("image", b"changed")]);
+    let before = documents(
+        &store,
+        "jp/canonical",
+        &plan("v1", &old, &store, 2).unwrap(),
+        Layout::Index,
+    );
+    // The pointer of the earlier format names the same documents, but no history or changes.
+    let earlier = Pointer {
+        version: POINTER_VERSION - 1,
+        history: None,
+        changes: None,
+        ..before.unwrap().pointer
+    };
+    let previous = Previous::read(&store, &earlier).unwrap();
+    let change = change(&old, &new, &store, 2).unwrap();
+    let patched = apply(&store, "canonical", "v2", Layout::Index, &previous, change).unwrap();
+    let whole = plan("v2", &new, &store, 2).unwrap();
+    let whole = documents(&store, "jp/canonical", &whole, Layout::Index).unwrap();
+    assert_eq!(patched.pointer.version, POINTER_VERSION);
+    assert_eq!(contents(patched.pointer), contents(whole.pointer));
 }
 
 #[test]

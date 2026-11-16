@@ -421,7 +421,7 @@ fn change(
     }
     for target in targets {
         let current = site.current(target)?;
-        if current.is_none_or(|pointer| pointer.version != publication::VERSION) {
+        if current.is_none_or(|pointer| pointer.version != publication::POINTER_VERSION) {
             return Ok(Some(format!("changed: {target} is in an earlier format")));
         }
     }

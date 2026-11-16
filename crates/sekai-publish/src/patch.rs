@@ -20,7 +20,7 @@ use sekai_format::directory_tree::{self, DirectoryTree, TreeFile};
 use sekai_format::paths::{self, Chunk, ChunkReference, PathFile, PathIndex};
 use sekai_format::publication::{
     AssetFailure, IndexChunk, IndexEntry, IndexRoot, IndexShard, ListingEntry, ListingTable,
-    ObjectReference, Pointer, ShardReference, TableChunk, VERSION,
+    ObjectReference, POINTER_VERSION, Pointer, ShardReference, TableChunk, VERSION,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -515,7 +515,7 @@ pub fn apply(
     Ok(Publication {
         pointer: Pointer {
             format: "pointer".to_owned(),
-            version: VERSION,
+            version: POINTER_VERSION,
             published_version: version.to_owned(),
             revision,
             root,

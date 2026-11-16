@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sekai_format::publication::VERSION;
+use sekai_format::publication::POINTER_VERSION;
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma")
@@ -105,7 +105,7 @@ fn a_version_published_in_an_earlier_format_is_published_again() {
         .output()
         .join("published/local/canonical/current.json");
     let mut earlier = scratch.pointer();
-    earlier["version"] = serde_json::json!(VERSION - 1);
+    earlier["version"] = serde_json::json!(POINTER_VERSION - 1);
     earlier.as_object_mut().unwrap().remove("tree");
     std::fs::write(&current, earlier.to_string()).unwrap();
 
@@ -114,7 +114,7 @@ fn a_version_published_in_an_earlier_format_is_published_again() {
     let again = succeeded(&scratch.update(&[]));
     assert!(!again.contains("unchanged"), "{again}");
     let pointer = scratch.pointer();
-    assert_eq!(pointer["version"], VERSION);
+    assert_eq!(pointer["version"], POINTER_VERSION);
     assert!(pointer["tree"]["sha256"].is_string(), "{pointer}");
 }
 

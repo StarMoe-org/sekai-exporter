@@ -108,9 +108,10 @@ pub(crate) fn record(
         && let Some(history) = &last.history
     {
         // The same publication again: its history and changes stay as they were.
-        let history = history.clone();
-        let changes = last.changes.clone();
-        return Ok(Recorded { history, changes });
+        return Ok(Recorded {
+            history: history.clone(),
+            changes: last.changes.clone(),
+        });
     }
     let changes = match diffs {
         None => None,

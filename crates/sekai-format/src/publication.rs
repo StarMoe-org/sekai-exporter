@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunks::{self, Row};
 
-/// The version of these document formats.
-pub const VERSION: u32 = 5;
+/// The version of the index roots, shards, chunks and tree listings, which the revision names.
+pub const VERSION: u32 = 4;
+
+/// The version of the pointer, which changes on its own when only the pointer does.
+pub const POINTER_VERSION: u32 = 5;
 
 /// A chunk of a table of the index root ends after a row whose key hashes to a multiple of this,
 /// so chunks hold this many rows on average.

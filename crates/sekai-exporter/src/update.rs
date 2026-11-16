@@ -396,7 +396,7 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
 
 /// What a run that would record `current` would change at `site` after the run that recorded
 /// `previous`, or `None` when the version has the same content, the evaluation the same identity
-/// and every target of the run is published in the current publication format.
+/// and every target of the run has a pointer that names documents of the current format.
 fn change(
     site: &Site<'_>,
     targets: &[String],
@@ -421,7 +421,9 @@ fn change(
     }
     for target in targets {
         let current = site.current(target)?;
-        if current.is_none_or(|pointer| pointer.version != publication::POINTER_VERSION) {
+        // A pointer of an earlier format that names documents of the current one is followed by
+        // a change, which gives the documents of a whole publication.
+        if current.is_none_or(|pointer| pointer.version < publication::VERSION) {
             return Ok(Some(format!("changed: {target} is in an earlier format")));
         }
     }

@@ -108,6 +108,8 @@ A unit record lists each asset of the unit with the logical path of its root and
 
 The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. A run writes, in this order, every new object, the records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
 
+A version with the same content and evaluation is published again when the pointer of one of its views names documents of an earlier format, an index root, shards and chunks of a version below the current one (see [Publication documents](spec/publication.md#6-version)). A pointer of an earlier format that names documents of the current one is kept until the next version, which is written as a change to it.
+
 ## Evaluation and publishing together
 
 | Deployment | Evaluation | Place | Layout |

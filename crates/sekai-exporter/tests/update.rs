@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use sekai_format::publication::POINTER_VERSION;
+use sekai_format::publication::{POINTER_VERSION, VERSION};
 
 fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../sekai-unity/tests/fixtures/lzma")
@@ -54,9 +54,16 @@ impl Scratch {
             .collect()
     }
 
+    fn current(&self) -> PathBuf {
+        self.output().join("published/local/canonical/current.json")
+    }
+
     fn pointer(&self) -> serde_json::Value {
-        let path = self.output().join("published/local/canonical/current.json");
-        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        serde_json::from_slice(&std::fs::read(self.current()).unwrap()).unwrap()
+    }
+
+    fn set_pointer(&self, pointer: &serde_json::Value) {
+        std::fs::write(self.current(), pointer.to_string()).unwrap();
     }
 }
 
@@ -101,13 +108,10 @@ fn an_update_publishes_the_version_and_a_second_one_finds_it_unchanged() {
 fn a_version_published_in_an_earlier_format_is_published_again() {
     let scratch = Scratch::new("update-earlier-format");
     succeeded(&scratch.update(&[]));
-    let current = scratch
-        .output()
-        .join("published/local/canonical/current.json");
     let mut earlier = scratch.pointer();
-    earlier["version"] = serde_json::json!(POINTER_VERSION - 1);
+    earlier["version"] = serde_json::json!(VERSION - 1);
     earlier.as_object_mut().unwrap().remove("tree");
-    std::fs::write(&current, earlier.to_string()).unwrap();
+    scratch.set_pointer(&earlier);
 
     let checked = changed(&scratch.update(&["--check"]));
     assert!(checked.contains("earlier format"), "{checked}");
@@ -116,6 +120,22 @@ fn a_version_published_in_an_earlier_format_is_published_again() {
     let pointer = scratch.pointer();
     assert_eq!(pointer["version"], POINTER_VERSION);
     assert!(pointer["tree"]["sha256"].is_string(), "{pointer}");
+}
+
+#[test]
+fn a_version_whose_pointer_names_documents_of_the_current_format_is_unchanged() {
+    let scratch = Scratch::new("update-earlier-pointer");
+    succeeded(&scratch.update(&[]));
+    let mut earlier = scratch.pointer();
+    earlier["version"] = serde_json::json!(VERSION);
+    let fields = earlier.as_object_mut().unwrap();
+    fields.remove("history");
+    fields.remove("changes");
+    scratch.set_pointer(&earlier);
+
+    let again = succeeded(&scratch.update(&[]));
+    assert!(again.contains("unchanged"), "{again}");
+    assert_eq!(scratch.pointer(), earlier);
 }
 
 #[test]

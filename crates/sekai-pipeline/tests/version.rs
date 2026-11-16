@@ -205,7 +205,7 @@ fn stored_indexes_depend_on_class_layout_identity() {
     struct Tagged([u8; 32]);
 
     impl ClassLayouts for Tagged {
-        fn class_tree(&self, _: &str, _: i32) -> Option<TypeTree> {
+        fn tree(&self, _: i32, _: &str) -> Option<Arc<TypeTree>> {
             None
         }
 

@@ -19,6 +19,13 @@ impl<K, V> Default for Flights<K, V> {
     }
 }
 
+impl<K, V> Flights<K, V> {
+    fn running(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<OnceLock<V>>>> {
+        // The map holds no partial state when a caller panics.
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
     /// The result of `make` for `key`, from this call or from one that runs at the same time.
     /// When the caller that makes it panics, another makes it.
@@ -30,11 +37,6 @@ impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
             flight: &flight,
         };
         flight.get_or_init(make).clone()
-    }
-
-    fn running(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<OnceLock<V>>>> {
-        // The map holds no partial state when a caller panics.
-        self.running.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

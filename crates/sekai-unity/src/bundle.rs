@@ -230,13 +230,17 @@ impl Bundle {
                 stored_offset,
                 stream_offset,
             });
-            stored_offset += u64::from(info.compressed_size);
-            stream_offset += u64::from(info.uncompressed_size);
+            stored_offset = stored_offset
+                .checked_add(u64::from(info.compressed_size))
+                .ok_or_else(|| Error::malformed("UnityFS directory", "block offsets overflow"))?;
+            stream_offset = stream_offset
+                .checked_add(u64::from(info.uncompressed_size))
+                .ok_or_else(|| Error::malformed("UnityFS directory", "stream offsets overflow"))?;
         }
-        if stored_offset > total {
+        if stored_offset > blocks_end {
             return Err(Error::malformed(
                 "UnityFS directory",
-                format!("blocks end at {stored_offset}, the file has {total} bytes"),
+                format!("blocks end at {stored_offset}, the data ends at {blocks_end}"),
             ));
         }
         let entry_count = r.i32()?;

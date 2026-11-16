@@ -269,13 +269,15 @@ mod tests {
             }
         }
         assert!(sources[0].read(2, 3).is_err());
-        let mut cache = OpenFiles::default();
-        let sample = Arc::new(File::open(directory.join("0")).unwrap());
-        for i in 0..OPEN_FILES {
-            cache.keep(Path::new(&format!("p-{i}")), sample.clone());
+        {
+            let mut cache = OpenFiles::default();
+            let sample = Arc::new(File::open(directory.join("0")).unwrap());
+            for i in 0..OPEN_FILES {
+                cache.keep(Path::new(&format!("p-{i}")), sample.clone());
+            }
+            cache.keep(Path::new("p-0"), sample);
+            assert_eq!(cache.by_path.len(), OPEN_FILES);
         }
-        cache.keep(Path::new("p-0"), sample);
-        assert_eq!(cache.by_path.len(), OPEN_FILES);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

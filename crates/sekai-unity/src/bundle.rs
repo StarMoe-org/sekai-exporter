@@ -4,6 +4,7 @@
 //! and a directory of entries that are ranges of that stream. Opening a bundle reads only the
 //! header and the directory; reading an entry decompresses the blocks the read touches.
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crate::cache::{BlockCache, BlockKey};
@@ -214,9 +215,16 @@ impl Bundle {
                 compressed_size: r.u32()?,
                 flags: r.u16()?,
             };
+            let compression = Compression::from_flags(info.flags.into())?;
+            if compression == Compression::None && info.compressed_size != info.uncompressed_size {
+                return Err(Error::malformed(
+                    "UnityFS directory",
+                    "an uncompressed block declares two sizes",
+                ));
+            }
             blocks.push(Block {
                 info,
-                compression: Compression::from_flags(info.flags.into())?,
+                compression,
                 stored_offset,
                 stream_offset,
             });
@@ -306,30 +314,45 @@ impl Bundle {
         }
     }
 
-    /// The decompressed block at `index`, from the cache or decompressed now.
-    fn block(&self, index: usize, cache: &dyn BlockCache) -> Result<Chunk<'_>> {
+    /// The bytes of the stream range `stream` that lie in the block at `index`. A block stored
+    /// without compression is read over those bytes alone; any other block is decompressed whole,
+    /// through `cache`.
+    fn block_part(
+        &self,
+        index: usize,
+        stream: Range<u64>,
+        cache: &dyn BlockCache,
+    ) -> Result<Chunk<'_>> {
         let block = &self.blocks[index];
-        let read_stored = || {
-            self.source
-                .read(block.stored_offset, block.info.compressed_size as usize)
-        };
+        let block_end = block.stream_offset + u64::from(block.info.uncompressed_size);
+        let from = (stream.start.max(block.stream_offset) - block.stream_offset) as usize;
+        let to = (stream.end.min(block_end) - block.stream_offset) as usize;
         if block.compression == Compression::None {
-            if block.info.compressed_size != block.info.uncompressed_size {
-                return Err(Error::Decompress {
-                    block: index as u32,
-                    message: "an uncompressed block declares two sizes".into(),
-                });
-            }
-            return read_stored();
+            return self
+                .source
+                .read(block.stored_offset + from as u64, to - from);
         }
+        Ok(Chunk::Shared {
+            block: self.decompressed(index, cache)?,
+            start: from,
+            end: to,
+        })
+    }
+
+    /// The decompressed block at `index`, from `cache` or decompressed now.
+    fn decompressed(&self, index: usize, cache: &dyn BlockCache) -> Result<Arc<[u8]>> {
+        let block = &self.blocks[index];
         let key = BlockKey {
             bundle: self.id,
             block: index as u32,
         };
-        let bytes = cache.get_or_insert_with(key, &|| {
+        cache.get_or_insert_with(key, &|| {
+            let stored = self
+                .source
+                .read(block.stored_offset, block.info.compressed_size as usize)?;
             decompress(
                 block.compression,
-                &read_stored()?,
+                &stored,
                 block.info.uncompressed_size as usize,
             )
             .map(Arc::from)
@@ -337,12 +360,6 @@ impl Bundle {
                 block: index as u32,
                 message,
             })
-        })?;
-        let end = <[u8]>::len(&bytes);
-        Ok(Chunk::Shared {
-            block: bytes,
-            start: 0,
-            end,
         })
     }
 
@@ -387,35 +404,13 @@ impl ByteSource for EntrySource<'_> {
         let first = self.bundle.block_at(start);
         let last = self.bundle.block_at(end - 1);
         if first == last {
-            let block = self.bundle.block(first, self.cache)?;
-            let base = self.bundle.blocks[first].stream_offset;
-            return Ok(sub(block, (start - base) as usize, (end - base) as usize));
+            return self.bundle.block_part(first, start..end, self.cache);
         }
         let mut out = Vec::with_capacity(len);
         for index in first..=last {
-            let block = self.bundle.block(index, self.cache)?;
-            let base = self.bundle.blocks[index].stream_offset;
-            let from = start.max(base) - base;
-            let to = end.min(base + block.len() as u64) - base;
-            out.extend_from_slice(&block[from as usize..to as usize]);
+            out.extend_from_slice(&self.bundle.block_part(index, start..end, self.cache)?);
         }
         Ok(Chunk::Owned(out))
-    }
-}
-
-fn sub(chunk: Chunk<'_>, start: usize, end: usize) -> Chunk<'_> {
-    match chunk {
-        Chunk::Borrowed(bytes) => Chunk::Borrowed(&bytes[start..end]),
-        Chunk::Shared {
-            block,
-            start: base,
-            end: _,
-        } => Chunk::Shared {
-            block,
-            start: base + start,
-            end: base + end,
-        },
-        Chunk::Owned(bytes) => Chunk::Owned(bytes[start..end].to_vec()),
     }
 }
 

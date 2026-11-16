@@ -8,14 +8,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file, index_resources,
 };
 use sekai_unity::{
-    BlockCache, BoundedBlockCache, Bundle, ByteSource, NoBlockCache, SerializedFile, StoredFile,
-    store_files,
+    BlockCache, BoundedBlockCache, Bundle, ByteSource, Chunk, NoBlockCache, SerializedFile,
+    StoredFile, store_files,
 };
 use sha2::{Digest, Sha256};
 
@@ -253,4 +254,40 @@ fn stored_files_read_back_from_their_container() {
         })
         .collect();
     assert_eq!(read, files);
+}
+
+/// A container in memory that counts the bytes read from it.
+struct CountedReads {
+    bytes: Vec<u8>,
+    read: AtomicU64,
+}
+
+impl ByteSource for CountedReads {
+    fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    fn read(&self, offset: u64, len: usize) -> sekai_unity::Result<Chunk<'_>> {
+        self.read.fetch_add(len as u64, Ordering::Relaxed);
+        self.bytes.read(offset, len)
+    }
+}
+
+#[test]
+fn reads_of_an_uncompressed_block_touch_only_the_bytes_read() {
+    let large: Vec<u8> = (0..=u8::MAX).cycle().take(1 << 20).collect();
+    let files = [StoredFile {
+        path: "resources.assets".into(),
+        bytes: large.clone(),
+        serialized: false,
+    }];
+    let source = Arc::new(CountedReads {
+        bytes: store_files(&files).unwrap(),
+        read: AtomicU64::new(0),
+    });
+    let bundle = Bundle::open(source.clone(), [0; 32]).unwrap();
+    source.read.store(0, Ordering::Relaxed);
+    let entry = bundle.entry(0, &NoBlockCache);
+    assert_eq!(*entry.read(300_000, 16).unwrap(), large[300_000..300_016]);
+    assert_eq!(source.read.load(Ordering::Relaxed), 16);
 }

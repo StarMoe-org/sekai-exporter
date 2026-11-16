@@ -10,7 +10,7 @@ use sekai_format::publication::Pointer;
 #[cfg(feature = "s3")]
 use sekai_pipeline::metrics::Recorder;
 use sekai_pipeline::state::StateFiles;
-use sekai_publish::{Layout, Object};
+use sekai_publish::{Layout, Listed, Object};
 
 use crate::monitor::Monitor;
 
@@ -145,6 +145,21 @@ impl Bucket {
         println!("bucket {target} pointer {pointer}");
         Ok(())
     }
+
+    /// The files under `directory` of the bucket, from one listing.
+    pub(crate) fn files(&self, directory: &str) -> Result<Vec<Listed>, String> {
+        self.s3.files(directory).map_err(|e| e.to_string())
+    }
+
+    /// The files under `directory` of the bucket, listed one subdirectory per request.
+    pub(crate) fn sharded_files(&self, directory: &str) -> Result<Vec<Listed>, String> {
+        self.s3.sharded_files(directory).map_err(|e| e.to_string())
+    }
+
+    /// Deletes the file `name` of the bucket.
+    pub(crate) fn delete(&self, name: &str) -> Result<(), String> {
+        self.s3.delete(name).map_err(|e| e.to_string())
+    }
 }
 
 /// The state files of the bucket, under its `state/`.
@@ -215,6 +230,18 @@ impl Bucket {
     }
 
     pub(crate) fn make_current(&self, _target: &str, _pointer: &Pointer) -> Result<(), String> {
+        match *self {}
+    }
+
+    pub(crate) fn files(&self, _directory: &str) -> Result<Vec<Listed>, String> {
+        match *self {}
+    }
+
+    pub(crate) fn sharded_files(&self, _directory: &str) -> Result<Vec<Listed>, String> {
+        match *self {}
+    }
+
+    pub(crate) fn delete(&self, _name: &str) -> Result<(), String> {
         match *self {}
     }
 }

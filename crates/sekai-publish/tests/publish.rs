@@ -1,5 +1,6 @@
 //! Publishing assets: determinism, verification and the order of a tree update.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use sekai_catalog::{
@@ -12,7 +13,8 @@ use sekai_publish::history::NoVersions;
 use sekai_publish::patch::{self, Change, Edition, Previous};
 use sekai_publish::plan::change;
 use sekai_publish::{
-    Binding, File, Layout, Plan, Publication, PublishError, documents, plan, publish, tree,
+    Binding, File, Layout, Plan, Publication, PublishError, documents, plan, publish, referred,
+    tree,
 };
 
 struct Scratch(PathBuf);
@@ -469,6 +471,21 @@ fn a_publication_gives_back_the_documents_of_the_assets_it_names() {
         .lookup(&store)
         .bindings(["group_00/item_00000"]);
     assert!(nothing.unwrap().is_empty());
+}
+
+#[test]
+fn a_pointer_leads_to_every_object_its_publication_refers_to() {
+    let s = Scratch::new("referred");
+    let store = s.store();
+    let assets = many(&store, 3000, "x");
+    let plan = plan("v1", &assets, &store, 2).unwrap();
+    for layout in [Layout::Index, Layout::Paths] {
+        let Publication { pointer, objects } =
+            documents(&store, "jp/canonical", &plan, layout).unwrap();
+        let found: BTreeSet<Key> = referred(&store, &pointer, 3).unwrap().into_iter().collect();
+        let expected: BTreeSet<Key> = objects.into_iter().map(|object| object.key).collect();
+        assert_eq!(found, expected, "{layout:?}");
+    }
 }
 
 /// Whether `path` is directly in `directory`.

@@ -34,6 +34,8 @@ mod client {
     }
 }
 mod export;
+#[cfg(feature = "cdn")]
+mod gc;
 mod monitor;
 mod objects;
 #[cfg(feature = "serve")]
@@ -156,6 +158,20 @@ commands:
       the canonical layout at <region>/client,
       under the version <application version>-<content hash>. Its state is
       kept apart from the region's, under <region>-client.
+  gc <output> [--config <file>] [--secrets <dir>] [--grace <duration>]
+     [--threads <n>] [--delete]
+      Find the files of a site that nothing it keeps refers to, and with
+      --delete delete them. The site is the bucket of the configuration, or
+      else <output>. Kept are every pointer under published/, the objects every
+      pointer refers to, the state of each region with the documents of the
+      assets it built from tables, and the unit and derivation records whose
+      objects are all kept. Files written within the grace period, 1d by
+      default (such as 30m, 12h or 7d), are kept too, with the objects that the
+      records among them name. Every other object of the store, state chunk
+      and record is listed with its size, and without --delete nothing is
+      deleted. Records go first, then state chunks and objects, so no record
+      names a deleted object. Run it while no update runs on the site: a run
+      may take a record whose objects gc deletes.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.
@@ -222,6 +238,16 @@ fn serve(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt
     Err("this build has no server: enable the serve feature".into())
 }
 
+#[cfg(feature = "cdn")]
+fn gc(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    gc::run(args)
+}
+
+#[cfg(not(feature = "cdn"))]
+fn gc(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no sites to collect: enable the cdn feature".into())
+}
+
 #[cfg(not(feature = "cdn"))]
 fn update(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     Err("this build has no distribution sources: enable the cdn feature".into())
@@ -233,6 +259,7 @@ fn main() -> ExitCode {
         Some("export") => export::run(args),
         Some("objects") => objects::run(args),
         Some("update") => update(args),
+        Some("gc") => gc(args),
         Some("account") => account(args),
         Some("stats") => stats(args),
         Some("serve") => serve(args),

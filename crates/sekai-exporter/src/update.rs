@@ -38,7 +38,7 @@ use crate::monitor::{self, Monitor};
 mod backed;
 mod fetch;
 mod files;
-mod site;
+pub(crate) mod site;
 mod tables;
 mod views;
 
@@ -1173,7 +1173,7 @@ fn record_objects(
 }
 
 /// The asset document `key` and its members, as objects of the store.
-fn document_objects(objects: &Objects<'_>, key: &Key) -> io::Result<Vec<Object>> {
+pub(crate) fn document_objects(objects: &Objects<'_>, key: &Key) -> io::Result<Vec<Object>> {
     let bytes = objects.read(key)?;
     let document = AssetDocument::from_bytes(&bytes).map_err(io::Error::other)?;
     let mut named = vec![Object {

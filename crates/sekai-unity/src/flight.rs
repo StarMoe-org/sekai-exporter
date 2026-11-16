@@ -24,21 +24,36 @@ impl<K: Hash + Eq + Clone, V: Clone> Flights<K, V> {
     /// When the caller that makes it panics, another makes it.
     pub fn run(&self, key: &K, make: impl FnOnce() -> V) -> V {
         let flight = self.running().entry(key.clone()).or_default().clone();
-        let value = flight.get_or_init(make).clone();
-        // The first caller to return ends the flight.
-        let mut running = self.running();
-        if running
-            .get(key)
-            .is_some_and(|current| Arc::ptr_eq(current, &flight))
-        {
-            running.remove(key);
-        }
-        value
+        let _finish = Finish {
+            flights: self,
+            key,
+            flight: &flight,
+        };
+        flight.get_or_init(make).clone()
     }
 
     fn running(&self) -> std::sync::MutexGuard<'_, HashMap<K, Arc<OnceLock<V>>>> {
         // The map holds no partial state when a caller panics.
         self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+struct Finish<'a, K: Hash + Eq, V> {
+    flights: &'a Flights<K, V>,
+    key: &'a K,
+    flight: &'a Arc<OnceLock<V>>,
+}
+
+impl<K: Hash + Eq, V> Drop for Finish<'_, K, V> {
+    fn drop(&mut self) {
+        // The first caller to return or unwind ends the flight.
+        let mut running = self.flights.running();
+        if running
+            .get(self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, self.flight))
+        {
+            running.remove(self.key);
+        }
     }
 }
 
@@ -79,5 +94,16 @@ mod tests {
         assert_eq!(flights.run(&1, || "first"), "first");
         assert_eq!(flights.run(&1, || "second"), "second");
         assert_eq!(flights.run(&2, || "other"), "other");
+    }
+
+    #[test]
+    fn a_panicking_caller_leaves_nothing_running() {
+        let flights: Flights<u32, &'static str> = Flights::default();
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            flights.run(&7, || panic!("boom"))
+        }));
+        assert!(panicked.is_err());
+        assert!(flights.running().is_empty());
+        assert_eq!(flights.run(&7, || "recovered"), "recovered");
     }
 }

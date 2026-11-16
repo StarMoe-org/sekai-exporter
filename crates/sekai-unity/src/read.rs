@@ -222,7 +222,14 @@ impl<'d> Run<'d, '_> {
                         self.value(layout, element, false, None, v)?;
                     }
                 } else if let Some(size) = layout.ops[element].fixed_size {
-                    let total = n.saturating_mul(size as usize);
+                    let at = self.r.pos() as u64;
+                    let total =
+                        n.checked_mul(size as usize)
+                            .ok_or_else(|| Error::ObjectTruncated {
+                                field: op.name.clone(),
+                                offset: at,
+                                size: self.r.len() as u64,
+                            })?;
                     self.bytes(op, total)?;
                 } else {
                     for _ in 0..n {

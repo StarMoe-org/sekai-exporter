@@ -201,3 +201,24 @@ fn a_bad_file_says_what_is_wrong() {
     json[6] = 3;
     assert!(error(&json).contains("data type 3"));
 }
+
+#[test]
+fn a_cyclic_node_graph_does_not_expand_without_bound() {
+    let mut out = 0i64.to_le_bytes().to_vec();
+    out.extend(1i32.to_le_bytes());
+    out.extend(version(2000, 1).to_le_bytes());
+    out.extend(1i32.to_le_bytes());
+    out.extend(CLASS.to_le_bytes());
+    out.extend(1i32.to_le_bytes());
+    class_entry(&mut out, version(2000, 1), Some(Some(0)));
+    out.extend(0i32.to_le_bytes());
+    out.extend(1i32.to_le_bytes());
+    node(&mut out, 0, 1, 1, &[0, 0]);
+    out.extend(2i32.to_le_bytes());
+    for string in ["Material", "Base"] {
+        out.push(string.len() as u8);
+        out.extend(string.as_bytes());
+    }
+    let table = VersionTable::from_tpk(&file(2, NO_COMPRESSION, &out, out.len())).unwrap();
+    assert!(table.tree(CLASS, "2000.0.0f1").is_none());
+}

@@ -265,7 +265,7 @@ fn compile_node(nodes: &[TypeTreeNode], i: usize, ops: &mut Vec<Op>) -> Result<u
                 if op.align {
                     None
                 } else {
-                    op.fixed_size.map(|s| sum + s)
+                    op.fixed_size.and_then(|s| sum.checked_add(s))
                 }
             });
             (fixed, kids.iter().any(|&c| ops[c].has_references))

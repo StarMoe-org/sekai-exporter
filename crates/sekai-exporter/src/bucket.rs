@@ -121,6 +121,11 @@ impl Bucket {
         self.s3.current(target).map_err(|e| e.to_string())
     }
 
+    /// The pointer of the published version `version` of `target` in the bucket.
+    pub(crate) fn version(&self, target: &str, version: &str) -> Result<Option<Pointer>, String> {
+        self.s3.version(target, version).map_err(|e| e.to_string())
+    }
+
     /// Uploads the objects of `referred` that the holdings of `objects` do not record.
     pub(crate) fn store(&self, objects: &Objects<'_>, referred: Vec<Object>) -> Result<(), String> {
         let stored = sekai_publish::s3::store_objects(objects, &self.s3, referred);
@@ -194,6 +199,10 @@ impl Bucket {
     }
 
     pub(crate) fn current(&self, _target: &str) -> Result<Option<Pointer>, String> {
+        match *self {}
+    }
+
+    pub(crate) fn version(&self, _target: &str, _version: &str) -> Result<Option<Pointer>, String> {
         match *self {}
     }
 

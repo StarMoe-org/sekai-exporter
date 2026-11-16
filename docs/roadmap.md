@@ -51,6 +51,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 | Lazy evaluator as a library | Done | [Architecture](architecture.md) |
 | Path indexes and the `serve` resolver | Done | [Serving](serving.md), [Path index](spec/path-index.md) |
 | Directory listings and a directory tree per publication, for file browsers | Done | [Serving](serving.md#directory-trees), [Directory tree](spec/directory-tree.md) |
+| A version history per view and the changes of each version | Done | [Serving](serving.md#version-histories), [Version history](spec/version-history.md) |
 | Resolver for edge workers in front of a bucket | Planned | The `sekai-serve` core does no I/O; a worker supplies the reads |
 
 ## General forms

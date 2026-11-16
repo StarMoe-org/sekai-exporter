@@ -4,8 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunks::{self, Row};
 
-/// The version of these document formats.
+/// The version of the index roots, shards, chunks and tree listings, which the revision names.
 pub const VERSION: u32 = 4;
+
+/// The version of the pointer, which changes on its own when only the pointer does.
+pub const POINTER_VERSION: u32 = 5;
 
 /// A chunk of a table of the index root ends after a row whose key hashes to a multiple of this,
 /// so chunks hold this many rows on average.
@@ -170,15 +173,22 @@ pub struct Pointer {
     pub paths: Option<String>,
     /// The [directory tree](crate::directory_tree) of the publication.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tree: Option<TreeReference>,
+    pub tree: Option<ObjectReference>,
+    /// The [version history](crate::version_history) of the view up to this publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<ObjectReference>,
+    /// The [changes](crate::version_history::VersionChanges) of this version since the version
+    /// before it, when they are known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes: Option<ObjectReference>,
 }
 
-/// A directory tree, as a pointer names it.
+/// A gzip-compressed document of the store, as a pointer names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TreeReference {
-    /// The SHA-256 of the tree (`store/<aa>/<sha256>.json.gz`), as lowercase hexadecimal.
+pub struct ObjectReference {
+    /// The SHA-256 of the document (`store/<aa>/<sha256>.json.gz`), as lowercase hexadecimal.
     pub sha256: String,
-    /// The size of the tree in the store, in bytes.
+    /// The size of the document in the store, in bytes.
     pub size: u64,
 }
 

@@ -57,7 +57,7 @@ A region, view or version without a publication is not found.
 | `max_age` | How many seconds a response may be cached, for the current version and for a named one. Default 60 |
 | `cors` | When present, the value of `Access-Control-Allow-Origin` |
 
-A route with `"tree": true` names the [directory tree](#directory-trees) of a view instead of its paths. Its pattern has no `{path}`, and a URL path matches it only when nothing follows its last segment, such as `{ "pattern": "/trees/{region}/{view}", "tree": true }` for `/trees/jp/storage`.
+A route with `"tree": true` names the [directory tree](#directory-trees) of a view instead of its paths. Its pattern has no `{path}`, and a URL path matches it only when nothing follows its last segment, such as `{ "pattern": "/trees/{region}/{view}", "tree": true }` for `/trees/jp/storage`. In the same way, a route with `"history": true` names the [version history](#version-histories) of a view, and a route with `"changes": true` the changes of a version, such as `{ "pattern": "/changes/{region}/{view}@{version}", "changes": true }` for `/changes/jp/storage@6.1.0`. A route names at most one of these documents.
 
 A routes file with another key, an invalid pattern, or a route that gives the region or the view twice or not at all is refused when the resolver starts.
 
@@ -109,6 +109,12 @@ Every publication of a view also has a [directory tree](spec/directory-tree.md):
 
 A route to the tree answers it as a file: the object that the pointer of the view names under `tree`, with `Content-Type: application/gzip`, `ETag` the hash of the object, the file name `directory-tree.json.gz`, ranges and `If-None-Match` as for a file, or a redirect to the object with `"redirect"`. The answer needs only the pointer. A client that keeps the tree asks for it again with `If-None-Match` and gets `304` until a new version is published, and then the new tree. A publication whose pointer names no tree has none, and its tree is `404`.
 
+## Version histories
+
+Every publication of a view also has a [version history](spec/version-history.md): the published versions of the view, newest first, each with its number of files and how many files it added, removed and changed since the version before. When those are known, the publication also has the changes of its version, which list those files by path, with their sizes and media types. A page that follows a view across versions reads the history, then the changes of a version it chooses, and reads a file of either version by its path.
+
+A route to the history or to the changes answers them as the [tree](#directory-trees) is answered: the object that the pointer names under `history` or `changes`, with `Content-Type: application/gzip` and the file name `version-history.json.gz` or `version-changes.json.gz`. A route without `{version}` answers for the current version, and one with it for the named version, whose history ends with that version. A publication whose pointer names no history or no changes has none, and the request is `404`.
+
 ## What the resolver checks
 
 The resolver takes neither a request nor a publication at its word.
@@ -117,7 +123,7 @@ A request names files only through the routes. Its region, view and version are 
 
 A publication is used only as far as it is what it says. A request is `500`, and the host logs the reason, when:
 
-- the pointer cannot be read, is not a pointer document, or names its path index or its directory tree by something other than a SHA-256;
+- the pointer cannot be read, is not a pointer document, or names its path index, its directory tree, its version history or its changes by something other than a SHA-256;
 - the root or a chunk of the path index is missing or cannot be read, does not have the hash it is named by, or does not follow its format;
 - a pointer is longer than 64 KiB, or a root or a chunk is longer than 64 MiB;
 - the index gives the file an extension that is not a name, or a media type that cannot be the value of a header;

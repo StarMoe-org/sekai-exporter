@@ -7,8 +7,9 @@ use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::publication::{Pointer, is_name};
 use sha2::{Digest, Sha256};
 
+use crate::history::NoVersions;
 use crate::index;
-use crate::patch::{self, Change, Previous};
+use crate::patch::{self, Change, Edition, Previous};
 use crate::plan::{Plan, PublishError, hex};
 
 /// The documents a publication writes next to its files. Every layout has a path index.
@@ -47,17 +48,22 @@ fn view_of(target: &str) -> &str {
 }
 
 /// Writes the documents of `plan`, the publication of `target` (`<region>/<view>`), in `layout`
-/// to `store`.
+/// to `store`. The publication starts a version history of its own, and records no time.
 pub fn documents(
     store: &LocalStore,
     target: &str,
     plan: &Plan,
     layout: Layout,
 ) -> Result<Publication, PublishError> {
-    let view = view_of(target);
+    let edition = Edition {
+        view: view_of(target),
+        version: &plan.version,
+        layout,
+        published_at: None,
+    };
     let change = Change::all(plan)?;
     let previous = Previous::default();
-    patch::apply(store, store, view, &plan.version, layout, &previous, change)
+    patch::apply(store, store, &edition, &previous, change, &NoVersions)
 }
 
 /// Whether `version` can name its pointer file.
@@ -105,8 +111,20 @@ pub fn publish(
 
 /// The current pointer of `target` under the published root `root`, or `None` when there is none.
 pub fn current(root: &Path, target: &str) -> Result<Option<Pointer>, PublishError> {
+    read_pointer(&current_path(root, target))
+}
+
+/// The pointer of the published version `version` of `target` under the published root `root`,
+/// or `None` when there is none.
+pub fn version(root: &Path, target: &str, version: &str) -> Result<Option<Pointer>, PublishError> {
+    check_version(version)?;
+    read_pointer(&root.join(version_pointer(target, version)))
+}
+
+/// The pointer at `path`, or `None` when there is none.
+fn read_pointer(path: &Path) -> Result<Option<Pointer>, PublishError> {
     let wrap = PublishError::wrap("pointer");
-    let bytes = match std::fs::read(current_path(root, target)) {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(wrap(e)),

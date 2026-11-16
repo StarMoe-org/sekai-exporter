@@ -21,7 +21,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use sekai_catalog::{Key, LocalStore, Objects, Remote, Store};
 use sekai_format::publication::Pointer;
@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
+use crate::clock::Utc;
 use crate::layout::{Layout, Object, Publication, check_version, documents, version_pointer};
 use crate::plan::{Plan, PublishError, hex};
 
@@ -193,10 +194,31 @@ impl S3 {
         format!("{}published/{target}/current.json", self.bucket.prefix)
     }
 
+    /// The name of the pointer of the published version `version` of `target` in the bucket.
+    fn version_pointer(&self, target: &str, version: &str) -> String {
+        format!(
+            "{}published/{}",
+            self.bucket.prefix,
+            version_pointer(target, version)
+        )
+    }
+
     /// The current pointer of `target`, or `None` when the bucket has none.
     pub fn current(&self, target: &str) -> Result<Option<Pointer>, PublishError> {
+        self.read_pointer(&self.pointer(target))
+    }
+
+    /// The pointer of the published version `version` of `target`, or `None` when the bucket has
+    /// none.
+    pub fn version(&self, target: &str, version: &str) -> Result<Option<Pointer>, PublishError> {
+        check_version(version)?;
+        self.read_pointer(&self.version_pointer(target, version))
+    }
+
+    /// The pointer named `name` in the bucket, or `None` when the bucket has none.
+    fn read_pointer(&self, name: &str) -> Result<Option<Pointer>, PublishError> {
         let bytes = self
-            .get(&self.pointer(target))
+            .get(name)
             .map_err(|e| PublishError::new("pointer", e))?;
         bytes
             .map(|bytes| serde_json::from_slice(&bytes))
@@ -735,11 +757,7 @@ pub fn make_current(s3: &S3, target: &str, pointer: &Pointer) -> Result<bool, Pu
     }
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
     let sha256 = hex(&digest);
-    let version = format!(
-        "{}published/{}",
-        s3.bucket.prefix,
-        version_pointer(target, &pointer.published_version)
-    );
+    let version = s3.version_pointer(target, &pointer.published_version);
     for name in [&version, &current] {
         s3.put(
             name,
@@ -956,34 +974,15 @@ fn unescape(text: &str) -> String {
 
 /// The time of a request, `YYYYMMDDTHHMMSSZ` in UTC.
 fn timestamp(now: SystemTime) -> String {
-    let seconds = now.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let (year, month, day) = civil(seconds / 86_400);
-    let time = seconds % 86_400;
-    format!(
-        "{year:04}{month:02}{day:02}T{:02}{:02}{:02}Z",
-        time / 3600,
-        time % 3600 / 60,
-        time % 60
-    )
-}
-
-/// The date `days` days after 1970-01-01.
-fn civil(days: u64) -> (u64, u64, u64) {
-    let z = days + 719_468;
-    let era = z / 146_097;
-    let day_of_era = z % 146_097;
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let month_index = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
-    let month = if month_index < 10 {
-        month_index + 3
-    } else {
-        month_index - 9
-    };
-    let year = year_of_era + era * 400 + u64::from(month <= 2);
-    (year, month, day)
+    let Utc {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    } = Utc::of(now);
+    format!("{year:04}{month:02}{day:02}T{hour:02}{minute:02}{second:02}Z")
 }
 
 /// The AWS Signature Version 4 signature of a request to S3. `time` is `YYYYMMDDTHHMMSSZ`, `uri`
@@ -1039,6 +1038,8 @@ fn hmac(key: &[u8], message: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests {
+    use std::time::UNIX_EPOCH;
+
     use super::*;
 
     #[test]

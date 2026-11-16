@@ -1,6 +1,6 @@
 //! Types of the published documents: object documents, asset documents, index roots with their
-//! table chunks and shards, path indexes, the chunking they share, and the documents asset forms
-//! carry as members.
+//! table chunks and shards, path indexes, directory trees, version histories, the chunking they
+//! share, and the documents asset forms carry as members.
 //!
 //! Consumers depend on this crate to read the published output.
 
@@ -19,5 +19,6 @@ pub mod number;
 pub mod paths;
 pub mod publication;
 pub mod story;
+pub mod version_history;
 
 pub use asset::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};

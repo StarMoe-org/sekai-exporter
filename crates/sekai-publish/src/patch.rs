@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
 use flate2::Compression;
 use flate2::read::GzDecoder;
@@ -19,12 +20,14 @@ use sekai_format::directory_tree::{self, DirectoryTree, TreeFile};
 use sekai_format::paths::{self, Chunk, ChunkReference, PathFile, PathIndex};
 use sekai_format::publication::{
     AssetFailure, IndexChunk, IndexEntry, IndexRoot, IndexShard, ListingEntry, ListingTable,
-    Pointer, ShardReference, TableChunk, TreeReference, VERSION,
+    ObjectReference, POINTER_VERSION, Pointer, ShardReference, TableChunk, VERSION,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
+use crate::clock::Utc;
+use crate::history::{self, Last, Made, PathDiff, Versions};
 use crate::layout::{Layout, Object, Publication};
 use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path, hex};
 
@@ -151,45 +154,75 @@ pub struct Previous {
     /// The root of the path index.
     pub paths: Option<PathIndex>,
     /// The directory tree, which is read when a change needs it.
-    pub tree: Option<TreeReference>,
+    pub tree: Option<ObjectReference>,
+    /// The publication that the version history continues from.
+    pub last: Option<Last>,
 }
 
 impl Previous {
     /// The roots that `pointer` names, read from `store`.
     pub fn read(store: &dyn Store, pointer: &Pointer) -> Result<Self, PublishError> {
-        let read = |sha256: &str| read_object(store, sha256, "json");
         let index = pointer
             .root
             .as_deref()
             .map(|root| {
-                serde_json::from_slice(&read(root)?).map_err(|e| PublishError::new("previous", e))
+                let bytes = read_object(store, root, "json")?;
+                serde_json::from_slice(&bytes).map_err(|e| PublishError::new("previous", e))
             })
             .transpose()?;
-        let paths = pointer
-            .paths
-            .as_deref()
-            .map(|root| {
-                PathIndex::from_bytes(&read(root)?).map_err(|e| PublishError::new("previous", e))
-            })
-            .transpose()?;
+        let paths = named_paths(store, pointer)?;
         let tree = pointer.tree.clone();
-        Ok(Self { index, paths, tree })
+        let last = Some(Last::of(pointer, paths.as_ref()));
+        Ok(Self {
+            index,
+            paths,
+            tree,
+            last,
+        })
+    }
+
+    /// No publication to change, for a view published anew after the publication that `pointer`
+    /// names, whose version history goes on. Only the root of its path index is read from
+    /// `store`, for its number of files.
+    pub fn after(store: &dyn Store, pointer: &Pointer) -> Result<Self, PublishError> {
+        let paths = named_paths(store, pointer)?;
+        Ok(Self {
+            last: Some(Last::of(pointer, paths.as_ref())),
+            ..Self::default()
+        })
     }
 
     /// The files of the publication, looked up in the chunks of its path index, which are read
     /// from `store` as the lookups need them and kept.
     pub fn lookup<'s>(&self, store: &'s dyn Store) -> Lookup<'s> {
-        let chunks = self.paths.as_ref().map_or(&[][..], |index| &index.chunks);
-        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
-        Lookup(Table::new(store, firsts, read_paths))
+        Lookup::new(store, self.paths.as_ref())
     }
+}
+
+/// The root of the path index that `pointer` names, if it names one, read from `store`.
+fn named_paths(store: &dyn Store, pointer: &Pointer) -> Result<Option<PathIndex>, PublishError> {
+    let root = pointer.paths.as_deref();
+    root.map(|root| read_path_index(store, root)).transpose()
+}
+
+/// The root of the path index `sha256`, read from `store`.
+pub(crate) fn read_path_index(store: &dyn Store, sha256: &str) -> Result<PathIndex, PublishError> {
+    let bytes = read_object(store, sha256, "json")?;
+    PathIndex::from_bytes(&bytes).map_err(|e| PublishError::new("previous", e))
 }
 
 /// The files of a previous publication, by path. Each chunk of its path index is read once, when
 /// a lookup first needs it, and lookups may run on several threads at once.
 pub struct Lookup<'a>(Table<'a, PathFile>);
 
-impl Lookup<'_> {
+impl<'a> Lookup<'a> {
+    /// The files of the path index `index`, whose chunks are read from `store`.
+    pub(crate) fn new(store: &'a dyn Store, index: Option<&PathIndex>) -> Self {
+        let chunks = index.map_or(&[][..], |index| &index.chunks);
+        let firsts = chunks.iter().map(|c| (c.first.clone(), c.sha256.clone()));
+        Self(Table::new(store, firsts, read_paths))
+    }
+
     /// The file at `path`, if the publication has one.
     pub fn file(&self, path: &str) -> Result<Option<PathFile>, PublishError> {
         self.0.get(path)
@@ -256,7 +289,7 @@ fn read_object(store: &dyn Store, sha256: &str, extension: &str) -> Result<Vec<u
 }
 
 /// The documents a publication writes, kept for upload.
-struct Written<'a> {
+pub(crate) struct Written<'a> {
     local: &'a LocalStore,
     objects: Vec<Object>,
 }
@@ -287,21 +320,22 @@ impl Written<'_> {
         self.put(&bytes, "json", JSON)
     }
 
-    /// Stores `tree` gzip-compressed and returns the reference a pointer names it by.
-    fn put_tree(&mut self, tree: &DirectoryTree) -> Result<TreeReference, PublishError> {
-        let json = serde_json::to_vec(tree).map_err(|e| PublishError::new("documents", e))?;
+    /// Stores `document` as gzip-compressed JSON and returns the reference a pointer names it by.
+    pub(crate) fn put_gzip(
+        &mut self,
+        document: &impl Serialize,
+        extension: &str,
+        media_type: &str,
+    ) -> Result<ObjectReference, PublishError> {
+        let json = serde_json::to_vec(document).map_err(|e| PublishError::new("documents", e))?;
         let mut gzip = GzEncoder::new(Vec::new(), Compression::default());
         let bytes = gzip
             .write_all(&json)
             .and_then(|()| gzip.finish())
             .map_err(PublishError::wrap("documents"))?;
-        let sha256 = self.put(
-            &bytes,
-            directory_tree::EXTENSION,
-            directory_tree::MEDIA_TYPE,
-        )?;
+        let sha256 = self.put(&bytes, extension, media_type)?;
         let size = bytes.len() as u64;
-        Ok(TreeReference { sha256, size })
+        Ok(ObjectReference { sha256, size })
     }
 }
 
@@ -370,20 +404,39 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
     }
 }
 
-/// Applies `change` to `previous`, the publication of `view` before it, as the publication of
-/// `version` in `layout`, which is [`Layout::Paths`] or [`Layout::Index`]. The documents of the
-/// previous publication are read from `store` as the change needs them, and the new ones are
-/// written to `local`. Returns the pointer and the objects the publication adds: the files the
-/// change adds, and the documents written.
+/// What a publication publishes: a version of a view, in a layout, at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Edition<'a> {
+    /// The view.
+    pub view: &'a str,
+    /// The name of the published version.
+    pub version: &'a str,
+    /// The layout, [`Layout::Paths`] or [`Layout::Index`].
+    pub layout: Layout,
+    /// When the publication is made, which its version history records, or `None` to record no
+    /// time.
+    pub published_at: Option<SystemTime>,
+}
+
+/// Applies `change` to `previous`, the publication of the view before it, as the publication
+/// `edition`. The documents of earlier publications are read from `store` as the change needs
+/// them, and their pointers from `versions`; the new documents are written to `local`. Returns
+/// the pointer and the objects the publication adds: the files the change adds, and the
+/// documents written.
 pub fn apply(
     store: &dyn Store,
     local: &LocalStore,
-    view: &str,
-    version: &str,
-    layout: Layout,
+    edition: &Edition<'_>,
     previous: &Previous,
     change: Change,
+    versions: &dyn Versions,
 ) -> Result<Publication, PublishError> {
+    let Edition {
+        view,
+        version,
+        layout,
+        published_at,
+    } = *edition;
     let Change {
         paths: edits,
         listings,
@@ -407,12 +460,26 @@ pub fn apply(
     };
     let changes = PathChanges::new(store, previous.paths.as_ref(), &edits)?;
     let tree_files = changes.tree_files(previous.tree.as_ref())?;
+    // The paths tell what changed since the last publication only when the change applies to it.
+    let diffs = match (&previous.last, &previous.paths) {
+        (Some(_), Some(_)) => Some(changes.diffs()?),
+        _ => None,
+    };
     let (paths, files) = changes.chunks(&mut written)?;
     let failures = tables.as_ref().map_or(&[][..], |t| &t.failures);
     let revision = revision(version, &paths, failures);
     let tree = DirectoryTree::new(view, version, &revision, tree_files)
         .map_err(|e| PublishError::new("documents", e))?;
-    let tree = written.put_tree(&tree)?;
+    let tree = written.put_gzip(&tree, directory_tree::EXTENSION, directory_tree::MEDIA_TYPE)?;
+    let made = Made {
+        view,
+        version,
+        revision: &revision,
+        files,
+        published_at: published_at.map(|time| Utc::of(time).rfc3339()),
+    };
+    let last = previous.last.as_ref();
+    let recorded = history::record(store, &mut written, &made, last, diffs, versions)?;
 
     let paths = written.put_json(&PathIndex {
         format: "path-index".to_owned(),
@@ -448,12 +515,14 @@ pub fn apply(
     Ok(Publication {
         pointer: Pointer {
             format: "pointer".to_owned(),
-            version: VERSION,
+            version: POINTER_VERSION,
             published_version: version.to_owned(),
             revision,
             root,
             paths: Some(paths),
             tree: Some(tree),
+            history: Some(recorded.history),
+            changes: recorded.changes,
         },
         objects,
     })
@@ -511,7 +580,10 @@ impl<'a> PathChanges<'a> {
     /// The files of the publication after the change, in path order: those of `previous`, the
     /// directory tree of the previous publication, with the edits applied. Without a tree, they
     /// are read from every chunk of the previous path index.
-    fn tree_files(&self, previous: Option<&TreeReference>) -> Result<Vec<TreeFile>, PublishError> {
+    fn tree_files(
+        &self,
+        previous: Option<&ObjectReference>,
+    ) -> Result<Vec<TreeFile>, PublishError> {
         let before = match previous {
             Some(tree) => read_tree(self.store, tree)?,
             None => self.files()?,
@@ -523,6 +595,23 @@ impl<'a> PathChanges<'a> {
         let mut files: Vec<TreeFile> = kept.chain(added).collect();
         files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
         Ok(files)
+    }
+
+    /// The paths whose bytes the change changes, in path order, with the files before and after.
+    fn diffs(&self) -> Result<Vec<PathDiff>, PublishError> {
+        let mut diffs = Vec::new();
+        for (path, after) in &self.rows {
+            let before = self.table.get(path)?;
+            if before.as_ref().map(|f| f.sha256) != after.as_ref().map(|f| f.sha256) {
+                let (path, after) = (path.clone(), after.clone());
+                diffs.push(PathDiff {
+                    path,
+                    before,
+                    after,
+                });
+            }
+        }
+        Ok(diffs)
     }
 
     /// Every file of the previous path index.
@@ -552,13 +641,23 @@ impl<'a> PathChanges<'a> {
     }
 }
 
-/// The files of the directory tree `tree`, read from `store`.
-fn read_tree(store: &dyn Store, tree: &TreeReference) -> Result<Vec<TreeFile>, PublishError> {
-    let bytes = read_object(store, &tree.sha256, directory_tree::EXTENSION)?;
+/// The JSON of the gzip-compressed document `document`, read from `store`.
+pub(crate) fn read_gzip(
+    store: &dyn Store,
+    document: &ObjectReference,
+    extension: &str,
+) -> Result<Vec<u8>, PublishError> {
+    let bytes = read_object(store, &document.sha256, extension)?;
     let mut json = Vec::new();
     GzDecoder::new(bytes.as_slice())
         .read_to_end(&mut json)
         .map_err(PublishError::wrap("previous"))?;
+    Ok(json)
+}
+
+/// The files of the directory tree `tree`, read from `store`.
+fn read_tree(store: &dyn Store, tree: &ObjectReference) -> Result<Vec<TreeFile>, PublishError> {
+    let json = read_gzip(store, tree, directory_tree::EXTENSION)?;
     DirectoryTree::from_json(&json)
         .and_then(|tree| tree.files())
         .map_err(|e| PublishError::new("previous", e))

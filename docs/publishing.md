@@ -55,7 +55,7 @@ The `client` view holds the assets of a client package, which the client loads f
 2. Index shards are immutable and named by their SHA-256.
 3. The revision of a publication is made from the chunks of its path index and failures, which depend only on what they hold. A publication may be written as a change to the previous one, which reads and writes only the shards and chunks the change falls in and gives the same documents as writing it whole.
 4. Before the pointer of a version is advanced, every object the publication refers to is checked to exist in the store under its recorded hash. Objects are written under a temporary name and renamed, so an object that exists under its name is complete.
-5. The pointer is written to `<region>/<view>/versions/<published version>.json`, and then made current at `<region>/<view>/current.json`, so every published version stays reachable for as long as its objects are kept. A published version is named by ASCII letters, digits, `.`, `_` and `-`, and not only dots.
+5. The pointer is written to `<region>/<view>/versions/<published version>.json`, and then made current at `<region>/<view>/current.json`, so every published version stays reachable for as long as its objects are kept. The pointer also names the [version history](spec/version-history.md) of the view and the changes of the version since the version before, so a reader lists the published versions without listing the store. A published version is named by ASCII letters, digits, `.`, `_` and `-`, and not only dots.
 6. Failures are reported with the name of the stage that failed. A failed stage leaves the previous pointer in place.
 7. When a publication goes to several destinations, the pointers of different destinations are not advanced atomically together. Each destination keeps its last complete pointer, and running the publication again completes the remaining destinations.
 
@@ -107,6 +107,8 @@ A run knows which objects the bucket holds from the records it reads and the upl
 A unit record lists each asset of the unit with the logical path of its root and `path_id`, which is the path ID of the root object, or `{"file": "<path>"}` for an asset whose root is a file of the bundle; each root left unnamed is a pair of its logical path and the same value.
 
 The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. A run writes, in this order, every new object, the records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
+
+A version with the same content and evaluation is published again when the pointer of one of its views names documents of an earlier format, an index root, shards and chunks of a version below the current one (see [Publication documents](spec/publication.md#6-version)). A pointer of an earlier format that names documents of the current one is kept until the next version, which is written as a change to it.
 
 ## Evaluation and publishing together
 

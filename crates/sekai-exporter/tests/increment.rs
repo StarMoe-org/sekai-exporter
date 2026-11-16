@@ -12,6 +12,14 @@ use serde_json::json;
 
 const VIEWS: [&str; 2] = ["canonical", "storage"];
 
+/// `pointer` without its version history and changes, which follow the publications before it.
+fn contents(mut pointer: serde_json::Value) -> serde_json::Value {
+    let fields = pointer.as_object_mut().unwrap();
+    assert!(fields.remove("history").is_some(), "{fields:?}");
+    fields.remove("changes");
+    pointer
+}
+
 /// Where the tests publish in a bucket.
 const PREFIX: &str = "out/";
 
@@ -129,9 +137,12 @@ fn each_update_publishes_what_an_update_from_nothing_publishes() {
         let fresh = format!("fresh-{value}");
         scratch.update(&fresh, None);
         for view in VIEWS {
+            let increment = scratch.pointer("earlier", view);
+            // A new version records what it changed since the one before.
+            assert!(increment.get("changes").is_some(), "{value} {view}");
             assert_eq!(
-                scratch.pointer("earlier", view),
-                scratch.pointer(&fresh, view),
+                contents(increment),
+                contents(scratch.pointer(&fresh, view)),
                 "{value} {view}"
             );
         }
@@ -170,8 +181,9 @@ mod bucket {
     }
 
     /// The current pointer of `view` in `bucket`.
-    fn pointer(bucket: &Server, view: &str) -> Option<Vec<u8>> {
-        bucket.object(&format!("{POINTERS}r/{view}/current.json"))
+    fn pointer(bucket: &Server, view: &str) -> Option<serde_json::Value> {
+        let bytes = bucket.object(&format!("{POINTERS}r/{view}/current.json"))?;
+        Some(serde_json::from_slice(&bytes).unwrap())
     }
 
     /// What `run` gave, and the requests `bucket` answered while it ran.
@@ -215,7 +227,8 @@ mod bucket {
         scratch.update("fresh", Some(&fresh));
         for view in VIEWS {
             let (updated, fresh) = (pointer(&bucket, view), pointer(&fresh, view));
-            assert!(updated.is_some() && updated == fresh, "{view}");
+            assert!(updated.is_some(), "{view}");
+            assert_eq!(updated.map(contents), fresh.map(contents), "{view}");
         }
 
         // A machine that finds the version unchanged reads only the last version and the pointers

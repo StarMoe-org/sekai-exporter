@@ -6,6 +6,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::thread;
+use std::time::SystemTime;
 
 use sekai_catalog::db::{Catalog, CatalogDerivations, CostRow, IndexCache};
 use sekai_catalog::store::parse_hex;
@@ -25,7 +26,7 @@ use sekai_pipeline::state::{
 };
 use sekai_pipeline::stream::{self, Entry, InBundle, Segment, Stream};
 use sekai_pipeline::tables::{Built, TableStage};
-use sekai_publish::patch::{self, Change, Lookup, Previous};
+use sekai_publish::patch::{self, Change, Edition, Lookup, Previous};
 use sekai_publish::{Binding, Layout, Object, Publication};
 use sekai_unity::{BoundedBlockCache, ClassLayouts, NoClasses};
 
@@ -395,7 +396,7 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
 
 /// What a run that would record `current` would change at `site` after the run that recorded
 /// `previous`, or `None` when the version has the same content, the evaluation the same identity
-/// and every target of the run is published in the current publication format.
+/// and every target of the run has a pointer that names documents of the current format.
 fn change(
     site: &Site<'_>,
     targets: &[String],
@@ -420,7 +421,9 @@ fn change(
     }
     for target in targets {
         let current = site.current(target)?;
-        if current.is_none_or(|pointer| pointer.version != publication::VERSION) {
+        // A pointer of an earlier format that names documents of the current one is followed by
+        // a change, which gives the documents of a whole publication.
+        if current.is_none_or(|pointer| pointer.version < publication::VERSION) {
             return Ok(Some(format!("changed: {target} is in an earlier format")));
         }
     }
@@ -553,6 +556,7 @@ fn export_version(
         objects: &objects,
         backed: &backed,
         monitor,
+        published_at: SystemTime::now(),
     };
     let advance = Advance {
         rulings: &rulings,
@@ -790,7 +794,8 @@ fn listed(options: &Options, site: &Site<'_>, monitor: &Monitor) -> Result<Liste
 
 /// What a run starts from: the state that the last run of the region left, and the previous
 /// publications of its views. When the state does not name the revisions those publications have,
-/// the run starts from no publication and keeps only what the state knows of bundles.
+/// the run changes no publication and keeps only what the state knows of bundles; the version
+/// histories of the views go on from those publications.
 struct Baseline {
     state: RegionState,
     /// The root of the state, whose chunks a write keeps.
@@ -810,6 +815,7 @@ impl Publications {
             index: None,
             paths: None,
             tree: None,
+            last: None,
         };
         self.0.get(target).unwrap_or(&NONE)
     }
@@ -837,22 +843,25 @@ impl Baseline {
         let agrees = pointers.iter().all(|(target, pointer)| {
             pointer.as_ref().map(|pointer| &pointer.revision) == state.published.get(*target)
         });
-        if !agrees {
+        let state = if agrees {
+            state
+        } else {
             println!("{key}: the state names other publications, so the views are published anew");
-            let state = RegionState {
+            RegionState {
                 bundles: state.bundles,
                 ..RegionState::default()
-            };
-            return Ok(Self {
-                state,
-                root,
-                publications: Publications::default(),
-            });
-        }
+            }
+        };
+        // A view published anew changes no publication, but its version history goes on.
+        let previous_of = if agrees {
+            Previous::read
+        } else {
+            Previous::after
+        };
         let mut publications = BTreeMap::new();
         for (target, pointer) in pointers {
             if let Some(pointer) = pointer {
-                let previous = Previous::read(store, &pointer).map_err(|e| e.to_string())?;
+                let previous = previous_of(store, &pointer).map_err(|e| e.to_string())?;
                 publications.insert(target.clone(), previous);
             }
         }
@@ -908,6 +917,8 @@ struct Context<'a> {
     objects: &'a Objects<'a>,
     backed: &'a Backed<'a>,
     monitor: &'a Monitor,
+    /// When the run publishes its views, which their version histories record.
+    published_at: SystemTime,
 }
 
 /// What a commit wrote.
@@ -1042,14 +1053,21 @@ impl Context<'_> {
         change: Change,
     ) -> Result<Publication, String> {
         let _span = self.monitor.span("publish", view, "");
+        let edition = Edition {
+            view,
+            version: name,
+            layout,
+            published_at: Some(self.published_at),
+        };
+        let target = format!("{}/{view}", self.options.region);
+        let versions = self.site.versions(&target);
         let applied = patch::apply(
             self.objects,
             self.store,
-            view,
-            name,
-            layout,
+            &edition,
             previous,
             change,
+            &versions,
         );
         applied.map_err(|e| e.to_string())
     }

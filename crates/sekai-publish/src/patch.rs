@@ -279,12 +279,22 @@ impl<'a> Lookup<'a> {
     }
 }
 
-fn read_object(store: &dyn Store, sha256: &str, extension: &str) -> Result<Vec<u8>, PublishError> {
-    let key = Key {
-        sha256: sekai_catalog::store::parse_hex(sha256)
-            .ok_or_else(|| PublishError::new("previous", format!("bad hash {sha256}")))?,
+/// The object named by the lowercase hexadecimal SHA-256 `sha256` and `extension`.
+pub(crate) fn object_key(sha256: &str, extension: &str) -> Result<Key, PublishError> {
+    let sha256 = sekai_catalog::store::parse_hex(sha256)
+        .ok_or_else(|| PublishError::new("previous", format!("bad hash {sha256}")))?;
+    Ok(Key {
+        sha256,
         extension: extension.to_owned(),
-    };
+    })
+}
+
+pub(crate) fn read_object(
+    store: &dyn Store,
+    sha256: &str,
+    extension: &str,
+) -> Result<Vec<u8>, PublishError> {
+    let key = object_key(sha256, extension)?;
     store.read(&key).map_err(PublishError::wrap("previous"))
 }
 
@@ -748,7 +758,10 @@ fn index_table<'a, R: Row<Key = String> + Clone + DeserializeOwned>(
     Table::new(store, firsts, read_rows)
 }
 
-fn read_rows<R: DeserializeOwned>(store: &dyn Store, sha256: &str) -> Result<Vec<R>, PublishError> {
+pub(crate) fn read_rows<R: DeserializeOwned>(
+    store: &dyn Store,
+    sha256: &str,
+) -> Result<Vec<R>, PublishError> {
     let chunk: IndexChunk<R> = serde_json::from_slice(&read_object(store, sha256, "json")?)
         .map_err(|e| PublishError::new("previous", e))?;
     Ok(chunk.rows)

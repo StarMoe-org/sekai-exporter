@@ -3,7 +3,8 @@
 //!
 //! The bucket is served at `http://<host>:<port>/bucket`, path-style, for the access key
 //! [`ACCESS_KEY`] with the secret [`SECRET_KEY`], signed for [`REGION`]. It knows `HEAD`, `GET`,
-//! `ListObjectsV2` in pages of two names, `PUT` and multipart uploads.
+//! `ListObjectsV2` in pages of two names, `PUT`, `DELETE` and multipart uploads. Listings give
+//! every object the time [`MODIFIED`], so every object is older than a day.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
@@ -24,6 +25,9 @@ pub const REGION: &str = "test-region";
 /// The names of the secrets that hold [`ACCESS_KEY`] and [`SECRET_KEY`].
 const SECRETS: [&str; 2] = ["SEKAI_TESTKIT_S3_ACCESS_KEY", "SEKAI_TESTKIT_S3_SECRET_KEY"];
 
+/// The time listings give as the last modification of every object.
+pub const MODIFIED: &str = "2000-01-01T00:00:00.000Z";
+
 /// The names in a listing page.
 const PAGE: usize = 2;
 
@@ -38,6 +42,8 @@ pub enum Operation {
     List,
     /// `PUT` of an object.
     Put,
+    /// `DELETE` of an object.
+    Delete,
     /// The start of a multipart upload.
     StartUpload,
     /// A part of a multipart upload.
@@ -61,6 +67,7 @@ impl Operation {
             ("GET", false) if listing => Self::List,
             ("GET", false) => Self::Get,
             ("PUT", false) => Self::Put,
+            ("DELETE", false) => Self::Delete,
             _ => return None,
         })
     }
@@ -272,6 +279,11 @@ impl State {
                 );
                 Response::new(200, "")
             }
+            (Operation::Delete, _) => {
+                lock(&self.objects).remove(name);
+                lock(&self.cache_controls).remove(name);
+                Response::new(204, "")
+            }
             (Operation::StartUpload, _) => Response::new(200, self.start_upload(name, request)),
             (Operation::PutPart, Some(id)) => match self.put_part(id, request) {
                 Some(tag) => Response {
@@ -329,7 +341,8 @@ impl State {
         let mut xml = String::from("<ListBucketResult>");
         for (name, bytes) in &page {
             xml.push_str(&format!(
-                "<Contents><Key>{}</Key><Size>{}</Size></Contents>",
+                "<Contents><Key>{}</Key><LastModified>{MODIFIED}</LastModified>\
+                 <Size>{}</Size></Contents>",
                 name.replace('&', "&amp;"),
                 bytes.len()
             ));

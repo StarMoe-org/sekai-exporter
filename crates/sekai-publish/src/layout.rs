@@ -2,6 +2,7 @@
 //! that make a publication current.
 
 use std::path::Path;
+use std::time::SystemTime;
 
 use sekai_catalog::{Key, LocalStore, Objects};
 use sekai_format::publication::{Pointer, is_name};
@@ -31,6 +32,17 @@ pub struct Object {
     pub size: u64,
     /// The media type.
     pub media_type: String,
+}
+
+/// A file of a site, as a listing of the site finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed {
+    /// The name of the file: its path under the site, with `/` separators.
+    pub name: String,
+    /// The size in bytes.
+    pub size: u64,
+    /// When the file was last written.
+    pub modified: SystemTime,
 }
 
 /// A publication ready to be made current: its pointer, and every object it refers to.

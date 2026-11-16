@@ -33,12 +33,45 @@ fn unit_key(file: &str) -> Option<UnitKey> {
     parse_hex(key).map(UnitKey)
 }
 
+/// The directory of the derivation records among the state files.
+pub const DERIVATION_RECORDS: &str = "records/derivations";
+
 fn derivation_file(fingerprint: &[u8; 32]) -> String {
     let fingerprint = hex(fingerprint);
     format!(
-        "records/derivations/{}/{fingerprint}.json",
+        "{DERIVATION_RECORDS}/{}/{fingerprint}.json",
         &fingerprint[..2]
     )
+}
+
+/// The document that the derivation record `bytes`, the state file `name`, names, with its size,
+/// or `None` for a root that holds no asset of its form.
+fn recorded_document(name: &str, bytes: &[u8]) -> io::Result<Option<(Key, u64)>> {
+    let recorded = serde_json::from_slice(bytes).map_err(|e| invalid(name, e))?;
+    match recorded {
+        DerivationRecord::Document { key, size } => {
+            let key: Key = key.parse().map_err(|e| invalid(name, e))?;
+            Ok(Some((key, size)))
+        }
+        DerivationRecord::Nothing => Ok(None),
+    }
+}
+
+/// The objects that the record `bytes`, the state file `file`, names: the asset documents of a
+/// unit record, or the document of a derivation record. A unit record that cannot be read names
+/// nothing, since a run evaluates its unit again.
+pub fn record_objects(file: &str, bytes: &[u8]) -> io::Result<Vec<Key>> {
+    if file.starts_with(UNIT_RECORDS) {
+        return Record::read(bytes).map_or(Ok(Vec::new()), |record| record.documents());
+    }
+    if file.starts_with(DERIVATION_RECORDS) {
+        let document = recorded_document(file, bytes)?;
+        return Ok(document.into_iter().map(|(key, _size)| key).collect());
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("{file} is not a record"),
+    ))
 }
 
 /// What a derivation record holds.
@@ -186,14 +219,12 @@ impl<'a> Records<'a> {
         let Some(bytes) = self.files.read(&name)? else {
             return Ok(None);
         };
-        let recorded = serde_json::from_slice(&bytes).map_err(|e| invalid(&name, e))?;
-        Ok(Some(match recorded {
-            DerivationRecord::Document { key, size } => {
-                let key: Key = key.parse().map_err(|e| invalid(&name, e))?;
+        Ok(Some(match recorded_document(&name, &bytes)? {
+            Some((key, size)) => {
                 self.held.hold(&[(key.clone(), size)])?;
                 Derived::Document(key)
             }
-            DerivationRecord::Nothing => Derived::Nothing,
+            None => Derived::Nothing,
         }))
     }
 }

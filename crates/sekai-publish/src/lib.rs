@@ -11,7 +11,11 @@ mod layout;
 mod parallel;
 pub mod patch;
 pub mod plan;
+mod reach;
 pub mod tree;
 
-pub use layout::{Layout, Object, Publication, current, documents, make_current, publish, version};
+pub use layout::{
+    Layout, Listed, Object, Publication, current, documents, make_current, publish, version,
+};
 pub use plan::{Binding, File, Plan, PublishError, PublishedAsset, plan};
+pub use reach::referred;

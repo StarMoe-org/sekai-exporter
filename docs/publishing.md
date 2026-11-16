@@ -110,6 +110,22 @@ The state is split into content-addressed chunks, so a run writes only the chunk
 
 A version with the same content and evaluation is published again when the pointer of one of its views names documents of an earlier format, an index root, shards and chunks of a version below the current one (see [Publication documents](spec/publication.md#6-version)). A pointer of an earlier format that names documents of the current one is kept until the next version, which is written as a change to it.
 
+## Collecting garbage
+
+A run adds objects and state files and deletes none: objects that no publication refers to any more, chunks of earlier states and records of earlier evaluations stay at the site. `sekai-exporter gc <output> [--config <file>]` finds them, in the bucket of the configuration or else in `<output>`, and with `--delete` deletes them.
+
+| Kept | Why |
+|---|---|
+| Every pointer under `published/` | Each names a published version, current or not |
+| Every object a pointer refers to | Its index root, table chunks and shards, the root and chunks of its path index, its directory tree, version history and changes, and every file its path index lists |
+| The root of the state of each region, the chunks it names, and the documents of the assets the region built from tables, with their members | A run keeps an asset built from tables without writing it again |
+| Each record whose objects are all kept | A run takes the objects a record names to be at the site |
+| Each file written within the grace period (`--grace`, `1d` by default), and the objects that the records among them name | A run that is publishing writes its objects and records before its pointers |
+
+Every other object of the store, state chunk and record is garbage. `gc` lists the garbage of each kind (unit records, derivation records, state chunks and objects, the objects also by extension) with counts and sizes, and deletes nothing without `--delete`. With `--delete` the records go first, then the state chunks and the objects, so an interrupted collection leaves no record that names a deleted object. A run that took such a record would publish a pointer to an object the site lacks, so `gc` runs while no update runs on the site. In a bucket, `gc` reads the times of the listing (`LastModified`), and `--delete` needs permission to delete objects under the prefix.
+
+Pointers are never deleted, so every published version stays reachable. A version published again under the same name replaces the pointer of that version, and the objects that only the earlier publication referred to become garbage.
+
 ## Evaluation and publishing together
 
 | Deployment | Evaluation | Place | Layout |

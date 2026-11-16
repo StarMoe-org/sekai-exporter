@@ -30,7 +30,9 @@ use ureq::http::Response;
 use ureq::{Agent, AsSendBody, Body};
 
 use crate::clock::Utc;
-use crate::layout::{Layout, Object, Publication, check_version, documents, version_pointer};
+use crate::layout::{
+    Layout, Listed, Object, Publication, check_version, documents, version_pointer,
+};
 use crate::plan::{Plan, PublishError, hex};
 
 /// The SHA-256 of no bytes.
@@ -177,11 +179,42 @@ impl S3 {
     /// one store directory per connection.
     pub fn holdings(&self) -> Result<BTreeMap<Key, u64>, PublishError> {
         let listed = self.list_store()?;
-        let objects = listed.into_iter().filter_map(|(name, size)| {
-            let key = name.rsplit('/').next()?.parse().ok()?;
-            Some((key, size))
+        let objects = listed.into_iter().filter_map(|file| {
+            let key = file.name.rsplit('/').next()?.parse().ok()?;
+            Some((key, file.size))
         });
         Ok(objects.collect())
+    }
+
+    /// Every file under `directory` of the bucket, named without the prefix of the bucket, from
+    /// one listing.
+    pub fn files(&self, directory: &str) -> Result<Vec<Listed>, PublishError> {
+        let listed = self.list(&format!("{}{directory}/", self.bucket.prefix));
+        Ok(self.unprefixed(listed.map_err(|e| PublishError::new("listing", e))?))
+    }
+
+    /// [`S3::files`] of a directory whose files lie in subdirectories named by two hexadecimal
+    /// digits, listed one subdirectory per connection.
+    pub fn sharded_files(&self, directory: &str) -> Result<Vec<Listed>, PublishError> {
+        let directory = format!("{}{directory}", self.bucket.prefix);
+        Ok(self.unprefixed(self.list_sharded(&directory, "listing")?))
+    }
+
+    /// The files of `listed`, named without the prefix of the bucket.
+    fn unprefixed(&self, listed: Vec<Listed>) -> Vec<Listed> {
+        let unprefixed = listed.into_iter().filter_map(|file| {
+            let name = file.name.strip_prefix(&self.bucket.prefix)?.to_owned();
+            Some(Listed { name, ..file })
+        });
+        unprefixed.collect()
+    }
+
+    /// Deletes the file `name` of the bucket, named without the prefix of the bucket. A file the
+    /// bucket does not hold is deleted already.
+    pub fn delete(&self, name: &str) -> Result<(), PublishError> {
+        let name = format!("{}{name}", self.bucket.prefix);
+        self.send_delete(&name, "")
+            .map_err(|e| PublishError::new("delete", e))
     }
 
     /// The name of `key` in the bucket.
@@ -360,9 +393,9 @@ impl S3 {
         }
     }
 
-    /// The names under `prefix` with their sizes, from as many listing requests as it takes.
-    fn list(&self, prefix: &str) -> Result<BTreeMap<String, u64>, String> {
-        let mut names = BTreeMap::new();
+    /// The files under `prefix`, from as many listing requests as it takes.
+    fn list(&self, prefix: &str) -> Result<Vec<Listed>, String> {
+        let mut files = Vec::new();
         let mut token: Option<String> = None;
         loop {
             // The parameters in name order, as the canonical query string has them.
@@ -378,16 +411,16 @@ impl S3 {
             })?;
             let body = success_text("LIST", prefix, reply)?;
             let page = Page::parse(&body).map_err(|e| format!("LIST {prefix}: {e}"))?;
-            names.extend(page.names);
+            files.extend(page.files);
             match page.next {
                 Some(next) => token = Some(next),
-                None => return Ok(names),
+                None => return Ok(files),
             }
         }
     }
 
-    /// Every object of the store in the bucket with its size.
-    fn list_store(&self) -> Result<BTreeMap<String, u64>, PublishError> {
+    /// Every object of the store in the bucket.
+    fn list_store(&self) -> Result<Vec<Listed>, PublishError> {
         let store = format!("{}store", self.bucket.prefix);
         self.list_sharded(&store, "files")
     }
@@ -398,20 +431,20 @@ impl S3 {
         let listed = self.list_sharded(&self.state(directory), "state")?;
         let state = self.state("");
         let names = listed
-            .into_keys()
-            .filter_map(|name| name.strip_prefix(&state).map(str::to_owned));
+            .into_iter()
+            .filter_map(|file| file.name.strip_prefix(&state).map(str::to_owned));
         Ok(names.collect())
     }
 
-    /// Every object under `directory` with its size, where the objects lie in subdirectories named
-    /// by two hexadecimal digits, listed one subdirectory per connection. A failure is an error of
+    /// Every object under `directory`, where the objects lie in subdirectories named by two
+    /// hexadecimal digits, listed one subdirectory per connection. A failure is an error of
     /// `stage`.
     fn list_sharded(
         &self,
         directory: &str,
         stage: &'static str,
-    ) -> Result<BTreeMap<String, u64>, PublishError> {
-        let names = Mutex::new(BTreeMap::new());
+    ) -> Result<Vec<Listed>, PublishError> {
+        let names = Mutex::new(Vec::new());
         each(SHARDS, self.bucket.connections, |shard| {
             let prefix = format!("{directory}/{shard:02x}/");
             let listed = self
@@ -567,7 +600,12 @@ impl S3 {
     /// Aborts the multipart upload `upload` of `name`, so that the bucket drops its parts.
     fn abort_upload(&self, name: &str, upload: &str) -> Result<(), String> {
         let query = format!("uploadId={}", encode_component(upload));
-        let response = self.send("DELETE", name, &query, EMPTY, |url, headers| {
+        self.send_delete(name, &query)
+    }
+
+    /// Sends `DELETE` of `name` with the canonical query string `query`.
+    fn send_delete(&self, name: &str, query: &str) -> Result<(), String> {
+        let response = self.send("DELETE", name, query, EMPTY, |url, headers| {
             signed(self.agent.delete(url), headers).call()
         })?;
         match response.status().as_u16() {
@@ -902,8 +940,8 @@ fn percent_encode(text: &str, keep: impl Fn(u8) -> bool) -> String {
 /// One page of a listing.
 #[derive(Debug, PartialEq, Eq)]
 struct Page {
-    /// The names on the page with their sizes.
-    names: Vec<(String, u64)>,
+    /// The files on the page.
+    files: Vec<Listed>,
     /// The continuation token of the next page, when the listing goes on.
     next: Option<String>,
 }
@@ -918,13 +956,20 @@ impl Page {
         if !complete {
             return Err("the response is not a whole listing of objects".to_owned());
         }
-        let names = elements(xml, "Contents")
+        let files = elements(xml, "Contents")
             .map(|contents| {
                 let name = element(contents, "Key").ok_or("an object has no Key")?;
                 let size = element(contents, "Size")
                     .and_then(|size| size.parse().ok())
                     .ok_or("an object has no Size")?;
-                Ok((unescape(name), size))
+                let modified = element(contents, "LastModified")
+                    .and_then(Utc::parse)
+                    .ok_or("an object has no LastModified")?;
+                Ok(Listed {
+                    name: unescape(name),
+                    size,
+                    modified: modified.time(),
+                })
             })
             .collect::<Result<_, &str>>()?;
         let next = match element(xml, "IsTruncated") {
@@ -933,7 +978,7 @@ impl Page {
             )),
             _ => None,
         };
-        Ok(Self { names, next })
+        Ok(Self { files, next })
     }
 }
 
@@ -1087,15 +1132,22 @@ mod tests {
     #[test]
     fn reads_listing_pages() {
         let xml = "<ListBucketResult><IsTruncated>true</IsTruncated>\
-            <Contents><Key>p/store/ab/a&amp;b.json</Key><Size>12</Size></Contents>\
-            <Contents><Key>p/store/ab/c.png</Key><Size>3</Size></Contents>\
+            <Contents><Key>p/store/ab/a&amp;b.json</Key>\
+            <LastModified>1970-01-01T00:00:01.000Z</LastModified><Size>12</Size></Contents>\
+            <Contents><Key>p/store/ab/c.png</Key>\
+            <LastModified>1970-01-01T00:01:00Z</LastModified><Size>3</Size></Contents>\
             <NextContinuationToken>t+1/=</NextContinuationToken></ListBucketResult>";
+        let file = |name: &str, size, seconds| Listed {
+            name: name.to_owned(),
+            size,
+            modified: UNIX_EPOCH + Duration::from_secs(seconds),
+        };
         assert_eq!(
             Page::parse(xml),
             Ok(Page {
-                names: vec![
-                    ("p/store/ab/a&b.json".to_owned(), 12),
-                    ("p/store/ab/c.png".to_owned(), 3)
+                files: vec![
+                    file("p/store/ab/a&b.json", 12, 1),
+                    file("p/store/ab/c.png", 3, 60)
                 ],
                 next: Some("t+1/=".to_owned()),
             })
@@ -1104,11 +1156,14 @@ mod tests {
         assert_eq!(
             Page::parse(last),
             Ok(Page {
-                names: Vec::new(),
+                files: Vec::new(),
                 next: None
             })
         );
         assert!(Page::parse("<Contents><Key>x</Key></Contents>").is_err());
+        let undated = "<ListBucketResult><Contents><Key>x</Key><Size>1</Size></Contents>\
+            </ListBucketResult>";
+        assert!(Page::parse(undated).is_err());
         let buckets = "<ListAllMyBucketsResult><Buckets></Buckets></ListAllMyBucketsResult>";
         assert!(Page::parse(buckets).is_err());
         assert!(Page::parse(&xml[..xml.len() - 20]).is_err());

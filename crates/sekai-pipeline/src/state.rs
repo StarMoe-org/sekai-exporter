@@ -38,6 +38,19 @@ const VERSION: u32 = 2;
 /// rows on average.
 const AVERAGE: u32 = 256;
 
+/// The directory of the roots of the regions among the state files.
+pub const ROOTS: &str = "regions";
+
+/// The directory of the chunks of the states of every region among the state files.
+pub const CHUNKS: &str = "chunks";
+
+/// The region whose root is the state file `file`, when it is one.
+pub fn root_region(file: &str) -> Option<&str> {
+    let name = file.strip_prefix(ROOTS)?.strip_prefix('/')?;
+    name.strip_suffix(".json")
+        .filter(|region| !region.contains('/'))
+}
+
 /// Where the state is kept, as files named by paths.
 pub trait StateFiles: Sync {
     /// The bytes of the file `name`, or `None` when there is none.
@@ -247,6 +260,11 @@ impl Root {
         let chunks = tables.into_iter().flatten();
         chunks.map(|chunk| chunk.sha256.as_str()).collect()
     }
+
+    /// The state file of every chunk the root names.
+    pub fn chunk_files(&self) -> impl Iterator<Item = String> {
+        self.chunks().into_iter().map(chunk_file)
+    }
 }
 
 /// What writing a state did.
@@ -259,11 +277,11 @@ pub struct Written {
 }
 
 fn root_file(region: &str) -> String {
-    format!("regions/{region}.json")
+    format!("{ROOTS}/{region}.json")
 }
 
 fn chunk_file(sha256: &str) -> String {
-    format!("chunks/{}/{sha256}.json.gz", &sha256[..2])
+    format!("{CHUNKS}/{}/{sha256}.json.gz", &sha256[..2])
 }
 
 fn invalid(message: String) -> io::Error {

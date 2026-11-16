@@ -1,8 +1,9 @@
 //! `sekai-exporter update` of a `nuverse` region from a local CDN whose current version changes
 //! between runs: in the second version a bundle has moved, and in the third another declares
-//! other content, while a third bundle stays the same.
+//! other content, while a third bundle stays the same. `sekai-exporter gc` of the sites these
+//! updates keep.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -93,6 +94,24 @@ impl Scratch {
     /// Runs `update` of the region into the output directory `output`, publishing to `bucket`
     /// when there is one, and returns what it printed.
     fn update(&self, output: &str, bucket: Option<&Server>) -> String {
+        self.run(&["update", "r"], output, bucket, &[])
+    }
+
+    /// Runs `gc` of the site of the output directory `output`, or of `bucket` when there is one,
+    /// with `options`, and returns what it printed.
+    fn gc(&self, output: &str, bucket: Option<&Server>, options: &[&str]) -> String {
+        self.run(&["gc"], output, bucket, options)
+    }
+
+    /// Runs the command `command` with the output directory `output`, the configuration of the
+    /// region and of `bucket` when there is one, and `options`, and returns what it printed.
+    fn run(
+        &self,
+        command: &[&str],
+        output: &str,
+        bucket: Option<&Server>,
+        options: &[&str],
+    ) -> String {
         let mut config = json!({ "regions": { "r": self.cdn.region() } });
         if let Some(bucket) = bucket {
             config["publish"] = json!({ "s3": bucket.section(PREFIX) });
@@ -100,14 +119,14 @@ impl Scratch {
         let config_file = self.root.join(format!("{output}.json"));
         std::fs::write(&config_file, config.to_string()).unwrap();
         let run = Command::new(env!("CARGO_BIN_EXE_sekai-exporter"))
-            .arg("update")
-            .arg("r")
+            .args(command)
             .arg(self.root.join(output))
             .arg("--config")
             .arg(config_file)
             .arg("--secrets")
             .arg(self.root.join("secrets"))
             .args(["--threads", "2"])
+            .args(options)
             .output()
             .unwrap();
         let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
@@ -149,11 +168,138 @@ fn each_update_publishes_what_an_update_from_nothing_publishes() {
     }
 }
 
+/// Files that nothing a site keeps refers to, by their names under the site: an asset document and
+/// an audio file of the store, a derivation record that names the document, and a state chunk that
+/// no region names.
+fn unreferred() -> [(String, Vec<u8>); 4] {
+    let name = |digits: &str| digits.repeat(32);
+    let document = format!("{}.json", name("ab"));
+    let record = json!({ "document": { "key": document, "size": 2 } });
+    [
+        (format!("store/ab/{document}"), b"{}".to_vec()),
+        (format!("store/cd/{}.mp3", name("cd")), b"audio".to_vec()),
+        (
+            format!("state/records/derivations/ef/{}.json", name("ef")),
+            record.to_string().into_bytes(),
+        ),
+        (
+            format!("state/chunks/12/{}.json.gz", name("12")),
+            b"chunk".to_vec(),
+        ),
+    ]
+}
+
+/// What the report `printed` of `gc` finds to be garbage among the files of `kind`.
+fn garbage(printed: &str, kind: &str) -> Option<String> {
+    let line = printed
+        .lines()
+        .find(|line| line.starts_with(&format!("{kind}: ")))?;
+    Some(line.split_once("; ")?.1.to_owned())
+}
+
+/// The report of `files` garbage files of `bytes` bytes.
+fn reported(files: usize, bytes: usize) -> Option<String> {
+    Some(format!("garbage {files} files, {bytes} bytes"))
+}
+
+/// Asserts that the report `printed` of `gc` finds the files of [`unreferred`], and nothing else,
+/// to be garbage.
+fn finds_the_unreferred(printed: &str) {
+    let sizes: Vec<usize> = unreferred().iter().map(|(_, bytes)| bytes.len()).collect();
+    assert_eq!(
+        garbage(printed, "records/units"),
+        reported(0, 0),
+        "{printed}"
+    );
+    let derivations = garbage(printed, "records/derivations");
+    assert_eq!(derivations, reported(1, sizes[2]), "{printed}");
+    assert_eq!(
+        garbage(printed, "chunks"),
+        reported(1, sizes[3]),
+        "{printed}"
+    );
+    let store = garbage(printed, "store");
+    assert_eq!(store, reported(2, sizes[0] + sizes[1]), "{printed}");
+    let audio = format!("  .mp3: 1 files, {} bytes", sizes[1]);
+    assert!(printed.lines().any(|line| line == audio), "{printed}");
+}
+
+/// Asserts that the report `printed` of `gc` finds no garbage.
+fn finds_no_garbage(printed: &str) {
+    for kind in ["records/units", "records/derivations", "chunks", "store"] {
+        assert_eq!(garbage(printed, kind), reported(0, 0), "{printed}");
+    }
+}
+
+/// Collecting the garbage of the output directory.
+mod gc {
+    use super::*;
+
+    /// The files under `store/`, `state/` and `published/` of the output directory `output`.
+    fn site_files(output: &Path) -> BTreeSet<String> {
+        fn walk(root: &Path, directory: &Path, files: &mut BTreeSet<String>) {
+            let Ok(entries) = std::fs::read_dir(directory) else {
+                return;
+            };
+            for entry in entries {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(root, &path, files);
+                } else {
+                    let name = path.strip_prefix(root).unwrap().to_string_lossy();
+                    files.insert(name.replace('\\', "/"));
+                }
+            }
+        }
+        let mut files = BTreeSet::new();
+        for directory in ["store", "state", "published"] {
+            walk(output, &output.join(directory), &mut files);
+        }
+        files
+    }
+
+    #[test]
+    fn gc_deletes_only_what_nothing_kept_refers_to() {
+        let scratch = Scratch::new("gc-local");
+        scratch.update("site", None);
+        let site = scratch.root.join("site");
+        let kept = site_files(&site);
+        finds_no_garbage(&scratch.gc("site", None, &["--grace", "0s"]));
+
+        for (name, bytes) in unreferred() {
+            let path = site.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let planted = site_files(&site);
+        // Files written within the grace period are kept.
+        finds_no_garbage(&scratch.gc("site", None, &[]));
+        let listed = scratch.gc("site", None, &["--grace", "0s"]);
+        finds_the_unreferred(&listed);
+        assert!(listed.contains("nothing deleted"), "{listed}");
+        assert_eq!(site_files(&site), planted);
+
+        scratch.gc("site", None, &["--grace", "0s", "--delete"]);
+        assert_eq!(site_files(&site), kept);
+
+        // A later update takes the records and the state that gc kept.
+        scratch.cdn.serve_version("2");
+        let increment = scratch.update("site", None);
+        assert!(increment.contains("units 3 reused 1"), "{increment}");
+        scratch.update("fresh", None);
+        for view in VIEWS {
+            assert_eq!(
+                contents(scratch.pointer("site", view)),
+                contents(scratch.pointer("fresh", view)),
+                "{view}"
+            );
+        }
+    }
+}
+
 /// Updates that publish to a bucket.
 #[cfg(feature = "s3")]
 mod bucket {
-    use std::collections::BTreeSet;
-
     use sekai_testkit::s3::{Logged, Operation};
 
     use super::*;
@@ -271,5 +417,45 @@ mod bucket {
             .filter(|r| !matches!(r.operation, Operation::Get | Operation::Put))
             .collect();
         assert!(other_operations.is_empty(), "{other_operations:?}");
+    }
+
+    #[test]
+    fn gc_deletes_from_the_bucket_only_what_nothing_kept_refers_to() {
+        let scratch = Scratch::new("gc-bucket");
+        let bucket = Server::start();
+        scratch.update("first", Some(&bucket));
+        let kept = held(&bucket, PREFIX);
+        for (name, bytes) in unreferred() {
+            bucket.insert(&format!("{PREFIX}{name}"), bytes);
+        }
+        let planted = held(&bucket, PREFIX);
+
+        // The bucket lists every object as written long ago, so the default grace period keeps
+        // none of them. A machine with an empty output reads what it needs from the bucket.
+        let (listed, requests) = answered(&bucket, || scratch.gc("listing", Some(&bucket), &[]));
+        finds_the_unreferred(&listed);
+        assert_eq!(held(&bucket, PREFIX), planted);
+        let changes = requests
+            .iter()
+            .filter(|r| matches!(r.operation, Operation::Put | Operation::Delete));
+        assert_eq!(changes.count(), 0, "{requests:?}");
+
+        let (_, requests) = answered(&bucket, || {
+            scratch.gc("deleting", Some(&bucket), &["--delete"])
+        });
+        assert_eq!(held(&bucket, PREFIX), kept);
+        let deletes = requests.iter().filter(|r| r.operation == Operation::Delete);
+        assert_eq!(deletes.count(), unreferred().len());
+        finds_no_garbage(&scratch.gc("again", Some(&bucket), &[]));
+
+        scratch.cdn.serve_version("2");
+        let second = scratch.update("second", Some(&bucket));
+        assert!(second.contains("units 3 reused 1"), "{second}");
+        let fresh = Server::start();
+        scratch.update("fresh", Some(&fresh));
+        for view in VIEWS {
+            let (updated, fresh) = (pointer(&bucket, view), pointer(&fresh, view));
+            assert_eq!(updated.map(contents), fresh.map(contents), "{view}");
+        }
     }
 }

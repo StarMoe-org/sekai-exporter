@@ -108,6 +108,7 @@ fn rows_read_back() {
     assert_eq!(catalog.derivation(&[9; 32]).unwrap(), None);
     let names: Vec<_> = catalog.assets("v1").unwrap();
     assert_eq!(names, [row("a", None), row("b", Some("unsupported"))]);
+    assert_eq!(catalog.bundles().unwrap(), std::slice::from_ref(&bundle));
     assert_eq!(catalog.bundle("jp", "x").unwrap(), Some(bundle));
     assert_eq!(catalog.bundle("cn", "x").unwrap(), None);
     assert_eq!(catalog.version("jp", "v1").unwrap().as_deref(), Some("{}"));

@@ -16,6 +16,7 @@ use crate::error::{Error, Result};
 use crate::layout::Layout;
 use crate::read::{Field, ReferenceTypes, Visitor, read_object};
 use crate::serialized::{External, ReferencedName, SerializedFile, SerializedType};
+use crate::source;
 use crate::source::ByteSource;
 use crate::typetree::TypeTree;
 use crate::value::{Value, read_value};
@@ -497,13 +498,11 @@ pub fn index_resources(bundle: &Bundle, cache: &dyn BlockCache) -> Vec<ResourceF
     let resources = entries.filter(|(_, entry)| !entry.is_serialized());
     resources
         .filter_map(|(i, entry)| {
-            let size = usize::try_from(entry.size).ok()?;
-            let source = bundle.entry(i, cache);
-            let bytes = source.read(0, size).ok()?;
+            let sha256 = source::sha256(&bundle.entry(i, cache), 0, entry.size).ok()?;
             Some(ResourceFile {
                 path: entry.path.clone(),
                 size: entry.size,
-                sha256: Sha256::digest(&*bytes).into(),
+                sha256,
             })
         })
         .collect()

@@ -226,7 +226,15 @@ fn finds_the_unreferred(printed: &str) {
 
 /// Asserts that the report `printed` of `gc` finds no garbage.
 fn finds_no_garbage(printed: &str) {
-    for kind in ["records/units", "records/derivations", "chunks", "store"] {
+    let kinds = [
+        "records/units",
+        "records/derivations",
+        "chunks",
+        "store",
+        "inputs",
+        "incoming",
+    ];
+    for kind in kinds {
         assert_eq!(garbage(printed, kind), reported(0, 0), "{printed}");
     }
 }
@@ -237,6 +245,11 @@ mod gc {
 
     /// The files under `store/`, `state/` and `published/` of the output directory `output`.
     fn site_files(output: &Path) -> BTreeSet<String> {
+        files_under(output, &["store", "state", "published"])
+    }
+
+    /// The files under `directories` of the output directory `output`.
+    fn files_under(output: &Path, directories: &[&str]) -> BTreeSet<String> {
         fn walk(root: &Path, directory: &Path, files: &mut BTreeSet<String>) {
             let Ok(entries) = std::fs::read_dir(directory) else {
                 return;
@@ -252,10 +265,36 @@ mod gc {
             }
         }
         let mut files = BTreeSet::new();
-        for directory in ["store", "state", "published"] {
+        for directory in directories {
             walk(output, &output.join(directory), &mut files);
         }
         files
+    }
+
+    #[test]
+    fn gc_deletes_inputs_no_region_fetched_last_and_partial_writes() {
+        let scratch = Scratch::new("gc-inputs");
+        scratch.update("site", None);
+        let site = scratch.root.join("site");
+        let fetched = files_under(&site, &["inputs"]);
+        assert!(!fetched.is_empty());
+        finds_no_garbage(&scratch.gc("site", None, &["--grace", "0s"]));
+
+        let unfetched = format!("inputs/ab/{}.bundle", "ab".repeat(32));
+        let partial = ["inputs/incoming/1-0.tmp", "store/incoming/1-1.tmp"];
+        for name in partial.iter().copied().chain([unfetched.as_str()]) {
+            let path = site.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"left").unwrap();
+        }
+        finds_no_garbage(&scratch.gc("site", None, &[]));
+        let listed = scratch.gc("site", None, &["--grace", "0s"]);
+        assert_eq!(garbage(&listed, "inputs"), reported(1, 4), "{listed}");
+        assert_eq!(garbage(&listed, "incoming"), reported(2, 8), "{listed}");
+
+        scratch.gc("site", None, &["--grace", "0s", "--delete"]);
+        assert_eq!(files_under(&site, &["inputs"]), fetched);
+        assert!(!site.join(partial[1]).exists());
     }
 
     #[test]

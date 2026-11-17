@@ -4,13 +4,16 @@
 //! What is kept: every pointer under `published/`, every object a pointer refers to, the state of
 //! each region with the documents of the assets it built from tables, and the records whose
 //! objects are all kept. Files written within the grace period are kept too, with the objects the
-//! records among them name. Everything else under `store/` and `state/` is garbage.
+//! records among them name. Everything else under `store/` and `state/` is garbage. In the output
+//! directory, the bundles of the input store that no region fetched last, and the partial writes
+//! that interrupted runs left in `incoming/`, are garbage too.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use sekai_catalog::db::Catalog;
 use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects};
 use sekai_format::publication::Pointer;
 use sekai_pipeline::parallel;
@@ -113,18 +116,48 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         requests: site.requests(options.threads),
     };
     let garbage = collector.garbage()?;
-    for kind in &garbage {
+    let output = Site::local(&options.output);
+    let leftovers = collector.leftovers(&output, fetched(&options.output, &store).as_ref())?;
+    for kind in garbage.iter().chain(&leftovers) {
         kind.report();
     }
     if options.delete {
         for kind in &garbage {
-            collector.delete(kind)?;
+            collector.delete(&site, kind)?;
+        }
+        for kind in &leftovers {
+            collector.delete(&output, kind)?;
         }
         println!("deleted");
     } else {
         println!("nothing deleted; --delete deletes the files above");
     }
     Ok(true)
+}
+
+/// The SHA-256 of the bundle each region fetched last, as the catalog of the output directory
+/// `output` records them. `None` when it records no fetch or cannot be read, which leaves the
+/// input store alone.
+fn fetched(output: &Path, store: &LocalStore) -> Option<HashSet<String>> {
+    let database = output.join("catalog.redb");
+    if !database.is_file() {
+        return None;
+    }
+    let rows = Catalog::open_or_rebuild(&database, store).and_then(|catalog| catalog.bundles());
+    match rows {
+        Ok(rows) if !rows.is_empty() => Some(rows.into_iter().map(|row| row.sha256).collect()),
+        Ok(_) => None,
+        Err(e) => {
+            eprintln!("inputs: the catalog cannot be read, so no bundle is garbage: {e}");
+            None
+        }
+    }
+}
+
+/// The SHA-256 of the bundle that the file `file` of the input store holds, from its name.
+fn input_hash(file: &Listed) -> Option<&str> {
+    let (hash, _) = file.name.rsplit('/').next()?.split_once('.')?;
+    Some(hash)
 }
 
 /// Finds the garbage of a site.
@@ -229,6 +262,30 @@ impl Collector<'_> {
         });
         let others = [Kind::of(CHUNKS, state_chunks), Kind::of("store", objects)];
         Ok(records.into_iter().chain(others).collect())
+    }
+
+    /// The files that runs leave in the output directory `output`: the bundles of the input store
+    /// that `fetched` does not hold, with no bundle garbage without it, and the partial writes of
+    /// interrupted runs.
+    fn leftovers(
+        &self,
+        output: &Site<'_>,
+        fetched: Option<&HashSet<String>>,
+    ) -> Result<[Kind; 2], String> {
+        let inputs = output.list_sharded("inputs")?.into_iter().map(|file| {
+            let unfetched = fetched
+                .zip(input_hash(&file))
+                .is_some_and(|(fetched, hash)| !fetched.contains(hash));
+            let garbage = self.old(&file) && unfetched;
+            (file, garbage)
+        });
+        let mut partial = output.list("inputs/incoming")?;
+        partial.extend(output.list("store/incoming")?);
+        let partial = partial.into_iter().map(|file| {
+            let garbage = self.old(&file);
+            (file, garbage)
+        });
+        Ok([Kind::of("inputs", inputs), Kind::of("incoming", partial)])
     }
 
     /// Whether `file` was written before the grace period.
@@ -348,11 +405,11 @@ impl Collector<'_> {
         record_objects(name, &bytes).map_err(failed)
     }
 
-    /// Deletes the garbage of `kind`.
-    fn delete(&self, kind: &Kind) -> Result<(), String> {
+    /// Deletes the garbage of `kind`, which lies at `site`.
+    fn delete(&self, site: &Site<'_>, kind: &Kind) -> Result<(), String> {
         let garbage = &kind.garbage;
         let deleted = parallel(garbage.len(), self.requests, |i| {
-            self.site.delete(&garbage[i].name)
+            site.delete(&garbage[i].name)
         });
         deleted.into_iter().collect()
     }

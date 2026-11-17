@@ -124,6 +124,8 @@ A run adds objects and state files and deletes none: objects that no publication
 
 Every other object of the store, state chunk and record is garbage. `gc` lists the garbage of each kind (unit records, derivation records, state chunks and objects, the objects also by extension) with counts and sizes, and deletes nothing without `--delete`. With `--delete` the records go first, then the state chunks and the objects, so an interrupted collection leaves no record that names a deleted object. A run that took such a record would publish a pointer to an object the site lacks, so `gc` runs while no update runs on the site. In a bucket, `gc` reads the times of the listing (`LastModified`), and `--delete` needs permission to delete objects under the prefix.
 
+`gc` also collects what runs leave in `<output>` itself, wherever the site is. A bundle of the [input store](sources.md#the-input-store) is garbage when no region fetched it last, as the catalog of `<output>` records, and a file in `incoming/` of the input store or of the store is a write that an interrupted run left partial. Both are garbage once written before the grace period, and `--delete` deletes them after the files of the site. Without a catalog that records a fetch, or when the catalog cannot be read, no bundle of the input store is garbage. A bundle that a later run needs again is downloaded again.
+
 Pointers are never deleted, so every published version stays reachable. A version published again under the same name replaces the pointer of that version, and the objects that only the earlier publication referred to become garbage.
 
 ## Evaluation and publishing together

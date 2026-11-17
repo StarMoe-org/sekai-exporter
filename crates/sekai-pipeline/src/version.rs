@@ -10,11 +10,11 @@ use sekai_unity::index::{
     BundleIndex, FileLayouts, ObjectIndex, OpenFile, Resolved, ResourceFile, VersionIndex,
     index_file, index_resources,
 };
+use sekai_unity::source;
 use sekai_unity::{
     BlockCache, Bundle, ByteSource, ClassLayouts, Field, Flights, NoClasses, Scalar,
     SerializedFile, Visitor, open_files,
 };
-use sha2::{Digest, Sha256};
 
 use crate::index_record::{IndexRecord, StreamDigest};
 use crate::isolate::{PANICKED, isolated};
@@ -113,10 +113,7 @@ impl Opened {
         cache: &dyn BlockCache,
     ) -> Option<[u8; 32]> {
         let entry = self.bundle.entries().iter().position(|e| e.path == file)?;
-        let len = usize::try_from(size).ok()?;
-        let source = self.bundle.entry(entry, cache);
-        let chunk = source.read(offset, len).ok()?;
-        Some(Sha256::digest(&*chunk).into())
+        source::sha256(&self.bundle.entry(entry, cache), offset, size).ok()
     }
 }
 
@@ -744,6 +741,8 @@ mod tests {
     use std::path::Path;
 
     use sekai_unity::NoBlockCache;
+
+    use sha2::{Digest, Sha256};
 
     use super::*;
 

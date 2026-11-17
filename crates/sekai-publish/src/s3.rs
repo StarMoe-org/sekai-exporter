@@ -69,6 +69,9 @@ pub struct Bucket {
     pub prefix: String,
     /// The number of requests in flight at once.
     pub connections: usize,
+    /// The number of listing requests in flight at once, which a service may answer more slowly
+    /// than others. At most [`Bucket::connections`] are in flight all the same.
+    pub listings: usize,
 }
 
 /// The access key of a bucket.
@@ -140,7 +143,7 @@ impl S3 {
         if !(bucket.prefix.is_empty() || bucket.prefix.ends_with('/')) {
             return Err(invalid("the prefix does not end in /"));
         }
-        if bucket.connections == 0 {
+        if bucket.connections == 0 || bucket.listings == 0 {
             return Err(invalid("there are no connections"));
         }
         let path = path.trim_end_matches('/');
@@ -449,7 +452,7 @@ impl S3 {
         stage: &'static str,
     ) -> Result<Vec<Listed>, PublishError> {
         let names = Mutex::new(Vec::new());
-        each(SHARDS, self.bucket.connections, |shard| {
+        each(SHARDS, self.bucket.listings, |shard| {
             let prefix = format!("{directory}/{shard:02x}/");
             let listed = self
                 .list(&prefix)
@@ -1245,6 +1248,7 @@ mod tests {
             region: "us-east-1".to_owned(),
             prefix: prefix.to_owned(),
             connections: 1,
+            listings: 1,
         };
         let credentials = Credentials {
             access_key_id: "a".to_owned(),

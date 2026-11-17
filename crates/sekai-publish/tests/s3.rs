@@ -21,6 +21,7 @@ fn client(server: &Server, secret: &str) -> S3 {
             region: REGION.to_owned(),
             prefix: "out/".to_owned(),
             connections: 3,
+            listings: 3,
         },
         Credentials {
             access_key_id: ACCESS_KEY.to_owned(),

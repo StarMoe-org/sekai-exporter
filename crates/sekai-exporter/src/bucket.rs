@@ -64,17 +64,20 @@ impl Bucket {
             access_key_id: secret(&required("secrets.access_key_id")?, secrets)?,
             secret_access_key: secret(&required("secrets.secret_access_key")?, secrets)?,
         };
+        let count = |key: &str, default: usize| -> Result<usize, lexopt::Error> {
+            let Some(value) = section.get(key) else {
+                return Ok(default);
+            };
+            let count = value.as_u64().and_then(|n| usize::try_from(n).ok());
+            Ok(count.ok_or_else(|| format!("publish.s3.{key} is not a number"))?)
+        };
+        let connections = count("connections", 8)?;
         let bucket = s3::Bucket {
             endpoint: required("endpoint")?,
             region: required("region")?,
             prefix: text("prefix")?.unwrap_or_default(),
-            connections: match section.get("connections") {
-                None => 8,
-                Some(value) => value
-                    .as_u64()
-                    .and_then(|n| usize::try_from(n).ok())
-                    .ok_or("publish.s3.connections is not a number")?,
-            },
+            connections,
+            listings: count("listings", connections)?,
         };
         let layout = match text("layout")?.as_deref() {
             None | Some("index") => Layout::Index,

@@ -134,14 +134,21 @@ impl OpenFiles {
     }
 
     /// Keeps `file` open as the file at `path`, closing the one used longest ago when
-    /// [`OPEN_FILES`] are open. A closed file stays readable by the reads that hold it.
-    fn keep(&mut self, path: &Path, file: Arc<File>) {
+    /// [`OPEN_FILES`] are open, and returns the handle kept: the one another caller kept first,
+    /// if it opened `path` at the same time. A closed file stays readable by the reads that hold
+    /// it.
+    fn keep(&mut self, path: &Path, file: Arc<File>) -> Arc<File> {
+        if let Some(kept) = self.get(path) {
+            return kept;
+        }
         if self.by_path.len() >= OPEN_FILES
             && let Some(oldest) = self.oldest()
         {
             self.by_path.remove(&oldest);
         }
-        self.by_path.insert(path.to_owned(), (file, self.clock));
+        self.by_path
+            .insert(path.to_owned(), (file.clone(), self.clock));
+        file
     }
 
     fn oldest(&self) -> Option<PathBuf> {
@@ -158,8 +165,7 @@ fn open(path: &Path) -> io::Result<Arc<File>> {
         return Ok(file);
     }
     let file = Arc::new(File::open(path)?);
-    lock().keep(path, file.clone());
-    Ok(file)
+    Ok(lock().keep(path, file))
 }
 
 #[cfg(unix)]
@@ -264,5 +270,20 @@ mod tests {
         }
         assert!(sources[0].read(2, 3).is_err());
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_file_kept_twice_keeps_the_first_handle_and_closes_nothing() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let open = || Arc::new(File::open(&path).unwrap());
+        let mut files = OpenFiles::default();
+        let other = open();
+        for i in 1..OPEN_FILES {
+            files.keep(Path::new(&i.to_string()), other.clone());
+        }
+        let first = files.keep(&path, open());
+        let second = files.keep(&path, open());
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(files.by_path.len(), OPEN_FILES);
     }
 }

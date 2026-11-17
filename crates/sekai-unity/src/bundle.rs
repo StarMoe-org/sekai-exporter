@@ -174,12 +174,14 @@ impl Bundle {
             flags,
         };
 
-        let info_offset = if flags & BLOCKS_INFO_AT_END != 0 {
-            total
+        let (info_offset, blocks_end) = if flags & BLOCKS_INFO_AT_END != 0 {
+            let offset = total
                 .checked_sub(compressed_info_size.into())
-                .ok_or_else(|| Error::malformed("UnityFS header", "directory outside the file"))?
+                .filter(|&offset| offset >= after_header)
+                .ok_or_else(|| Error::malformed("UnityFS header", "directory outside the file"))?;
+            (offset, offset)
         } else {
-            after_header
+            (after_header, total)
         };
         let stored_info = source.read(info_offset, compressed_info_size as usize)?;
         let info = decompress(
@@ -228,13 +230,17 @@ impl Bundle {
                 stored_offset,
                 stream_offset,
             });
-            stored_offset += u64::from(info.compressed_size);
-            stream_offset += u64::from(info.uncompressed_size);
+            stored_offset = stored_offset
+                .checked_add(u64::from(info.compressed_size))
+                .ok_or_else(|| Error::malformed("UnityFS directory", "block offsets overflow"))?;
+            stream_offset = stream_offset
+                .checked_add(u64::from(info.uncompressed_size))
+                .ok_or_else(|| Error::malformed("UnityFS directory", "stream offsets overflow"))?;
         }
-        if stored_offset > total {
+        if stored_offset > blocks_end {
             return Err(Error::malformed(
                 "UnityFS directory",
-                format!("blocks end at {stored_offset}, the file has {total} bytes"),
+                format!("blocks end at {stored_offset}, the data ends at {blocks_end}"),
             ));
         }
         let entry_count = r.i32()?;
@@ -519,5 +525,47 @@ fn decompress(
             }
             Ok(out)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tail_bundle(data: &[u8], block_size: u32, compressed_info_size: u32) -> Vec<u8> {
+        let mut info = vec![0u8; DIRECTORY_HASH];
+        info.extend_from_slice(&1i32.to_be_bytes());
+        info.extend_from_slice(&block_size.to_be_bytes());
+        info.extend_from_slice(&block_size.to_be_bytes());
+        info.extend_from_slice(&0u16.to_be_bytes());
+        info.extend_from_slice(&0i32.to_be_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(SIGNATURE);
+        out.push(0);
+        out.extend_from_slice(&6u32.to_be_bytes());
+        out.extend_from_slice(&[0, 0]);
+        let size_at = out.len();
+        out.extend_from_slice(&0i64.to_be_bytes());
+        out.extend_from_slice(&compressed_info_size.to_be_bytes());
+        out.extend_from_slice(&(info.len() as u32).to_be_bytes());
+        out.extend_from_slice(&BLOCKS_INFO_AT_END.to_be_bytes());
+        out.extend_from_slice(data);
+        out.extend_from_slice(&info);
+        let total = out.len() as i64;
+        out[size_at..size_at + 8].copy_from_slice(&total.to_be_bytes());
+        out
+    }
+
+    #[test]
+    fn blocks_may_not_reach_into_a_trailing_directory_or_header() {
+        let valid = tail_bundle(b"abcd", 4, 34);
+        assert!(Bundle::open(Arc::new(valid), [0; 32]).is_ok());
+
+        let into_directory = tail_bundle(b"abcd", 8, 34);
+        assert!(Bundle::open(Arc::new(into_directory), [0; 32]).is_err());
+
+        let into_header = tail_bundle(b"", 0, 40);
+        assert!(Bundle::open(Arc::new(into_header), [0; 32]).is_err());
     }
 }

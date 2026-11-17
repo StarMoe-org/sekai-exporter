@@ -12,6 +12,8 @@ use crate::tpk;
 const FINAL_RELEASE: u64 = 3;
 /// The release type of a version with a release type that has no number.
 const UNKNOWN_RELEASE: u64 = 0xFF;
+/// The most nodes a class layout may expand to before a cyclic or runaway table is rejected.
+const MAX_TREE_NODES: usize = 65_536;
 
 /// Type trees of engine classes by class ID and Unity version.
 #[derive(Debug)]
@@ -94,6 +96,9 @@ impl ClassLayouts for VersionTable {
         let mut nodes = Vec::new();
         let mut pending = vec![(self.release_root(class_id, version)?, 0u8)];
         while let Some((id, level)) = pending.pop() {
+            if nodes.len() >= MAX_TREE_NODES {
+                return None;
+            }
             let node = self.nodes.get(usize::from(id))?;
             let index = i32::try_from(nodes.len()).ok()?;
             nodes.push(self.tree_node(node, level, index)?);

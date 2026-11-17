@@ -55,7 +55,8 @@ use views::Advance;
 const LIMIT: Option<u64> = None;
 
 struct Options {
-    region: String,
+    /// The regions the run updates, one after another.
+    regions: Vec<String>,
     output: PathBuf,
     config: PathBuf,
     secrets: Option<PathBuf>,
@@ -75,20 +76,36 @@ struct Options {
 }
 
 impl Options {
-    /// The name the state of the run is kept under: the region, or `<region>-client` for its
+    /// The update of each region, in the order given.
+    fn runs(&self) -> impl Iterator<Item = Run<'_>> {
+        self.regions.iter().map(|region| Run {
+            options: self,
+            region,
+        })
+    }
+}
+
+/// The update of one region with the options of the run.
+struct Run<'o> {
+    options: &'o Options,
+    region: &'o str,
+}
+
+impl Run<'_> {
+    /// The name the state of the region is kept under: the region, or `<region>-client` for its
     /// client package, so that the two never share a state.
     fn state_key(&self) -> String {
-        if self.client {
+        if self.options.client {
             format!("{}-client", self.region)
         } else {
-            self.region.clone()
+            self.region.to_owned()
         }
     }
 
-    /// The targets the run publishes, the one in the canonical layout first.
+    /// The targets the update publishes, the one in the canonical layout first.
     fn targets(&self) -> Vec<String> {
-        let region = &self.region;
-        if self.client {
+        let region = self.region;
+        if self.options.client {
             vec![client_target(region)]
         } else {
             vec![canonical_target(region), storage_target(region)]
@@ -128,9 +145,12 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             _ => return Err(arg.unexpected()),
         }
     }
-    let [region, output]: [OsString; 2] = positional
-        .try_into()
-        .map_err(|_| lexopt::Error::from("expected <region> and <output>"))?;
+    let output = positional.pop().filter(|_| !positional.is_empty());
+    let output = output.ok_or("expected <region>... and <output>")?;
+    let regions = positional;
+    if regions.len() > 1 && !only.is_empty() {
+        return Err("--only selects the bundles of one region".into());
+    }
     if verify && !only.is_empty() {
         return Err("--verify checks a bucket, and a selection is not sent to one".into());
     }
@@ -146,8 +166,9 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     if client && rebuild_tables {
         return Err("--rebuild-tables builds tables, and a client package has none".into());
     }
+    let regions = regions.into_iter().map(OsString::string);
     Ok(Options {
-        region: region.string()?,
+        regions: regions.collect::<Result<_, _>>()?,
         output: PathBuf::from(output),
         config: config.ok_or("--config is required")?,
         secrets,
@@ -281,12 +302,15 @@ fn fetch_and_evaluate(
     })
 }
 
-/// The text of the configuration, and the region `options.region` it describes.
-fn configuration(options: &Options) -> Result<(String, Region), String> {
-    let config = std::fs::read_to_string(&options.config)
-        .map_err(|e| format!("{}: {e}", options.config.display()))?;
-    let region = Region::load(&options.region, &config).map_err(|e| e.to_string())?;
-    Ok((config, region))
+/// The text of the configuration.
+fn configuration(options: &Options) -> Result<String, String> {
+    std::fs::read_to_string(&options.config)
+        .map_err(|e| format!("{}: {e}", options.config.display()))
+}
+
+/// The region of `run` as the configuration `config` describes it.
+fn region_of(run: &Run<'_>, config: &str) -> Result<Region, String> {
+    Region::load(run.region, config).map_err(|e| e.to_string())
 }
 
 /// The tables of `region`, when its configuration names a source for them and the run publishes
@@ -306,13 +330,13 @@ pub(crate) struct Supply {
     pub(crate) classes: Box<dyn ClassLayouts>,
 }
 
-/// The supply of the run: the client package of `region` with `--client`, and otherwise its
+/// The supply of `run`: the client package of `region` with `--client`, and otherwise its
 /// distribution source, whose bundles carry their layouts.
-fn open_source(options: &Options, region: Region, secrets: &Secrets) -> Result<Supply, String> {
-    if options.client {
+fn open_source(run: &Run<'_>, region: Region, secrets: &Secrets) -> Result<Supply, String> {
+    if run.options.client {
         let package = region
             .package
-            .ok_or_else(|| format!("the region {} has no package", options.region))?;
+            .ok_or_else(|| format!("the region {} has no package", run.region))?;
         return crate::client::update_source(&package);
     }
     let source = cdn::open(region, secrets).map_err(|e| e.to_string())?;
@@ -364,22 +388,33 @@ fn current_identity(
     Ok(identity)
 }
 
-/// Prints whether the content of the current version differs from the last one recorded: in the
-/// bucket of the configuration when it names one, and otherwise in `options.output`. Returns
-/// whether it is unchanged. Nothing is downloaded or written.
+/// Prints for each region whether the content of its current version differs from the last one
+/// recorded: in the bucket of the configuration when it names one, and otherwise in
+/// `options.output`. Returns whether every one is unchanged. Nothing is downloaded or written.
 fn check(options: &Options) -> Result<bool, lexopt::Error> {
-    let key = options.state_key();
-    let name = key.as_str();
-    let (config, region) = configuration(options)?;
+    let config = configuration(options)?;
     let bucket = Bucket::open(&config, options.secrets.as_deref())?;
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
+    let mut unchanged = true;
+    for run in options.runs() {
+        unchanged &= check_region(&run, &config, &site)?;
+    }
+    Ok(unchanged)
+}
+
+/// Prints whether the current version of the region of `run` differs from the last one that
+/// `site` recorded, and returns whether it is unchanged.
+fn check_region(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<bool, lexopt::Error> {
+    let key = run.state_key();
+    let name = key.as_str();
+    let region = region_of(run, config)?;
     let previous = site::last_version(site.files(), name)?;
-    let tables = open_tables(options, &region)?;
-    let secrets = Secrets::new(options.secrets.clone());
+    let tables = open_tables(run.options, &region)?;
+    let secrets = Secrets::new(run.options.secrets.clone());
     let converters = converters_of(&region, &secrets)?;
-    let Supply { source, classes } = open_source(options, region, &secrets)?;
+    let Supply { source, classes } = open_source(run, region, &secrets)?;
     let recorded = RecordedVersion {
         identity: current_identity(
             name,
@@ -390,7 +425,7 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
         )?,
         evaluation: evaluation_identity(&converters, classes.as_ref(), tables.is_some()),
     };
-    let change = change(&site, &options.targets(), previous.as_ref(), &recorded)?;
+    let change = change(site, &run.targets(), previous.as_ref(), &recorded)?;
     let described = change.as_deref().unwrap_or("unchanged");
     println!("{name} {} {described}", recorded.identity.name());
     Ok(change.is_none())
@@ -458,10 +493,13 @@ impl Outcome {
     }
 }
 
-/// Updates `options.region` at its site: the bucket of the configuration when it names one, and
-/// otherwise the output directory. A selection runs on the output directory alone.
+/// Updates the regions of `options` one after another at their site: the bucket of the
+/// configuration when it names one, and otherwise the output directory. A selection runs on the
+/// output directory alone. The regions share the store of the site, so what one region finds or
+/// puts there the next one knows, and `--verify` lists the bucket once. Returns whether every
+/// region was brought to its current version.
 fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
-    let (config, region) = configuration(options)?;
+    let config = configuration(options)?;
     let bucket = if options.only.is_empty() {
         Bucket::open(&config, options.secrets.as_deref())?
     } else {
@@ -470,23 +508,32 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
-    export_version(options, region, &site, monitor).map(|run| run.succeeded())
+    let held = holdings_before(options, &site, monitor)?;
+    let mut succeeded = true;
+    for run in options.runs() {
+        let region = region_of(&run, &config)?;
+        succeeded &= export_version(&run, region, &site, &held, monitor)?.succeeded();
+    }
+    Ok(succeeded)
 }
 
-/// Exports the current version of `region` as `options` say, and publishes it at `site`.
+/// Exports the current version of `region` as `run` says, and publishes it at `site`, whose
+/// store holds what `held` records.
 ///
 /// The run starts from the [`Baseline`] the site keeps, evaluates only the units that changed,
 /// patches the publications of both views and commits them as [`Context::commit`] says, so that
 /// an interrupted run leaves the site as the last one did, or with objects and records that the
 /// next run uses.
 fn export_version(
-    options: &Options,
+    run: &Run<'_>,
     region: Region,
     site: &Site<'_>,
+    held: &MemoryHoldings,
     monitor: &Monitor,
 ) -> Result<Outcome, lexopt::Error> {
-    let key = options.state_key();
-    let opened = Opened::open(options, region)?;
+    let options = run.options;
+    let key = run.state_key();
+    let opened = Opened::open(run, region)?;
     // A selection is not a version: it keeps no state and records nothing.
     let unkept = MemoryFiles::default();
     let selection = !options.only.is_empty();
@@ -506,23 +553,22 @@ fn export_version(
         evaluation: opened.evaluation_identity(),
     };
     if !(options.force || options.verify)
-        && change(site, &options.targets(), previous.as_ref(), &recorded)?.is_none()
+        && change(site, &run.targets(), previous.as_ref(), &recorded)?.is_none()
     {
         println!("{key} {} unchanged", recorded.identity.name());
         return Ok(Outcome::Unchanged(recorded.identity));
     }
 
-    let held = holdings_before(options, site, monitor)?;
     let objects = Objects {
         local: &opened.store,
-        held: &held,
+        held,
         remote: site.remote(),
     };
     let requests = site.requests(options.threads);
-    let records = Records::new(files, &held, requests);
+    let records = Records::new(files, held, requests);
     let baseline = {
         let _span = monitor.span("plan", "baseline", &key);
-        Baseline::read(files, site, &key, &options.targets(), &objects, requests)?
+        Baseline::read(files, site, &key, &run.targets(), &objects, requests)?
     };
     let Baseline {
         mut state,
@@ -539,21 +585,15 @@ fn export_version(
             uploads: &uploads,
             requests,
         };
-        let evaluation = opened.evaluate(
-            options,
-            &recorded.identity,
-            &objects,
-            &backed,
-            &state,
-            monitor,
-        )?;
+        let evaluation =
+            opened.evaluate(run, &recorded.identity, &objects, &backed, &state, monitor)?;
         let Some(Evaluation { outcome, bundles }) = evaluation else {
             return Ok(Outcome::Incomplete);
         };
         let rulings = state.advance(bundles, &outcome);
 
         let context = Context {
-            options,
+            run,
             site,
             files,
             store: &opened.store,
@@ -601,7 +641,8 @@ struct Opened {
 }
 
 impl Opened {
-    fn open(options: &Options, region: Region) -> Result<Self, lexopt::Error> {
+    fn open(run: &Run<'_>, region: Region) -> Result<Self, lexopt::Error> {
+        let options = run.options;
         let listed = region.kind != Kind::Dir;
         let concurrency = region.network.concurrency.unwrap_or(options.threads).max(1);
         let earlier = region
@@ -612,7 +653,7 @@ impl Opened {
         let secrets = Secrets::new(options.secrets.clone());
         let converters = converters_of(&region, &secrets)?;
         let tables = open_tables(options, &region)?;
-        let Supply { source, classes } = open_source(options, region, &secrets)?;
+        let Supply { source, classes } = open_source(run, region, &secrets)?;
         let directory = |name: &str| {
             LocalStore::open(options.output.join(name))
                 .map_err(|e| format!("{}/{name}: {e}", options.output.display()))
@@ -649,14 +690,15 @@ impl Opened {
     /// some bundles could not be fetched or read.
     fn evaluate(
         &self,
-        options: &Options,
+        run: &Run<'_>,
         identity: &VersionIdentity,
         objects: &Objects<'_>,
         backed: &Backed<'_>,
         state: &RegionState,
         monitor: &Monitor,
     ) -> Result<Option<Evaluation>, lexopt::Error> {
-        let key = options.state_key();
+        let options = run.options;
+        let key = run.state_key();
         let all = {
             let _span = monitor.span("manifest", "manifest", &key);
             self.source.manifest(identity).map_err(|e| e.to_string())?
@@ -898,7 +940,7 @@ impl Views {
 
 /// What the steps of a run after its evaluation share.
 struct Context<'a> {
-    options: &'a Options,
+    run: &'a Run<'a>,
     site: &'a Site<'a>,
     /// Where the state and the records are kept.
     files: &'a dyn StateFiles,
@@ -926,7 +968,7 @@ struct Committed {
 impl Context<'_> {
     /// How many reads and writes of the site run at once.
     fn requests(&self) -> usize {
-        self.site.requests(self.options.threads)
+        self.site.requests(self.run.options.threads)
     }
 
     /// The publications of the version `name` that `advance` reaches, patched from the previous
@@ -939,9 +981,9 @@ impl Context<'_> {
         advance: &Advance<'_>,
         opened: &Opened,
     ) -> Result<Views, String> {
-        let region = self.options.region.as_str();
+        let region = self.run.region;
         let owners = advance.owners()?;
-        if self.options.client {
+        if self.run.options.client {
             let target = client_target(region);
             let previous = publications.of(&target);
             let client = self.canonical("client", name, previous, advance, &owners, &[])?;
@@ -1025,7 +1067,7 @@ impl Context<'_> {
             store: self.objects,
             recorder: self.monitor,
             threads: self.requests(),
-            previous: if self.options.rebuild_tables {
+            previous: if self.run.options.rebuild_tables {
                 &[]
             } else {
                 &state.tables
@@ -1051,7 +1093,7 @@ impl Context<'_> {
             layout,
             published_at: Some(self.published_at),
         };
-        let target = format!("{}/{view}", self.options.region);
+        let target = format!("{}/{view}", self.run.region);
         let versions = self.site.versions(&target);
         let applied = patch::apply(
             self.objects,
@@ -1078,7 +1120,7 @@ impl Context<'_> {
         recorded: &RecordedVersion,
     ) -> Result<Committed, String> {
         let requests = self.requests();
-        let key = self.options.state_key();
+        let key = self.run.state_key();
         let records = self.backed.records;
         let results: Vec<&UnitResult> = results.iter().collect();
         let mut stored = {
@@ -1263,15 +1305,52 @@ mod tests {
         parse(args.map(OsString::from))
     }
 
+    /// The state key and the targets of each region of `options`.
+    fn runs(options: &Options) -> Vec<(String, Vec<String>)> {
+        let runs = options.runs();
+        runs.map(|run| (run.state_key(), run.targets())).collect()
+    }
+
     #[test]
     fn a_client_run_keeps_its_own_state_and_publishes_one_target() {
         let assets = options(&[]).unwrap();
-        assert_eq!(assets.state_key(), "jp");
-        assert_eq!(assets.targets(), ["jp/canonical", "jp/storage"]);
+        let canonical = vec!["jp/canonical".to_owned(), "jp/storage".to_owned()];
+        assert_eq!(runs(&assets), [("jp".to_owned(), canonical)]);
         let client = options(&["--client"]).unwrap();
-        assert_eq!(client.state_key(), "jp-client");
-        assert_eq!(client.targets(), ["jp/client"]);
+        let client_targets = vec!["jp/client".to_owned()];
+        assert_eq!(runs(&client), [("jp-client".to_owned(), client_targets)]);
         assert!(options(&["--client", "--check"]).is_ok());
         assert!(options(&["--client", "--rebuild-tables"]).is_err());
+    }
+
+    #[test]
+    fn several_regions_come_before_the_output_and_run_in_order() {
+        let args = [
+            "jp",
+            "cn",
+            "en",
+            "out",
+            "--config",
+            "regions.json",
+            "--verify",
+        ];
+        let options = parse(args.into_iter().map(OsString::from)).unwrap();
+        assert_eq!(options.regions, ["jp", "cn", "en"]);
+        assert_eq!(options.output, PathBuf::from("out"));
+        let keys: Vec<String> = runs(&options).into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, ["jp", "cn", "en"]);
+
+        let only = [
+            "jp",
+            "cn",
+            "out",
+            "--config",
+            "regions.json",
+            "--only",
+            "a/",
+        ];
+        assert!(parse(only.into_iter().map(OsString::from)).is_err());
+        let no_region = ["out", "--config", "regions.json"];
+        assert!(parse(no_region.into_iter().map(OsString::from)).is_err());
     }
 }

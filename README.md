@@ -76,6 +76,7 @@ sekai-exporter objects <bundles> <output>     # the object document of every bun
 sekai-exporter account <region> --config <file> --secrets <dir>   # once, for a region that signs in
 sekai-exporter update <region> <output> --config <file> --secrets <dir> --check   # exits 1 when a new version is out
 sekai-exporter update <region> <output> --config <file> --secrets <dir>
+sekai-exporter update jp en cn tw kr <output> --config <file> --secrets <dir>   # one region after another
 ```
 
 **Serve the views by path** ([Serving](docs/serving.md)). Each commit on `main` is also published as the image `ghcr.io/starmoe-org/sekai-exporter`:

@@ -39,8 +39,10 @@ use crate::{
 /// The largest head of a request, in bytes: its request line and headers.
 const HEAD_BYTES: usize = 16 << 10;
 
-/// How many bytes of a file are read at a time.
-const READ_SIZE: usize = 64 << 10;
+/// How many bytes of a file are read at a time. Each read of a file runs as one task of the
+/// blocking pool, so a larger read moves more bytes per task; one that is much larger holds the
+/// worker of a connection long enough to delay the others when many are open.
+const READ_SIZE: usize = 256 << 10;
 
 /// How long the server waits before it accepts again after accepting failed for a reason that
 /// lasts, as it does when the process has no file descriptor left.

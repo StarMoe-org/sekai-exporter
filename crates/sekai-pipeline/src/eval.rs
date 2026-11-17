@@ -8,7 +8,7 @@ use sekai_catalog::{Derivations, Derived, Key, Store};
 use sekai_convert::{
     Asset, Content, ConvertError, Converter, Cost, CostClass, FileConverter, ObjectId,
 };
-use sekai_encode::mp4;
+use sekai_encode::{mp3, mp4};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
 use sekai_unity::ClassLayouts;
@@ -219,21 +219,26 @@ impl Planned<'_> {
     }
 }
 
-/// The line of a fingerprint that names the video encoder, whose files lose information, when
-/// `converter` declares it, and otherwise nothing.
-pub(crate) fn lossy_encoder(converter: &dyn Converter) -> String {
-    if converter.encoders().video {
-        format!("encoder {} {}\n", mp4::NAME, mp4::VERSION)
-    } else {
-        String::new()
-    }
+/// The lines of a fingerprint that name the encoders whose files lose information, the audio
+/// and the video encoder, of those `converter` declares.
+pub(crate) fn lossy_encoders(converter: &dyn Converter) -> String {
+    let declared = converter.encoders();
+    let lossy = [
+        (declared.audio, mp3::NAME, mp3::VERSION),
+        (declared.video, mp4::NAME, mp4::VERSION),
+    ];
+    lossy
+        .into_iter()
+        .filter(|&(declares, ..)| declares)
+        .map(|(_, name, version)| format!("encoder {name} {version}\n"))
+        .collect()
 }
 
 /// The fingerprint of a derivation: everything that determines the content of its asset.
 ///
-/// An encoder is part of it only when its files lose information, which is the video encoder,
-/// for the forms that declare it. The files of the other encoders decode to the content they
-/// were given, whatever their version.
+/// An encoder is part of it only when its files lose information, which are the audio and the
+/// video encoder, for the forms that declare them. The files of the other encoders decode to the
+/// content they were given, whatever their version.
 pub(crate) fn fingerprint(
     converter: &dyn Converter,
     name: &str,
@@ -247,7 +252,7 @@ pub(crate) fn fingerprint(
         converter.name(),
         converter.version(),
     );
-    text.push_str(&lossy_encoder(converter));
+    text.push_str(&lossy_encoders(converter));
     if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", hex(&identity)));
     }
@@ -903,7 +908,8 @@ mod tests {
                 &NoClasses
             ),
         );
-        // A lossless encoder leaves the fingerprint as it is; the video encoder is part of it.
+        // A lossless encoder leaves the fingerprint as it is; the audio and the video encoder
+        // are part of it.
         let declaring = |encoders| {
             fingerprint(
                 &WithEnc(encoders),
@@ -914,7 +920,9 @@ mod tests {
                 &NoClasses,
             )
         };
-        assert_eq!(declaring(Encoders::NONE), declaring(Encoders::AUDIO));
+        assert_eq!(declaring(Encoders::NONE), declaring(Encoders::TEXTURE));
+        assert_ne!(declaring(Encoders::NONE), declaring(Encoders::AUDIO));
         assert_ne!(declaring(Encoders::NONE), declaring(Encoders::VIDEO));
+        assert_ne!(declaring(Encoders::AUDIO), declaring(Encoders::VIDEO));
     }
 }

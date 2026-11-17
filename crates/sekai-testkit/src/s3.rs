@@ -78,7 +78,7 @@ impl Operation {
 pub struct Logged {
     /// What the request asked.
     pub operation: Operation,
-    /// The name of the object, without the bucket.
+    /// The name of the object, without the bucket, or for a listing the prefix it lists.
     pub name: String,
     /// The status of the response.
     pub status: u16,
@@ -233,6 +233,10 @@ impl State {
             Some(operation) => self.perform(operation, name, request),
         };
         if let Some(operation) = operation {
+            let name = match operation {
+                Operation::List => request.query.get("prefix").map_or("", String::as_str),
+                _ => name,
+            };
             lock(&self.log).push(Logged {
                 operation,
                 name: name.to_owned(),

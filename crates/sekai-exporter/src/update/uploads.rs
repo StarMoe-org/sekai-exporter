@@ -1,8 +1,8 @@
 //! The derivations of a run, put at the site and recorded while the run goes on.
 //!
 //! A derivation is recorded as soon as the objects it names are at the site, so the uploads
-//! overlap with the conversions that follow, and a run that stops later leaves every derivation it
-//! recorded for the next run to take.
+//! overlap with the conversions that follow, and a run that stops later leaves the derivations in
+//! the record packs it wrote for the next run to take.
 //!
 //! The output of an asset is uploaded: its asset document and the members it names. One uploader
 //! takes the outputs made since its last upload together and puts their objects at the site in one
@@ -18,7 +18,6 @@ use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::Scope;
 
 use sekai_catalog::{Derived, Key, Objects};
-use sekai_pipeline::parallel;
 use sekai_pipeline::records::Records;
 
 use super::document_objects;
@@ -29,8 +28,6 @@ pub(super) struct Uploads<'a> {
     site: &'a Site<'a>,
     objects: &'a Objects<'a>,
     records: &'a Records<'a>,
-    /// How many derivation records are written at once.
-    requests: usize,
     queue: Mutex<Queue>,
     /// Signalled when a derivation is sent or no more will be.
     sent: Condvar,
@@ -73,18 +70,16 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 impl<'a> Uploads<'a> {
     /// Uploads to `site` the objects that `objects` reads, and records the derivations in
-    /// `records`, writing up to `requests` records at once.
+    /// `records`.
     pub(super) fn new(
         site: &'a Site<'a>,
         objects: &'a Objects<'a>,
         records: &'a Records<'a>,
-        requests: usize,
     ) -> Self {
         Self {
             site,
             objects,
             records,
-            requests,
             queue: Mutex::default(),
             sent: Condvar::new(),
             uploaded: Condvar::new(),
@@ -208,14 +203,11 @@ impl<'a> Uploads<'a> {
 
     /// Records those of `made` whose objects the site holds, and returns the others.
     fn record_held(&self, made: Vec<Made>) -> Result<Vec<Made>, String> {
-        let recorded = parallel(made.len(), self.requests, |i| {
-            let (fingerprint, derived) = &made[i];
-            self.records.record_derivation(fingerprint, derived)
-        });
         let mut unheld = Vec::new();
-        for (made, recorded) in made.into_iter().zip(recorded) {
+        for (fingerprint, derived) in made {
+            let recorded = self.records.record_derivation(&fingerprint, &derived);
             if !recorded.map_err(|e| format!("records: {e}"))? {
-                unheld.push(made);
+                unheld.push((fingerprint, derived));
             }
         }
         Ok(unheld)

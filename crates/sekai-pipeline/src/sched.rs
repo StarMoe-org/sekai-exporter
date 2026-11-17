@@ -184,7 +184,10 @@ impl Scheduler {
     /// limits, so every job gets to run.
     fn fits(&self, state: &State, need: &Need, probed: &OnceCell<u64>) -> bool {
         let held = self.held(need);
-        let memory = state.memory + held <= self.limits.memory;
+        let memory = state
+            .memory
+            .checked_add(held)
+            .is_some_and(|total| total <= self.limits.memory);
         // The running jobs count with their whole needs, whether or not they have allocated yet.
         let resident = || match self.limits.resident {
             Some(resident) if held > 0 && state.memory > 0 => {
@@ -508,5 +511,12 @@ mod tests {
         assert!(outcome.is_err());
         let state = scheduler.lock();
         assert_eq!((state.cpu, state.memory), (0, 0));
+    }
+
+    #[test]
+    fn needs_beyond_an_unbound_budget_wait_instead_of_overflowing() {
+        let scheduler = Scheduler::new(Limits::threads(4));
+        let needs = memory_needs([10, u64::MAX, 0, u64::MAX]);
+        assert_eq!(scheduler.run(&needs, |i, _| i), [0, 1, 2, 3]);
     }
 }

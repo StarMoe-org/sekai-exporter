@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects};
 use sekai_format::publication::Pointer;
@@ -107,7 +107,9 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
     let collector = Collector {
         site: &site,
         objects: &objects,
-        written_before: SystemTime::now() - options.grace,
+        written_before: SystemTime::now()
+            .checked_sub(options.grace)
+            .unwrap_or(UNIX_EPOCH),
         requests: site.requests(options.threads),
     };
     let garbage = collector.garbage()?;

@@ -33,6 +33,17 @@ fn malformed(message: impl Into<String>) -> DecodeError {
     }
 }
 
+/// An optional row index from an integer column, where both `-1` (signed) and `0xFFFF` (unsigned
+/// 16-bit) mark an absent reference.
+fn present_index(value: Option<i64>) -> Result<Option<usize>, DecodeError> {
+    match value {
+        None | Some(-1 | NO_INDEX) => Ok(None),
+        Some(value) => usize::try_from(value)
+            .map(Some)
+            .map_err(|_| malformed("a table index is out of range")),
+    }
+}
+
 fn be16(bytes: &[u8]) -> usize {
     usize::from(u16::from_be_bytes([bytes[0], bytes[1]]))
 }
@@ -112,21 +123,32 @@ struct Tables<'a> {
     sheet_volume: f64,
 }
 
-/// A volume as a product of percentages, exact until it is read.
+/// A volume as a product of percentages, exact while the product fits in 64 bits.
 #[derive(Debug, Clone, Copy)]
 struct Percent {
     product: u64,
     factors: i32,
+    extra: f64,
 }
 
 impl Percent {
     const ONE: Self = Self {
         product: 1,
         factors: 0,
+        extra: 1.0,
     };
 
+    fn mul_percent(&mut self, percent: u64) {
+        if let Some(product) = self.product.checked_mul(percent) {
+            self.product = product;
+            self.factors += 1;
+        } else {
+            self.extra *= percent as f64 / 100.0;
+        }
+    }
+
     fn value(self) -> f64 {
-        self.product as f64 / 100_f64.powi(self.factors)
+        (self.product as f64 / 100_f64.powi(self.factors)) * self.extra
     }
 }
 
@@ -163,12 +185,15 @@ fn indices(
     count: &str,
     list: &str,
 ) -> Result<Vec<usize>, DecodeError> {
-    let n = table.int(row, count)?.unwrap_or(0) as usize;
+    let n = usize::try_from(table.int(row, count)?.unwrap_or(0))
+        .map_err(|_| malformed(format!("{count} is out of range")))?;
     let values = table.data(row, list)?.unwrap_or(&[]);
-    if values.len() < n * 2 {
+    let Some(bytes) = n.checked_mul(2).filter(|&bytes| bytes <= values.len()) else {
         return Err(malformed(format!("{list} has fewer than {count} entries")));
-    }
-    Ok(values.as_chunks::<2>().0[..n]
+    };
+    Ok(values[..bytes]
+        .as_chunks::<2>()
+        .0
         .iter()
         .map(|v| be16(v))
         .collect())
@@ -197,16 +222,16 @@ impl Tables<'_> {
         table: &Table<'_>,
         row: usize,
     ) -> Result<Percent, DecodeError> {
-        let index = table.int(row, "CommandIndex")?.unwrap_or(NO_INDEX);
-        let (Some(commands), true) = (commands, index != NO_INDEX) else {
+        let (Some(commands), Some(index)) =
+            (commands, present_index(table.int(row, "CommandIndex")?)?)
+        else {
             return Ok(volume);
         };
-        let list = commands.data(index as usize, "Command")?.unwrap_or(&[]);
+        let list = commands.data(index, "Command")?.unwrap_or(&[]);
         let mut volume = volume;
         each_command(list, |code, value| {
             if code == VOLUME && value.len() == 2 {
-                volume.product = volume.product.saturating_mul(be16(value) as u64);
-                volume.factors += 1;
+                volume.mul_percent(be16(value) as u64);
             }
             Ok(())
         })?;
@@ -328,12 +353,11 @@ impl Tables<'_> {
     ) -> Result<Vec<TrackNote>, DecodeError> {
         let table = require(&self.track, "TrackTable")?;
         let volume = Self::times(volume, self.track_commands.as_ref(), table, index)?;
-        let event = table.int(index, "EventIndex")?.unwrap_or(NO_INDEX);
-        if event == NO_INDEX {
+        let Some(event) = present_index(table.int(index, "EventIndex")?)? else {
             return Ok(Vec::new());
-        }
+        };
         let events = require(&self.event, "TrackEventTable")?;
-        let command = events.data(event as usize, "Command")?.unwrap_or(&[]);
+        let command = events.data(event, "Command")?.unwrap_or(&[]);
         let (mut at_us, mut notes) = (0, Vec::new());
         each_command(command, |code, value| {
             match code {
@@ -387,7 +411,7 @@ fn read_waveforms(
         Ok(table
             .int(row, name)?
             .filter(|&value| value != NO_INDEX)
-            .map(|value| value as u32))
+            .and_then(|value| u32::try_from(value).ok()))
     };
     let mut waveforms = Vec::with_capacity(table.rows());
     for row in 0..table.rows() {
@@ -395,15 +419,11 @@ fn read_waveforms(
         let older_id = id(row, "Id")?;
         let memory_awb_id = id(row, "MemoryAwbId")?.or(older_id.filter(|_| streaming == 0));
         let stream_awb_id = id(row, "StreamAwbId")?.or(older_id.filter(|_| streaming != 0));
-        let extension = table
-            .int(row, "ExtensionData")?
-            .filter(|&value| value != NO_INDEX);
+        let extension = present_index(table.int(row, "ExtensionData")?)?;
         let (mut loop_start, mut loop_end) = (None, None);
         if let (Some(extensions), Some(index)) = (extensions, extension) {
-            loop_start = extensions
-                .int(index as usize, "LoopStart")?
-                .map(|v| v as u32);
-            loop_end = extensions.int(index as usize, "LoopEnd")?.map(|v| v as u32);
+            loop_start = extensions.int(index, "LoopStart")?.map(|v| v as u32);
+            loop_end = extensions.int(index, "LoopEnd")?.map(|v| v as u32);
         }
         waveforms.push(Waveform {
             streaming,
@@ -473,11 +493,17 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
     for row in 0..cue_table.rows() {
         let mut played = Vec::new();
         let kind = cue_table.int(row, "ReferenceType")?.unwrap_or(0) as u8;
-        let index = cue_table.int(row, "ReferenceIndex")?.unwrap_or(0) as usize;
-        tables.reference(kind, index, 0, Percent::ONE, &mut played)?;
+        let index = present_index(cue_table.int(row, "ReferenceIndex")?)?;
+        if let Some(index) = index {
+            tables.reference(kind, index, 0, Percent::ONE, &mut played)?;
+        }
         if let Some(&(bad, _)) = played.iter().find(|&&(w, _)| w >= waveforms.len()) {
             return Err(malformed(format!("a cue refers to waveform {bad}")));
         }
+        let arrangement = index
+            .map(|index| tables.arrangement(kind, index))
+            .transpose()?
+            .flatten();
         cues.push(Cue {
             cue_names: names.remove(&row).unwrap_or_default(),
             cue_id: cue_table.int(row, "CueId")?.unwrap_or(0) as u32,
@@ -487,7 +513,7 @@ pub fn read_acb(data: &[u8]) -> Result<Acb<'_>, DecodeError> {
                 .iter()
                 .map(|&(_, volume)| tables.level(volume))
                 .collect(),
-            arrangement: tables.arrangement(kind, index)?,
+            arrangement,
         });
     }
 

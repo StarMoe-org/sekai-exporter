@@ -147,13 +147,15 @@ impl Tables<'_> {
         let number = |name: &str| table.int(index, name).map(|value| value.unwrap_or(0));
         let looping = number("PlaybackType")? == LOOPING_PLAYBACK;
         let parts = number("TransitionTimingValue")?;
+        let length_ms = u64::try_from(number("Length")?).unwrap_or(0);
+        let length_us = u64::try_from(number("LengthUs")?).unwrap_or(0);
         Ok(Block {
-            length_us: number("Length")? as u64 * 1000 + number("LengthUs")? as u64,
+            length_us: length_ms.saturating_mul(1000).saturating_add(length_us),
             looping,
             repeats: if looping {
                 0
             } else {
-                number("NumLoops")? as u32
+                u32::try_from(number("NumLoops")?).unwrap_or(0)
             },
             transition_parts: (number("TransitionTiming")? == AT_EQUAL_PARTS
                 && (1..NO_PARTS).contains(&parts))

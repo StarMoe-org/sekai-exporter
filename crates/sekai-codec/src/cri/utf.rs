@@ -26,6 +26,13 @@ fn be_uint(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0, |value, &b| value << 8 | u64::from(b))
 }
 
+/// An offset of the header, which counts from the end of the size field.
+fn header_offset(bytes: &[u8]) -> Result<usize, DecodeError> {
+    (be_uint(bytes) as usize)
+        .checked_add(8)
+        .ok_or_else(|| malformed("an offset overflows"))
+}
+
 fn read_string(strings: &[u8], offset: usize) -> Result<&str, DecodeError> {
     let tail = strings
         .get(offset..)
@@ -92,7 +99,7 @@ impl<'a> Table<'a> {
         if &table[..4] != b"@UTF" {
             return Err(malformed("no @UTF signature"));
         }
-        let size = be_uint(&table[4..8]) as usize + 8;
+        let size = header_offset(&table[4..8])?;
         if table.len() < size {
             return Err(DecodeError::Truncated {
                 what: "@UTF table",
@@ -100,9 +107,9 @@ impl<'a> Table<'a> {
                 available: table.len(),
             });
         }
-        let rows_offset = be_uint(&table[0x0A..0x0C]) as usize + 8;
-        let strings_offset = be_uint(&table[0x0C..0x10]) as usize + 8;
-        let data_offset = be_uint(&table[0x10..0x14]) as usize + 8;
+        let rows_offset = header_offset(&table[0x0A..0x0C])?;
+        let strings_offset = header_offset(&table[0x0C..0x10])?;
+        let data_offset = header_offset(&table[0x10..0x14])?;
         let column_count = be_uint(&table[0x18..0x1A]) as usize;
         let row_width = be_uint(&table[0x1A..0x1C]) as usize;
         let rows = be_uint(&table[0x1C..0x20]) as usize;

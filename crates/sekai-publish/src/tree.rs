@@ -19,10 +19,15 @@ use crate::plan::{Plan, PublishError, hex};
 const LISTING: &str = "_listing.json";
 const STATE: &str = "_state.json";
 
-/// What the next publication has to delete.
+/// What publications have yet to delete.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct State {
-    pending_delete: Vec<String>,
+    /// The files a publication deletes once its listing is written.
+    pending_delete: BTreeSet<String>,
+    /// The files the listing being written stops using, which become `pending_delete` once it
+    /// is written.
+    #[serde(default)]
+    retiring: BTreeSet<String>,
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> io::Result<Option<T>> {
@@ -126,7 +131,21 @@ pub fn publish(
         published_version: plan.version.clone(),
         entries: entries.values().cloned().collect(),
     };
-    write_json(&root.join(LISTING), &listing).map_err(PublishError::wrap("listing"))?;
+    // The files the listing stops using are recorded before it changes, so that a publication
+    // interrupted after the change still deletes them.
+    let retiring = state
+        .retiring
+        .into_iter()
+        .chain(previous.iter().map(|e| e.path.clone()))
+        .filter(|path| !entries.contains_key(path))
+        .collect();
+    let state = State {
+        pending_delete: state.pending_delete,
+        retiring,
+    };
+    let wrap = PublishError::wrap("listing");
+    write_json(&root.join(STATE), &state).map_err(&wrap)?;
+    write_json(&root.join(LISTING), &listing).map_err(&wrap)?;
 
     let wrap = PublishError::wrap("delete");
     for path in &state.pending_delete {
@@ -139,11 +158,10 @@ pub fn publish(
             Err(e) => return Err(wrap(e)),
         }
     }
-    let pending_delete = previous
-        .iter()
-        .filter(|e| !entries.contains_key(&e.path))
-        .map(|e| e.path.clone())
-        .collect();
-    write_json(&root.join(STATE), &State { pending_delete }).map_err(&wrap)?;
+    let state = State {
+        pending_delete: state.retiring,
+        retiring: BTreeSet::new(),
+    };
+    write_json(&root.join(STATE), &state).map_err(&wrap)?;
     Ok(report)
 }

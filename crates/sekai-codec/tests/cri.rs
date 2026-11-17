@@ -159,10 +159,13 @@ fn bank_with_a_stream_outside_the_file_is_malformed() {
     ));
 }
 
+#[derive(Clone)]
 enum Cell {
     U8(u8),
     U16(u16),
+    I16(i16),
     U32(u32),
+    I32(i32),
     F32(f32),
     Text(&'static str),
     Data(Vec<u8>),
@@ -183,7 +186,9 @@ fn utf(name: &str, columns: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
         let kind = match &rows[0][index] {
             Cell::U8(_) => 0u8,
             Cell::U16(_) => 2,
+            Cell::I16(_) => 3,
             Cell::U32(_) => 4,
+            Cell::I32(_) => 5,
             Cell::F32(_) => 8,
             Cell::Text(_) => 10,
             Cell::Data(_) => 11,
@@ -199,7 +204,9 @@ fn utf(name: &str, columns: &[&str], rows: &[Vec<Cell>]) -> Vec<u8> {
             match cell {
                 Cell::U8(value) => body.push(*value),
                 Cell::U16(value) => body.extend(value.to_be_bytes()),
+                Cell::I16(value) => body.extend(value.to_be_bytes()),
                 Cell::U32(value) => body.extend(value.to_be_bytes()),
+                Cell::I32(value) => body.extend(value.to_be_bytes()),
                 Cell::F32(value) => body.extend(value.to_bits().to_be_bytes()),
                 Cell::Text(value) => {
                     let offset = text(value, &mut strings);
@@ -983,4 +990,113 @@ fn a_usm_chunk_with_an_overflowing_size_is_rejected() {
     data[..4].copy_from_slice(b"CRID");
     data[4..8].copy_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
     assert!(sekai_codec::cri::read_usm(&data).is_err());
+}
+
+#[test]
+fn signed_minus_one_sentinels_and_deep_volume_chains_are_handled() {
+    use Cell::{Data, F32, I16, I32, U8, U16, U32};
+    let commands = Data(utf(
+        "SynthCommand",
+        &["Command"],
+        &[vec![Data(volumes(&[50; 12]))]],
+    ));
+    let data = utf(
+        "Header",
+        &[
+            "AcbVolume",
+            "CueTable",
+            "WaveformTable",
+            "WaveformExtensionDataTable",
+            "SynthTable",
+            "SequenceTable",
+            "TrackTable",
+            "SynthCommandTable",
+            "SeqCommandTable",
+            "TrackCommandTable",
+        ],
+        &[vec![
+            F32(1.0),
+            Data(utf(
+                "Cue",
+                &["ReferenceType", "ReferenceIndex", "CueId", "Length"],
+                &[
+                    vec![U8(2), I16(0), U32(1), U32(0)],
+                    vec![U8(3), I16(0), U32(2), U32(0)],
+                ],
+            )),
+            Data(utf(
+                "Waveform",
+                &[
+                    "Streaming",
+                    "MemoryAwbId",
+                    "StreamAwbId",
+                    "EncodeType",
+                    "ExtensionData",
+                ],
+                &[vec![U8(0), I16(7), I32(-1), U8(2), I16(-1)]],
+            )),
+            Data(utf(
+                "WaveformExtensionData",
+                &["LoopStart", "LoopEnd"],
+                &[vec![U32(1), U32(2)]],
+            )),
+            Data(utf(
+                "Synth",
+                &["ReferenceItems", "CommandIndex"],
+                &[vec![Data(vec![0, 1, 0, 0]), I16(0)]],
+            )),
+            Data(utf(
+                "Sequence",
+                &["NumTracks", "TrackIndex", "CommandIndex"],
+                &[vec![U16(1), Data(vec![0, 0]), I16(-1)]],
+            )),
+            Data(utf(
+                "Track",
+                &["EventIndex", "CommandIndex"],
+                &[vec![I16(-1), I16(-1)]],
+            )),
+            commands.clone(),
+            commands.clone(),
+            commands,
+        ]],
+    );
+    let acb = read_acb(&data).expect("sheet with signed -1 sentinels");
+    assert_eq!(acb.waveforms[0].memory_awb_id, Some(7));
+    assert_eq!(acb.waveforms[0].stream_awb_id, None);
+    assert_eq!(acb.waveforms[0].loop_start, None);
+    assert_eq!(acb.cues[0].volumes, [0.5_f32.powi(12)]);
+    assert!(acb.cues[1].waveforms.is_empty());
+}
+
+#[test]
+fn overflowing_utf_and_track_counts_are_rejected() {
+    use Cell::{Data, I32, U8, U16, U32};
+    let mut bad_utf = vec![0u8; 0x20];
+    bad_utf[..4].copy_from_slice(b"@UTF");
+    bad_utf[4..8].copy_from_slice(&0xFFFF_FFF8u32.to_be_bytes());
+    assert!(read_acb(&bad_utf).is_err());
+
+    for count in [U32(0x8000_0001), I32(-1)] {
+        let data = utf(
+            "Header",
+            &["CueTable", "SequenceTable", "TrackTable"],
+            &[vec![
+                Data(utf(
+                    "Cue",
+                    &["ReferenceType", "ReferenceIndex"],
+                    &[vec![U8(3), U16(0)]],
+                )),
+                Data(utf(
+                    "Sequence",
+                    &["NumTracks", "TrackIndex"],
+                    &[vec![count, Data(vec![0, 0])]],
+                )),
+                Data(utf("Track", &["EventIndex"], &[vec![U16(0xFFFF)]])),
+            ]],
+        );
+        assert!(matches!(
+            read_acb(&data),
+            Err(DecodeError::Malformed { .. })
+        ));
+    }
 }

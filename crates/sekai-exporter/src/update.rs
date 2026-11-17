@@ -19,7 +19,7 @@ use sekai_game::cdn::{self, BundleEntry, Kind, Region, Secrets, Source, Tables};
 use sekai_pipeline::claims::Claims;
 use sekai_pipeline::metrics::{NoRecorder, Recorder};
 use sekai_pipeline::parallel;
-use sekai_pipeline::records::{DERIVATION_RECORDS, Earlier, Records, UNIT_RECORDS};
+use sekai_pipeline::records::{Earlier, Records};
 use sekai_pipeline::reuse::{self, Reuse, UnitResult};
 use sekai_pipeline::state::{
     BundleState, MemoryFiles, RegionState, Root, StateFiles, TableOutput, Written,
@@ -512,17 +512,14 @@ fn export_version(
         return Ok(Outcome::Unchanged(recorded.identity));
     }
 
-    let Listed { held, records } = listed(options, site, monitor)?;
+    let held = holdings_before(options, site, monitor)?;
     let objects = Objects {
         local: &opened.store,
         held: &held,
         remote: site.remote(),
     };
-    let records = match &records {
-        Some(listed) => Records::listed(files, &held, listed),
-        None => Records::new(files, &held),
-    };
     let requests = site.requests(options.threads);
+    let records = Records::new(files, &held, requests);
     let baseline = {
         let _span = monitor.span("plan", "baseline", &key);
         Baseline::read(files, site, &key, &options.targets(), &objects, requests)?
@@ -533,7 +530,7 @@ fn export_version(
         publications,
     } = baseline;
     // The derivations go to the site as they are made, by an uploader that ends with this scope.
-    let uploads = Uploads::new(site, &objects, &records, requests);
+    let uploads = Uploads::new(site, &objects, &records);
     thread::scope(|scope| -> Result<Outcome, lexopt::Error> {
         let _uploader = uploads.run(scope);
         let backed = Backed {
@@ -768,38 +765,20 @@ struct Evaluation {
     bundles: Vec<BundleState>,
 }
 
-/// What `site` is known to hold before the run.
-struct Listed {
-    /// The objects of the store: with `--verify`, those a listing of the bucket finds, and else
-    /// none until the run reads records or puts objects there.
-    held: MemoryHoldings,
-    /// With `--verify`, the unit and derivation records a listing of the bucket finds; else each
-    /// record the run needs is looked up.
-    records: Option<Vec<String>>,
-}
-
-/// What a listing of `site` finds before the run, with `--verify`.
-fn listed(options: &Options, site: &Site<'_>, monitor: &Monitor) -> Result<Listed, lexopt::Error> {
+/// What `site` is known to hold before the run: with `--verify`, the objects a listing of the
+/// bucket finds, and else none until the run reads records or puts objects there.
+fn holdings_before(
+    options: &Options,
+    site: &Site<'_>,
+    monitor: &Monitor,
+) -> Result<MemoryHoldings, lexopt::Error> {
     match site {
         Site::Bucket(bucket) if options.verify => {
             let held = bucket.holdings(monitor)?;
-            let mut records = bucket.state_names(UNIT_RECORDS, monitor)?;
-            let units = records.len();
-            records.extend(bucket.state_names(DERIVATION_RECORDS, monitor)?);
-            println!(
-                "bucket holds {} objects, {units} unit records and {} derivation records",
-                held.len(),
-                records.len() - units
-            );
-            Ok(Listed {
-                held: MemoryHoldings::listed(held),
-                records: Some(records),
-            })
+            println!("bucket holds {} objects", held.len());
+            Ok(MemoryHoldings::listed(held))
         }
-        _ => Ok(Listed {
-            held: MemoryHoldings::default(),
-            records: None,
-        }),
+        _ => Ok(MemoryHoldings::default()),
     }
 }
 
@@ -1116,7 +1095,7 @@ impl Context<'_> {
         let written = {
             let _span = self.monitor.span("commit", "records", "");
             self.backed.uploads.record_stored()?;
-            records.write(&results, requests)
+            records.write(&results)
         };
         let written = written.map_err(|e| format!("records: {e}"))?;
 

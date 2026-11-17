@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use sekai_pipeline::records::{Entry, Pack, RECORD_PACKS};
 use sekai_testkit::nuverse::{Bundle, Cdn};
 use sekai_testkit::s3::Server;
 use serde_json::json;
@@ -180,19 +181,19 @@ fn each_update_publishes_what_an_update_from_nothing_publishes() {
 }
 
 /// Files that nothing a site keeps refers to, by their names under the site: an asset document and
-/// an audio file of the store, a derivation record that names the document, and a state chunk that
-/// no region names.
+/// an audio file of the store, a record pack whose one record names the document, and a state chunk
+/// that no region names.
 fn unreferred() -> [(String, Vec<u8>); 4] {
     let name = |digits: &str| digits.repeat(32);
     let document = format!("{}.json", name("ab"));
-    let record = json!({ "document": { "key": document, "size": 2 } });
+    let record = json!({ "document": { "key": document, "size": 2 } }).to_string();
+    let file = format!("records/derivations/ef/{}.json", name("ef"));
+    let entry = Entry::of_file(&file, record.as_bytes()).unwrap();
+    let [pack]: [Pack; 1] = Pack::of(vec![entry]).unwrap().try_into().unwrap();
     [
         (format!("store/ab/{document}"), b"{}".to_vec()),
         (format!("store/cd/{}.mp3", name("cd")), b"audio".to_vec()),
-        (
-            format!("state/records/derivations/ef/{}.json", name("ef")),
-            record.to_string().into_bytes(),
-        ),
+        (format!("state/{}", pack.name), pack.bytes),
         (
             format!("state/chunks/12/{}.json.gz", name("12")),
             b"chunk".to_vec(),
@@ -217,13 +218,11 @@ fn reported(files: usize, bytes: usize) -> Option<String> {
 /// to be garbage.
 fn finds_the_unreferred(printed: &str) {
     let sizes: Vec<usize> = unreferred().iter().map(|(_, bytes)| bytes.len()).collect();
-    assert_eq!(
-        garbage(printed, "records/units"),
-        reported(0, 0),
-        "{printed}"
-    );
-    let derivations = garbage(printed, "records/derivations");
-    assert_eq!(derivations, reported(1, sizes[2]), "{printed}");
+    for kind in ["records/units", "records/derivations"] {
+        assert_eq!(garbage(printed, kind), reported(0, 0), "{printed}");
+    }
+    let packs = garbage(printed, "records/packs");
+    assert_eq!(packs, reported(1, sizes[2]), "{printed}");
     assert_eq!(
         garbage(printed, "chunks"),
         reported(1, sizes[3]),
@@ -238,6 +237,7 @@ fn finds_the_unreferred(printed: &str) {
 /// Asserts that the report `printed` of `gc` finds no garbage.
 fn finds_no_garbage(printed: &str) {
     let kinds = [
+        "records/packs",
         "records/units",
         "records/derivations",
         "chunks",
@@ -250,9 +250,50 @@ fn finds_no_garbage(printed: &str) {
     }
 }
 
+/// The records in the record packs `packs`, by subject, each with the objects it names.
+fn records_of(packs: impl IntoIterator<Item = (String, Vec<u8>)>) -> BTreeMap<String, Vec<String>> {
+    let mut records = BTreeMap::new();
+    for (name, bytes) in packs {
+        for entry in Pack::read(&name, &bytes).unwrap() {
+            let objects = entry.objects().unwrap().into_iter();
+            let objects = objects.map(|object| object.to_string()).collect();
+            records.insert(format!("{:?}", entry.subject), objects);
+        }
+    }
+    records
+}
+
 /// Collecting the garbage of the output directory.
 mod gc {
     use super::*;
+
+    /// The record packs of the output directory `output`.
+    fn packs(output: &Path) -> Vec<(String, Vec<u8>)> {
+        let packs = files_under(output, &[&format!("state/{RECORD_PACKS}")]).into_iter();
+        packs
+            .map(|name| (name.clone(), std::fs::read(output.join(&name)).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn gc_merges_small_packs_into_one_with_their_records() {
+        let scratch = Scratch::new("gc-packs");
+        scratch.update("site", None);
+        scratch.cdn.serve_version("2");
+        scratch.update("site", None);
+        let site = scratch.root.join("site");
+        let before = packs(&site);
+        assert_eq!(before.len(), 2);
+
+        let merged = scratch.gc("site", None, &["--grace", "0s", "--delete"]);
+        let rewritten = garbage(&merged, "records/packs").unwrap();
+        assert!(rewritten.starts_with("garbage 2 files"), "{merged}");
+        assert!(merged.contains("records/packs: new 1 files"), "{merged}");
+        let after = packs(&site);
+        assert_eq!(after.len(), 1);
+        assert_eq!(records_of(after), records_of(before));
+        finds_no_garbage(&scratch.gc("site", None, &["--grace", "0s"]));
+    }
 
     /// The files under `store/`, `state/` and `published/` of the output directory `output`.
     fn site_files(output: &Path) -> BTreeSet<String> {
@@ -350,17 +391,22 @@ mod gc {
 /// Updates that publish to a bucket.
 #[cfg(feature = "s3")]
 mod bucket {
+    use sekai_pipeline::records::Subject;
     use sekai_testkit::s3::{Logged, Operation};
 
     use super::*;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
 
     // The parts of the bucket under PREFIX.
     /// The objects.
     const STORE: &str = "out/store/";
     /// The state of the exporter.
     const STATE: &str = "out/state/";
-    /// The records of derivations.
-    const DERIVATIONS: &str = "out/state/records/derivations/";
+    /// The record packs.
+    const PACKS: &str = "out/state/records/packs/";
     /// The pointers of the views.
     const POINTERS: &str = "out/published/";
 
@@ -415,10 +461,19 @@ mod bucket {
         assert!(second.contains(" kept 1 "), "{second}");
         // The lone bundle is neither downloaded nor read: the state knows its files.
         assert_eq!(scratch.downloaded("second"), 2);
-        let asked = |operation| requests.iter().any(|logged| logged.operation == operation);
+        let asked = |operation| requests.iter().filter(move |r| r.operation == operation);
+        assert_eq!(asked(Operation::Head).count(), 0, "{requests:?}");
+        // The records of earlier runs come from their packs, after one listing of them.
+        let listed: Vec<&str> = asked(Operation::List).map(|r| r.name.as_str()).collect();
+        assert_eq!(listed, [PACKS], "{requests:?}");
+        let records = format!("{STATE}records/");
+        let read = asked(Operation::Get).filter(|r| r.name.starts_with(&records));
+        let read: Vec<&Logged> = read.collect();
+        assert!(!read.is_empty(), "{requests:?}");
         assert!(
-            !asked(Operation::Head) && !asked(Operation::List),
-            "{requests:?}"
+            read.iter()
+                .all(|r| r.status == 200 && r.name.starts_with(PACKS)),
+            "{read:?}"
         );
 
         let fresh = Server::start();
@@ -463,24 +518,25 @@ mod bucket {
             .filter(|name| !name.starts_with(STATE) && !name.starts_with(POINTERS))
             .collect();
         assert!(elsewhere.is_empty(), "{elsewhere:?}");
-        // Nothing is looked up, listed or uploaded in parts.
+        // Nothing is looked up or uploaded in parts, and only the record packs are listed.
         let other_operations: Vec<&Logged> = requests
             .iter()
-            .filter(|r| !matches!(r.operation, Operation::Get | Operation::Put))
+            .filter(|r| match r.operation {
+                Operation::Get | Operation::Put => false,
+                Operation::List => r.name != PACKS,
+                _ => true,
+            })
             .collect();
         assert!(other_operations.is_empty(), "{other_operations:?}");
     }
 
-    /// The derivation records in `bucket`, with the object each names: an asset document or a
-    /// file.
-    fn derivation_records(bucket: &Server) -> BTreeMap<String, Option<String>> {
-        let records = held(bucket, DERIVATIONS).into_iter().map(|name| {
-            let record: serde_json::Value =
-                serde_json::from_slice(&bucket.object(&name).unwrap()).unwrap();
-            let object = record["document"]["key"].as_str().map(str::to_owned);
-            (name, object)
-        });
-        records.collect()
+    /// The records in the packs of `bucket`, by subject, each with the objects it names.
+    fn records(bucket: &Server) -> BTreeMap<String, Vec<String>> {
+        let packs = held(bucket, PACKS).into_iter();
+        records_of(packs.map(|name| {
+            let bytes = bucket.object(&name).unwrap();
+            (name, bytes)
+        }))
     }
 
     /// The bytes in `bucket` of the object named `key`, as `<sha256>.<extension>`.
@@ -489,16 +545,15 @@ mod bucket {
     }
 
     #[test]
-    fn a_run_stopped_after_its_derivations_leaves_them_to_the_next() {
+    fn a_run_stopped_after_its_records_leaves_them_to_the_next() {
         let scratch = Scratch::new("increment-stopped");
         let whole = Server::start();
         let (_, requests) = answered(&whole, || scratch.update("whole", Some(&whole)));
-        let made = derivation_records(&whole);
+        let made = records(&whole);
         assert!(!made.is_empty());
-        // The objects and the derivation records are uploaded before the unit records, the state
-        // and the pointers.
+        // The objects and the record packs are uploaded before the state and the pointers.
         let accepted = uploaded(&requests);
-        let derivation = |name: &str| name.starts_with(STORE) || name.starts_with(DERIVATIONS);
+        let derivation = |name: &str| name.starts_with(STORE) || name.starts_with(PACKS);
         let derived = accepted.iter().filter(|name| derivation(name)).count();
         let first = &accepted[..derived];
         assert!(first.iter().all(|name| derivation(name)), "{accepted:?}");
@@ -510,7 +565,7 @@ mod bucket {
         let stopped = scratch.attempt(&["update", "r"], "stopped", Some(&bucket), &[]);
         assert!(!stopped.status.success());
         assert_eq!(pointer(&bucket, "canonical"), None);
-        assert_eq!(derivation_records(&bucket), made);
+        assert_eq!(records(&bucket), made);
         // A record names only objects that the bucket holds, and so does an asset document it
         // names.
         for key in made.values().flatten() {
@@ -539,22 +594,34 @@ mod bucket {
     }
 
     #[test]
-    fn a_verified_update_asks_only_for_the_records_its_listing_finds() {
-        let scratch = Scratch::new("increment-verified");
+    fn gc_moves_records_kept_one_file_each_into_packs() {
+        let scratch = Scratch::new("gc-singles");
         let bucket = Server::start();
         scratch.update("first", Some(&bucket));
+        let made = records(&bucket);
+        // The records, kept one file each.
+        for name in held(&bucket, PACKS) {
+            for entry in Pack::read(&name, &bucket.object(&name).unwrap()).unwrap() {
+                let (directory, key) = match entry.subject {
+                    Subject::Unit(key) => ("units", key.to_string()),
+                    Subject::Derivation(fingerprint) => ("derivations", hex(&fingerprint)),
+                };
+                let single = format!("{STATE}records/{directory}/{}/{key}.json", &key[..2]);
+                bucket.insert(&single, entry.json().as_bytes().to_vec());
+            }
+            bucket.remove(&name);
+        }
+
+        let moved = scratch.gc("moving", Some(&bucket), &["--delete"]);
+        assert!(moved.contains("records/packs: new 1 files"), "{moved}");
+        assert!(held(&bucket, &format!("{STATE}records/units/")).is_empty());
+        assert!(held(&bucket, &format!("{STATE}records/derivations/")).is_empty());
+        assert_eq!(records(&bucket), made);
+
+        // A machine with an empty output takes the records from the new pack.
         scratch.cdn.serve_version("2");
-        let (second, requests) = answered(&bucket, || {
-            scratch.run(&["update", "r"], "second", Some(&bucket), &["--verify"])
-        });
+        let second = scratch.update("second", Some(&bucket));
         assert!(second.contains("units 3 reused 1"), "{second}");
-        let records = format!("{STATE}records/");
-        let asked: Vec<&Logged> = requests
-            .iter()
-            .filter(|r| r.operation == Operation::Get && r.name.starts_with(&records))
-            .collect();
-        assert!(!asked.is_empty(), "{requests:?}");
-        assert!(asked.iter().all(|r| r.status == 200), "{asked:?}");
     }
 
     #[test]

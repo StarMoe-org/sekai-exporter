@@ -57,6 +57,8 @@ pub trait StateFiles: Sync {
     fn read(&self, name: &str) -> io::Result<Option<Vec<u8>>>;
     /// Writes `bytes` as the file `name`.
     fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()>;
+    /// The names of the files in `directory`, which holds no directories, in no given order.
+    fn list(&self, directory: &str) -> io::Result<Vec<String>>;
 }
 
 /// State files in memory.
@@ -82,6 +84,16 @@ impl StateFiles for MemoryFiles {
     fn write(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
         self.files().insert(name.to_owned(), bytes.to_vec());
         Ok(())
+    }
+
+    fn list(&self, directory: &str) -> io::Result<Vec<String>> {
+        let prefix = format!("{directory}/");
+        let files = self.files();
+        let names = files.keys().filter(|name| {
+            name.strip_prefix(&prefix)
+                .is_some_and(|file| !file.contains('/'))
+        });
+        Ok(names.cloned().collect())
     }
 }
 
@@ -117,6 +129,23 @@ impl StateFiles for DirectoryFiles {
         let partial = path.with_file_name(format!(".{}-{write}.part", std::process::id()));
         std::fs::write(&partial, bytes)?;
         std::fs::rename(&partial, &path)
+    }
+
+    fn list(&self, directory: &str) -> io::Result<Vec<String>> {
+        let entries = match std::fs::read_dir(self.0.join(directory)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            entries => entries?,
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name();
+            let name = name.to_string_lossy();
+            // A partial write is no file yet.
+            if !name.starts_with('.') {
+                names.push(format!("{directory}/{name}"));
+            }
+        }
+        Ok(names)
     }
 }
 

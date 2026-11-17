@@ -428,10 +428,11 @@ impl S3 {
         self.list_sharded(&store, "files")
     }
 
-    /// The names of the state files in the state directory `directory` of the bucket, whose files
-    /// lie in subdirectories named by two hexadecimal digits, as [`S3::read_state`] names them.
+    /// The names of the state files in the state directory `directory` of the bucket, which holds
+    /// no directories, as [`S3::read_state`] names them.
     pub fn state_names(&self, directory: &str) -> Result<Vec<String>, PublishError> {
-        let listed = self.list_sharded(&self.state(directory), "state")?;
+        let listed = self.list(&self.state(&format!("{directory}/")));
+        let listed = listed.map_err(|e| PublishError::new("state", e))?;
         let state = self.state("");
         let names = listed
             .into_iter()

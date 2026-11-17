@@ -7,9 +7,15 @@
 //! records among them name. Everything else under `store/` and `state/` is garbage. In the output
 //! directory, the bundles of the input store that no region fetched last, and the partial writes
 //! that interrupted runs left in `incoming/`, are garbage too.
+//!
+//! Records lie in packs that are never changed, as the pages of a flash drive are never written
+//! twice. A pack that holds a record no longer kept, or that holds few records, is rewritten: the
+//! records kept of every such pack are written to new packs, and then the packs they came from
+//! are deleted. Records kept one file each are moved into packs the same way.
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -17,7 +23,9 @@ use sekai_catalog::db::Catalog;
 use sekai_catalog::{Key, LocalStore, MemoryHoldings, Objects};
 use sekai_format::publication::Pointer;
 use sekai_pipeline::parallel;
-use sekai_pipeline::records::{DERIVATION_RECORDS, UNIT_RECORDS, record_objects};
+use sekai_pipeline::records::{
+    DERIVATION_RECORDS, Entry, PACK_BYTES, Pack, RECORD_PACKS, UNIT_RECORDS,
+};
 use sekai_pipeline::state::{CHUNKS, ROOTS, RegionState, root_region};
 use sekai_publish::history::Versions;
 use sekai_publish::{Listed, referred};
@@ -115,14 +123,18 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
             .unwrap_or(UNIX_EPOCH),
         requests: site.requests(options.threads),
     };
-    let garbage = collector.garbage()?;
+    let Garbage { packs, kinds } = collector.garbage()?;
     let output = Site::local(&options.output);
     let leftovers = collector.leftovers(&output, fetched(&options.output, &store).as_ref())?;
-    for kind in garbage.iter().chain(&leftovers) {
+    for kind in kinds.iter().chain(&leftovers) {
         kind.report();
     }
+    let bytes: usize = packs.iter().map(|pack| pack.bytes.len()).sum();
+    println!("{RECORD_PACKS}: new {} files, {bytes} bytes", packs.len());
     if options.delete {
-        for kind in &garbage {
+        // The records kept are in their new packs before the packs they came from go.
+        collector.write(&site, &packs)?;
+        for kind in &kinds {
             collector.delete(&site, kind)?;
         }
         for kind in &leftovers {
@@ -171,10 +183,50 @@ struct Collector<'a> {
     requests: usize,
 }
 
-/// A record, with the objects it names.
-struct Recorded {
+/// A file of records: a pack, or a record kept in a file of its own.
+struct RecordFile {
     file: Listed,
-    objects: Vec<Key>,
+    /// Its records, each with the objects it names.
+    records: Vec<(Entry, Vec<Key>)>,
+}
+
+impl RecordFile {
+    /// The bytes of its records, which [`PACK_BYTES`] counts.
+    fn size(&self) -> usize {
+        self.records.iter().map(|(entry, _)| entry.size()).sum()
+    }
+
+    /// The objects its records name.
+    fn named(&self) -> impl Iterator<Item = &Key> {
+        self.records.iter().flat_map(|(_, objects)| objects)
+    }
+
+    /// Its records that name only objects in `live`, which are kept.
+    fn kept<'r>(&'r self, live: &'r HashSet<Key>) -> impl Iterator<Item = &'r Entry> {
+        let kept = self
+            .records
+            .iter()
+            .filter(|(_, objects)| named_live(objects, live));
+        kept.map(|(entry, _)| entry)
+    }
+
+    /// Whether it holds a record that names an object outside `live`, which is not kept.
+    fn drops(&self, live: &HashSet<Key>) -> bool {
+        let kept = |(_, objects): &(Entry, Vec<Key>)| named_live(objects, live);
+        !self.records.iter().all(kept)
+    }
+}
+
+/// Whether every one of `objects` is in `live`.
+fn named_live(objects: &[Key], live: &HashSet<Key>) -> bool {
+    objects.iter().all(|object| live.contains(object))
+}
+
+/// The garbage of a site, and the record packs a collection writes before it deletes any.
+struct Garbage {
+    packs: Vec<Pack>,
+    /// The files of each kind, in the order they are deleted.
+    kinds: Vec<Kind>,
 }
 
 /// The files of one kind that a site keeps, and those of them that are garbage.
@@ -246,10 +298,10 @@ fn state_name(file: &Listed) -> &str {
 impl Collector<'_> {
     /// The garbage of the site, in the order it is deleted: the records, which name objects, before
     /// the state chunks and the objects of the store.
-    fn garbage(&self) -> Result<Vec<Kind>, String> {
+    fn garbage(&self) -> Result<Garbage, String> {
         let mut live = self.published()?;
         let chunks = self.states(&mut live)?;
-        let records = self.records(&mut live)?;
+        let (packs, records) = self.records(&mut live)?;
         let chunk_files = self.site.list_sharded(&format!("state/{CHUNKS}"))?;
         let state_chunks = chunk_files.into_iter().map(|file| {
             let garbage = self.old(&file) && !chunks.contains(state_name(&file));
@@ -261,7 +313,8 @@ impl Collector<'_> {
             (file, garbage)
         });
         let others = [Kind::of(CHUNKS, state_chunks), Kind::of("store", objects)];
-        Ok(records.into_iter().chain(others).collect())
+        let kinds = records.into_iter().chain(others).collect();
+        Ok(Garbage { packs, kinds })
     }
 
     /// The files that runs leave in the output directory `output`: the bundles of the input store
@@ -355,54 +408,110 @@ impl Collector<'_> {
         Ok(chunks)
     }
 
-    /// The unit and the derivation records. A record written before the grace period is garbage
-    /// when it names an object outside `live`; the objects that the records written within it name
-    /// are added to `live` first.
-    fn records(&self, live: &mut HashSet<Key>) -> Result<[Kind; 2], String> {
-        let units = self.read_records(UNIT_RECORDS)?;
-        let derivations = self.read_records(DERIVATION_RECORDS)?;
-        for record in units.iter().chain(&derivations) {
-            if !self.old(&record.file) {
-                live.extend(record.objects.iter().cloned());
+    /// The record packs that hold the records kept of the record files rewritten, and the record
+    /// files of each kind with those to delete. The objects that the records written within the
+    /// grace period name are added to `live` first; a record written before it is kept when every
+    /// object it names is live.
+    ///
+    /// A pack written before the grace period is rewritten when it holds a record that is not
+    /// kept or when it is small, and so is every file of a single record written before it. A pack
+    /// that the new packs give again as it is stays, and is not written again.
+    fn records(&self, live: &mut HashSet<Key>) -> Result<(Vec<Pack>, [Kind; 3]), String> {
+        let packs = self.read_packs()?;
+        let units = self.read_singles(UNIT_RECORDS)?;
+        let derivations = self.read_singles(DERIVATION_RECORDS)?;
+        let singles = || units.iter().chain(&derivations);
+        for file in packs.iter().chain(singles()) {
+            if !self.old(&file.file) {
+                live.extend(file.named().cloned());
             }
         }
-        let kind = |name, records: Vec<Recorded>| {
-            let judged = records.into_iter().map(|record| {
-                let named_dead = record.objects.iter().any(|object| !live.contains(object));
-                let garbage = self.old(&record.file) && named_dead;
-                (record.file, garbage)
-            });
-            Kind::of(name, judged)
+        let live = &*live;
+        let rewritten = |pack: &RecordFile| {
+            self.old(&pack.file) && (pack.drops(live) || pack.size() < PACK_BYTES / 4)
         };
-        Ok([
-            kind(UNIT_RECORDS, units),
-            kind(DERIVATION_RECORDS, derivations),
-        ])
+        let moved = packs.iter().filter(|pack| rewritten(pack));
+        let moved = moved.chain(singles().filter(|file| self.old(&file.file)));
+        let kept = moved.flat_map(|file| file.kept(live)).cloned().collect();
+        let new = Pack::of(kept).map_err(|e| format!("{RECORD_PACKS}: {e}"))?;
+        let names: HashSet<&str> = new.iter().map(|pack| pack.name.as_str()).collect();
+        let judged = packs.iter().map(|pack| {
+            let garbage = rewritten(pack) && !names.contains(state_name(&pack.file));
+            (pack.file.clone(), garbage)
+        });
+        let kinds = [
+            Kind::of(RECORD_PACKS, judged),
+            Kind::of(UNIT_RECORDS, self.moved(&units)),
+            Kind::of(DERIVATION_RECORDS, self.moved(&derivations)),
+        ];
+        let existing: HashSet<&str> = packs.iter().map(|pack| state_name(&pack.file)).collect();
+        let written = new
+            .into_iter()
+            .filter(|pack| !existing.contains(pack.name.as_str()));
+        Ok((written.collect(), kinds))
     }
 
-    /// The records in the state directory `directory`, with the objects each names.
-    fn read_records(&self, directory: &str) -> Result<Vec<Recorded>, String> {
+    /// The files of single records `files`, each with whether it is moved into a pack: when it was
+    /// written before the grace period.
+    fn moved<'f>(&'f self, files: &'f [RecordFile]) -> impl Iterator<Item = (Listed, bool)> + 'f {
+        files
+            .iter()
+            .map(|file| (file.file.clone(), self.old(&file.file)))
+    }
+
+    /// The record packs of the site, with their records.
+    fn read_packs(&self) -> Result<Vec<RecordFile>, String> {
+        let files = self.site.list(&format!("state/{RECORD_PACKS}"))?;
+        self.read_records(files, Pack::read)
+    }
+
+    /// The files of single records in the state directory `directory`, with their records; a
+    /// file that holds no record that can be read holds none.
+    fn read_singles(&self, directory: &str) -> Result<Vec<RecordFile>, String> {
         let files = self.site.list_sharded(&format!("state/{directory}"))?;
-        let named = parallel(files.len(), self.requests, |i| self.named(&files[i]));
-        let records = files.into_iter().zip(named);
-        records
-            .map(|(file, objects)| {
-                Ok(Recorded {
-                    file,
-                    objects: objects?,
-                })
-            })
-            .collect()
+        self.read_records(files, |name, bytes| {
+            Ok(Entry::of_file(name, bytes).into_iter().collect())
+        })
     }
 
-    /// The objects that the record `file` names; none when it is gone.
-    fn named(&self, file: &Listed) -> Result<Vec<Key>, String> {
-        let name = state_name(file);
-        let failed = |e: std::io::Error| format!("{name}: {e}");
-        let Some(bytes) = self.site.files().read(name).map_err(failed)? else {
-            return Ok(Vec::new());
-        };
-        record_objects(name, &bytes).map_err(failed)
+    /// The record files `files`, with the records that `read` finds in each and the objects each
+    /// names. A file gone since the listing holds none.
+    fn read_records(
+        &self,
+        files: Vec<Listed>,
+        read: impl Fn(&str, &[u8]) -> io::Result<Vec<Entry>> + Sync,
+    ) -> Result<Vec<RecordFile>, String> {
+        let records = parallel(files.len(), self.requests, |i| {
+            let name = state_name(&files[i]);
+            let named = || -> io::Result<Vec<(Entry, Vec<Key>)>> {
+                let Some(bytes) = self.site.files().read(name)? else {
+                    return Ok(Vec::new());
+                };
+                let entries = read(name, &bytes)?;
+                let objects = entries.iter().map(Entry::objects);
+                let objects = objects.collect::<io::Result<Vec<_>>>()?;
+                Ok(entries.into_iter().zip(objects).collect())
+            };
+            named().map_err(|e| format!("{name}: {e}"))
+        });
+        let files = files.into_iter().zip(records);
+        let files = files.map(|(file, records)| {
+            Ok(RecordFile {
+                file,
+                records: records?,
+            })
+        });
+        files.collect()
+    }
+
+    /// Writes `packs` at `site`.
+    fn write(&self, site: &Site<'_>, packs: &[Pack]) -> Result<(), String> {
+        let written = parallel(packs.len(), self.requests, |i| {
+            let pack = &packs[i];
+            let written = site.files().write(&pack.name, &pack.bytes);
+            written.map_err(|e| format!("{}: {e}", pack.name))
+        });
+        written.into_iter().collect()
     }
 
     /// Deletes the garbage of `kind`, which lies at `site`.

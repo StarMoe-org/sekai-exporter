@@ -281,6 +281,22 @@ impl Catalog {
         }))
     }
 
+    /// The last fetch of every bundle of every region.
+    pub fn bundles(&self) -> io::Result<Vec<BundleRow>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(BUNDLES).map_err(other)?;
+        let mut rows = Vec::new();
+        for entry in table.range::<(&str, &str)>(..).map_err(other)? {
+            let (_, value) = entry.map_err(other)?;
+            let (declared, sha256) = value.value();
+            rows.push(BundleRow {
+                declared: declared.to_owned(),
+                sha256: sha256.to_owned(),
+            });
+        }
+        Ok(rows)
+    }
+
     /// The serialized files of the bundle with SHA-256 `bundle`, as recorded with
     /// [`Batch::put_bundle_files`].
     pub fn bundle_files(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {

@@ -60,9 +60,12 @@ fn media_type(extension: &str) -> &'static str {
 
 /// Feeds `values` to `hash` as the bytes `bytes` gives each.
 fn update<T: Copy, const N: usize>(hash: &mut Sha256, values: &[T], bytes: fn(T) -> [u8; N]) {
-    for chunk in values.chunks(4096) {
-        let buffer: Vec<u8> = chunk.iter().flat_map(|&value| bytes(value)).collect();
-        hash.update(&buffer);
+    let mut buffer = [[0u8; N]; 1024];
+    for chunk in values.chunks(buffer.len()) {
+        for (slot, &value) in buffer[..chunk.len()].iter_mut().zip(chunk) {
+            *slot = bytes(value);
+        }
+        hash.update(buffer[..chunk.len()].as_flattened());
     }
 }
 

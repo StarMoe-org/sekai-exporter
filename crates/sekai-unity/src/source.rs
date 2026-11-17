@@ -7,6 +7,8 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
+use sha2::{Digest, Sha256};
+
 use crate::error::{Error, Result};
 
 /// Bytes returned by a [`ByteSource`]: borrowed from the source, shared with a cached block, or
@@ -56,6 +58,23 @@ pub trait ByteSource: Send + Sync {
     /// Returns `len` bytes starting at `offset`, or an error if the range is not inside the
     /// source.
     fn read(&self, offset: u64, len: usize) -> Result<Chunk<'_>>;
+}
+
+/// The bytes [`sha256`] reads at a time.
+const DIGEST_CHUNK: u64 = 1 << 20;
+
+/// The SHA-256 of the `len` bytes of `source` at `offset`. The bytes are read a chunk at a time,
+/// so hashing a large entry holds little of it in memory.
+pub fn sha256(source: &dyn ByteSource, offset: u64, len: u64) -> Result<[u8; 32]> {
+    let mut hash = Sha256::new();
+    let mut done = 0;
+    while done < len {
+        let take = (len - done).min(DIGEST_CHUNK);
+        // A chunk is at most `DIGEST_CHUNK` bytes, which fits in a `usize`.
+        hash.update(&*source.read(offset + done, take as usize)?);
+        done += take;
+    }
+    Ok(hash.finalize().into())
 }
 
 pub(crate) fn check_range(what: &'static str, total: u64, offset: u64, len: usize) -> Result<()> {
@@ -248,6 +267,18 @@ mod tests {
         assert_eq!(&*data.read(1, 2).unwrap(), &[2, 3]);
         assert!(data.read(3, 2).is_err());
         assert!(data.read(u64::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn a_digest_read_in_chunks_matches_the_digest_of_the_whole() {
+        let data: Vec<u8> = (0..5 * DIGEST_CHUNK / 2).map(|i| i as u8).collect();
+        let whole =
+            |range: std::ops::Range<usize>| -> [u8; 32] { Sha256::digest(&data[range]).into() };
+        let len = data.len() as u64;
+        assert_eq!(sha256(&data, 0, len).unwrap(), whole(0..data.len()));
+        assert_eq!(sha256(&data, 3, len - 7).unwrap(), whole(3..data.len() - 4));
+        assert_eq!(sha256(&data, 5, 0).unwrap(), whole(5..5));
+        assert!(sha256(&data, 1, len).is_err());
     }
 
     #[test]

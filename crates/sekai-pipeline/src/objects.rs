@@ -10,8 +10,8 @@ use sekai_unity::document::{EntryRecord, Payloads, write_bundle};
 use sekai_unity::index::{
     BundleIndex, FileLayouts, OpenFile, VersionIndex, index_file, index_resources,
 };
-use sekai_unity::{BlockCache, Bundle, ByteSource, ClassLayouts, SerializedFile, open_files};
-use sha2::{Digest, Sha256};
+use sekai_unity::source;
+use sekai_unity::{BlockCache, Bundle, ClassLayouts, SerializedFile, open_files};
 
 use crate::eval::parallel;
 use crate::stream::Inputs;
@@ -125,14 +125,12 @@ pub fn document(
         .enumerate()
         .map(|(i, entry)| {
             let entry_source = loaded.bundle.entry(i, source.cache);
-            let bytes = entry_source
-                .read(0, entry.size as usize)
-                .map_err(|e| e.to_string())?;
+            let sha256 = source::sha256(&entry_source, 0, entry.size).map_err(|e| e.to_string())?;
             Ok(EntryRecord {
                 path: entry.path.clone(),
                 serialized: entry.is_serialized(),
                 size: entry.size,
-                sha256: Sha256::digest(&*bytes).into(),
+                sha256,
             })
         })
         .collect::<Result<Vec<_>, String>>()?;

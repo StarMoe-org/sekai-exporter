@@ -86,6 +86,7 @@ With the `s3` feature, `sekai-exporter update` also publishes to an S3-compatibl
 | `prefix` | Optional. Prepended to every object name; empty or ending in `/` |
 | `layout` | Optional. The [layout](#layouts) of the canonical view: `"index"`, the default. The storage view is always uploaded in the `paths` layout |
 | `connections` | Optional, 8 by default. Requests in flight at once, and the connections kept open between them |
+| `listings` | Optional, `connections` by default. Listing requests (`ListObjectsV2`) in flight at once, for a service that answers many listings at once more slowly than other requests |
 | `secrets` | The names of the secrets that hold the access key ID and the secret access key. Each value is read from the environment variable of that name, or from the file of that name in the `--secrets` directory |
 
 The bucket has the shape of the local output: each object of the store at `<prefix>store/<aa>/<sha256>.<extension>`, and the pointers of the canonical and the storage view at `<prefix>published/<region>/<view>/current.json` and `<prefix>published/<region>/<view>/versions/<published version>.json`. Immutable objects under `store/` are written with `Cache-Control: public, max-age=31536000, immutable` and pointers with `Cache-Control: no-cache`. Requests are signed with AWS Signature Version 4, and the key needs permission to read, list and write objects under the prefix.

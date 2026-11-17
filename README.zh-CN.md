@@ -105,7 +105,7 @@ sekai-exporter gc <output> --config <file> --secrets <dir>
 | 来源 | `jp`、`en`、`cn`、`tw`、`kr` 区服的分发服务，客户端安装包，以及本地目录 |
 | 发布 | 路径索引、索引分片与路径树，版本历史与变更，以及目录树，目标为本地目录或 S3 兼容存储桶；`gc` 回收无人引用的文件 |
 | 服务 | `serve` 解析器、它的 HTTP 服务器与容器镜像 |
-| WebAssembly | 核心可构建为 `wasm32`，持续集成会把它写出的对象文档和 store 与原生构建的逐字节比对 |
+| WebAssembly | 核心可构建为 `wasm32`，持续集成会把它写出的对象文档和 store 与原生构建的逐字节比对。我们还不知道这有什么用，但是它可以 |
 
 [路线图](docs/roadmap.zh-CN.md)列出了每个部分的状态和尚未完成的工作。
 

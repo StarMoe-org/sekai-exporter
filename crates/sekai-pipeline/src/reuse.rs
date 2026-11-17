@@ -441,7 +441,7 @@ fn context(classes: &dyn ClassLayouts, limit: Option<u64>) -> String {
 
 /// What the results of a unit with roots of a form follow from of its converter.
 struct Identities {
-    /// When every asset of the form converted: the form, the version and the encoder of its
+    /// When every asset of the form converted: the form, the version and the encoders of its
     /// files that lose information.
     converted: String,
     /// When an asset of the form failed: also the revision, which changes when it may convert.
@@ -454,7 +454,7 @@ impl Identities {
             "form {} {}\n{}",
             converter.name(),
             converter.version(),
-            eval::lossy_encoder(converter)
+            eval::lossy_encoders(converter)
         );
         let failing = format!("{converted}revision {}\n", converter.revision());
         Self { converted, failing }
@@ -709,6 +709,37 @@ mod tests {
         r#""document":"d","error":null,"logical":"a/b","path_id":-7}],"unnamed":[["a/c",9]],"#,
         r#""outside":[]}"#,
     );
+
+    #[test]
+    fn a_form_is_identified_with_the_encoders_whose_files_lose_information() {
+        use sekai_convert::{Asset, Context, ConvertError, Encoders, ObjectId, ObjectIndex};
+        use sekai_encode::{mp3, mp4};
+
+        struct Declaring(Encoders);
+        impl Converter for Declaring {
+            fn name(&self) -> &'static str {
+                "form"
+            }
+            fn version(&self) -> u32 {
+                1
+            }
+            fn encoders(&self) -> Encoders {
+                self.0
+            }
+            fn is_root(&self, _: &ObjectIndex, _: Option<&str>, _: &[String]) -> bool {
+                false
+            }
+            fn convert(&self, _: ObjectId, _: &dyn Context) -> Result<Option<Asset>, ConvertError> {
+                Ok(None)
+            }
+        }
+
+        let identity = |encoders| Identities::of(&Declaring(encoders)).converted;
+        let line = |name, version| format!("encoder {name} {version}\n");
+        assert_eq!(identity(Encoders::NONE), identity(Encoders::TEXTURE));
+        assert!(identity(Encoders::AUDIO).ends_with(&line(mp3::NAME, mp3::VERSION)));
+        assert!(identity(Encoders::VIDEO).ends_with(&line(mp4::NAME, mp4::VERSION)));
+    }
 
     #[test]
     fn a_record_of_object_roots_reads_and_writes_as_it_is_stored() {

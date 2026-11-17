@@ -163,7 +163,7 @@ sekai-exporter serve <output> --routes <file> [--listen <address>] [--threads <n
 
 服务每以 `500` 回答一个请求，就向标准错误流写一行，给出指针或对象及其问题所在。标准错误流无法写入时，例如读取端已经离开的管道，这些行被丢弃，请求照常得到应答。
 
-仓库根目录的 `Dockerfile` 构建一个镜像，其中的命令只带 `serve` feature 构建。`main` 上的每个提交都发布为 `ghcr.io/starmoe-org/sekai-exporter`，标签为 `main` 以及提交哈希的前 12 个字符。镜像以无特权用户运行，只需读取输出目录：
+仓库根目录的 `Dockerfile` 构建一个镜像，其中的命令只带 `serve` feature 构建。`main` 上的每个提交都发布为 `ghcr.io/starmoe-org/sekai-exporter`，标签为 `main` 以及提交哈希的前 12 个字符。每个发布版本 `v<版本>` 另带标签 `<版本>`，非预发布版本还带其次版本号标签，例如 `0.1`。镜像以无特权用户运行，只需读取输出目录：
 
 ```bash
 docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/routes.json:ro \

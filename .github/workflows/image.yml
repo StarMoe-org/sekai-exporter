@@ -3,6 +3,7 @@ name: image
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     paths:
       - Dockerfile
@@ -27,7 +28,23 @@ jobs:
         id: name
         run: |
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
-          echo "tags=$image:${GITHUB_SHA::12},$image:main" >> "$GITHUB_OUTPUT"
+          tags="$image:${GITHUB_SHA::12}"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            declared=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+            if [[ "$version" != "$declared" ]]; then
+              echo "::error::tag $GITHUB_REF_NAME does not match the workspace version $declared"
+              exit 1
+            fi
+            tags="$tags,$image:$version"
+            # A release (not a pre-release) also moves the tag of its minor version.
+            if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              tags="$tags,$image:${version%.*}"
+            fi
+          else
+            tags="$tags,$image:main"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
       - if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:

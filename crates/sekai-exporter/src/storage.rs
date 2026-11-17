@@ -87,7 +87,7 @@ impl sekai_pipeline::Fusion for Fusion<'_> {
             let extension = file.transform.extension().unwrap_or(&source.extension);
             let key = self.store.put(&bytes, extension)?;
             span.bytes(0, bytes.len() as u64);
-            self.derivations.put(fingerprint, Derived::Document(key))?;
+            self.derivations.put_file(fingerprint, key)?;
         }
         Ok(())
     }
@@ -119,7 +119,7 @@ fn make(
     let extension = transform.extension().unwrap_or(&job.source.extension);
     let key = objects.put(&bytes, extension)?;
     span.bytes(member.len() as u64, bytes.len() as u64);
-    derivations.put(fingerprint, Derived::Document(key.clone()))?;
+    derivations.put_file(fingerprint, key.clone())?;
     Ok(Ok((key, bytes.len() as u64, true)))
 }
 

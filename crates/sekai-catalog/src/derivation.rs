@@ -21,6 +21,12 @@ pub trait Derivations: Sync {
     fn get(&self, fingerprint: &[u8; 32]) -> io::Result<Option<Derived>>;
     /// Records the output of `fingerprint`.
     fn put(&self, fingerprint: [u8; 32], derived: Derived) -> io::Result<()>;
+    /// Records `file` as the output of `fingerprint`: a file that an asset document or a view
+    /// names, such as the encoding of a member, rather than an asset document. By default it is
+    /// recorded as any other output.
+    fn put_file(&self, fingerprint: [u8; 32], file: Key) -> io::Result<()> {
+        self.put(fingerprint, Derived::Document(file))
+    }
     /// Makes every recorded output durable.
     fn flush(&self) -> io::Result<()> {
         Ok(())

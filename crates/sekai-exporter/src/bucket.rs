@@ -13,6 +13,7 @@ use sekai_pipeline::state::StateFiles;
 use sekai_publish::{Layout, Listed, Object};
 
 use crate::monitor::Monitor;
+use crate::update::site::Stored;
 
 /// The `publish.s3` section of the configuration, if there is one.
 fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
@@ -127,14 +128,17 @@ impl Bucket {
     }
 
     /// Uploads the objects of `referred` that the holdings of `objects` do not record.
-    pub(crate) fn store(&self, objects: &Objects<'_>, referred: Vec<Object>) -> Result<(), String> {
+    pub(crate) fn store(
+        &self,
+        objects: &Objects<'_>,
+        referred: Vec<Object>,
+    ) -> Result<Stored, String> {
         let stored = sekai_publish::s3::store_objects(objects, &self.s3, referred);
         let stored = stored.map_err(|e| e.to_string())?;
-        println!(
-            "bucket uploaded {} present {}",
-            stored.uploaded, stored.present
-        );
-        Ok(())
+        Ok(Stored {
+            uploaded: stored.uploaded,
+            present: stored.present,
+        })
     }
 
     /// Makes `pointer` the current publication of `target` in the bucket.
@@ -225,7 +229,7 @@ impl Bucket {
         &self,
         _objects: &Objects<'_>,
         _referred: Vec<Object>,
-    ) -> Result<(), String> {
+    ) -> Result<Stored, String> {
         match *self {}
     }
 

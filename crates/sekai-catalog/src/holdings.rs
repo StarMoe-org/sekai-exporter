@@ -73,8 +73,16 @@ impl Holdings for MemoryHoldings {
     }
 
     fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>> {
+        let mut first = [0; 32];
+        first[0] = prefix;
+        let first = Key {
+            sha256: first,
+            extension: String::new(),
+        };
         let objects = self.objects();
-        let held = objects.iter().filter(|(key, _)| key.sha256[0] == prefix);
+        let held = objects
+            .range(first..)
+            .take_while(|(key, _)| key.sha256[0] == prefix);
         Ok(held.map(|(key, &size)| (key.clone(), size)).collect())
     }
 
@@ -213,6 +221,36 @@ mod tests {
         assert_eq!(objects.read(&evicted).unwrap(), b"evicted");
         assert!(local.contains(&evicted));
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn the_sizes_under_a_prefix_are_those_of_the_objects_whose_hash_starts_with_it() {
+        let key = |first: u8, last: u8, extension: &str| {
+            let mut sha256 = [last; 32];
+            sha256[0] = first;
+            Key {
+                sha256,
+                extension: extension.to_owned(),
+            }
+        };
+        let objects = [
+            key(0x00, 0x00, ""),
+            key(0x00, 0xff, "webp"),
+            key(0x41, 0x00, "json"),
+            key(0x41, 0xff, "glb"),
+            key(0x42, 0x00, "json"),
+            key(0xff, 0xff, "mp4"),
+        ];
+        let sizes: Vec<(Key, u64)> = objects.iter().cloned().zip(1..).collect();
+        let held = MemoryHoldings::listed(sizes.iter().cloned().collect());
+        for prefix in [0x00, 0x41, 0x42, 0x80, 0xff] {
+            let expected: HashMap<Key, u64> = sizes
+                .iter()
+                .filter(|(key, _)| key.sha256[0] == prefix)
+                .cloned()
+                .collect();
+            assert_eq!(held.sizes(prefix).unwrap(), expected, "{prefix:#04x}");
+        }
     }
 
     #[test]

@@ -263,7 +263,7 @@ impl Files<'_> {
         span.bytes(0, file.bytes.len() as u64);
         let key = self.store.put(&file.bytes, file.extension)?;
         if let (Some(records), Some(record)) = (self.records, record) {
-            records.put(record, Derived::Document(key.clone()))?;
+            records.put_file(record, key.clone())?;
         }
         Ok(key)
     }

@@ -40,13 +40,15 @@ mod fetch;
 mod files;
 pub(crate) mod site;
 mod tables;
+mod uploads;
 mod views;
 
 use backed::Backed;
 use fetch::{Arriving, EarlierRun, Fetcher, declared_content, identify, in_opening_order};
 use files::KnownIndexes;
-use site::Site;
+use site::{Site, Stored};
 use tables::{build_tables, table_bindings, table_converters};
+use uploads::Uploads;
 use views::Advance;
 
 /// The size limit of the assets of a run: none.
@@ -521,11 +523,6 @@ fn export_version(
         None => Records::new(files, &held),
     };
     let requests = site.requests(options.threads);
-    let backed = Backed {
-        records: &records,
-        catalog: &opened.catalog,
-        requests,
-    };
     let baseline = {
         let _span = monitor.span("plan", "baseline", &key);
         Baseline::read(files, site, &key, &options.targets(), &objects, requests)?
@@ -535,41 +532,53 @@ fn export_version(
         root,
         publications,
     } = baseline;
-    let evaluation = opened.evaluate(
-        options,
-        &recorded.identity,
-        &objects,
-        &backed,
-        &state,
-        monitor,
-    )?;
-    let Some(Evaluation { outcome, bundles }) = evaluation else {
-        return Ok(Outcome::Incomplete);
-    };
-    let rulings = state.advance(bundles, &outcome);
+    // The derivations go to the site as they are made, by an uploader that ends with this scope.
+    let uploads = Uploads::new(site, &objects, &records, requests);
+    thread::scope(|scope| -> Result<Outcome, lexopt::Error> {
+        let _uploader = uploads.run(scope);
+        let backed = Backed {
+            records: &records,
+            catalog: &opened.catalog,
+            uploads: &uploads,
+            requests,
+        };
+        let evaluation = opened.evaluate(
+            options,
+            &recorded.identity,
+            &objects,
+            &backed,
+            &state,
+            monitor,
+        )?;
+        let Some(Evaluation { outcome, bundles }) = evaluation else {
+            return Ok(Outcome::Incomplete);
+        };
+        let rulings = state.advance(bundles, &outcome);
 
-    let context = Context {
-        options,
-        site,
-        files,
-        store: &opened.store,
-        objects: &objects,
-        backed: &backed,
-        monitor,
-        published_at: SystemTime::now(),
-    };
-    let advance = Advance {
-        rulings: &rulings,
-        state: &state,
-        results: &outcome.results,
-        records: &backed,
-    };
-    let name = recorded.identity.name();
-    let views = context.publish(&name, &publications, &advance, &opened)?;
-    let committed = context.commit(&outcome.results, state, root.as_ref(), &views, &recorded)?;
-    record_costs(opened.catalog.catalog(), monitor)?;
-    print_summary(&key, &committed, &views, &outcome);
-    Ok(Outcome::Updated(recorded.identity))
+        let context = Context {
+            options,
+            site,
+            files,
+            store: &opened.store,
+            objects: &objects,
+            backed: &backed,
+            monitor,
+            published_at: SystemTime::now(),
+        };
+        let advance = Advance {
+            rulings: &rulings,
+            state: &state,
+            results: &outcome.results,
+            records: &backed,
+        };
+        let name = recorded.identity.name();
+        let views = context.publish(&name, &publications, &advance, &opened)?;
+        let committed =
+            context.commit(&outcome.results, state, root.as_ref(), &views, &recorded)?;
+        record_costs(opened.catalog.catalog(), monitor)?;
+        print_summary(&key, &committed, &views, &outcome);
+        Ok(Outcome::Updated(recorded.identity))
+    })
 }
 
 /// What a run reads from: the source of the region and its tables, the directories of the output
@@ -925,7 +934,9 @@ struct Context<'a> {
 struct Committed {
     /// The state of the region after the run.
     state: RegionState,
-    /// How many records.
+    /// The objects of the run put at the site, as its derivations were made and then.
+    stored: Stored,
+    /// How many unit records.
     records: usize,
     /// The chunks of the state.
     chunks: Written,
@@ -1072,10 +1083,11 @@ impl Context<'_> {
         applied.map_err(|e| e.to_string())
     }
 
-    /// Commits the version `identity` that `views` publish, in this order: puts at the site every
-    /// object of the views and of the records of `results`, then writes the records, the state
-    /// that `advanced` becomes with the views (the chunks that `root` does not name, and the
-    /// root), the pointers of the views and `recorded`, as the last version.
+    /// Commits the version `identity` that `views` publish, in this order: waits until the
+    /// uploads have recorded every output of the run, puts at the site every object of the views
+    /// and of the records of `results`, then writes the records of the files that put there and
+    /// of the units, the state that `advanced` becomes with the views (the chunks that `root` does
+    /// not name, and the root), the pointers of the views and `recorded`, as the last version.
     fn commit(
         &self,
         results: &[UnitResult],
@@ -1088,15 +1100,20 @@ impl Context<'_> {
         let key = self.options.state_key();
         let records = self.backed.records;
         let results: Vec<&UnitResult> = results.iter().collect();
+        let mut stored = {
+            let _span = self.monitor.span("commit", "derivations", "");
+            self.backed.uploads.finish()?
+        };
         {
             let _span = self.monitor.span("commit", "objects", "");
             let mut referred = record_objects(records, &results, self.objects, requests)?;
             // The publications come last, so the media types they give are the ones stored.
             referred.extend(views.objects());
-            self.site.store(self.objects, referred)?;
+            stored += self.site.store(self.objects, referred)?;
         }
         let written = {
             let _span = self.monitor.span("commit", "records", "");
+            self.backed.uploads.record_stored()?;
             records.write(&results, requests)
         };
         let written = written.map_err(|e| format!("records: {e}"))?;
@@ -1122,6 +1139,7 @@ impl Context<'_> {
         site::set_last_version(self.files, &key, recorded)?;
         Ok(Committed {
             state,
+            stored,
             records: written,
             chunks,
         })
@@ -1137,7 +1155,8 @@ fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &r
     let evaluation = &outcome.streamed.evaluation;
     println!(
         "{region} {} published revision {} assets {} errors {errors} unnamed {unnamed} \
-         evaluated {} kept {} converted {} reused {} records {} state chunks {} bytes {}",
+         evaluated {} kept {} converted {} reused {} uploaded {} present {} records {} \
+         state chunks {} bytes {}",
         state.version,
         views.canonical().pointer.revision,
         owned.count() + views.tables.len(),
@@ -1145,6 +1164,8 @@ fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &r
         outcome.kept.len(),
         evaluation.converted,
         evaluation.reused,
+        committed.stored.uploaded,
+        committed.stored.present,
         committed.records,
         committed.chunks.chunks,
         committed.chunks.bytes,

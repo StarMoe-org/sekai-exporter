@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 use sekai_testkit::nuverse::{Bundle, Cdn};
 use sekai_testkit::s3::Server;
@@ -112,13 +112,28 @@ impl Scratch {
         bucket: Option<&Server>,
         options: &[&str],
     ) -> String {
+        let run = self.attempt(command, output, bucket, options);
+        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        assert!(run.status.success(), "{stdout}\n{stderr}");
+        stdout
+    }
+
+    /// Runs the command `command` as [`Scratch::run`] does, whether or not it succeeds.
+    fn attempt(
+        &self,
+        command: &[&str],
+        output: &str,
+        bucket: Option<&Server>,
+        options: &[&str],
+    ) -> Output {
         let mut config = json!({ "regions": { "r": self.cdn.region() } });
         if let Some(bucket) = bucket {
             config["publish"] = json!({ "s3": bucket.section(PREFIX) });
         }
         let config_file = self.root.join(format!("{output}.json"));
         std::fs::write(&config_file, config.to_string()).unwrap();
-        let run = Command::new(env!("CARGO_BIN_EXE_sekai-exporter"))
+        Command::new(env!("CARGO_BIN_EXE_sekai-exporter"))
             .args(command)
             .arg(self.root.join(output))
             .arg("--config")
@@ -128,11 +143,7 @@ impl Scratch {
             .args(["--threads", "2"])
             .args(options)
             .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        assert!(run.status.success(), "{stdout}\n{stderr}");
-        stdout
+            .unwrap()
     }
 
     /// The current pointer of `view` in the output directory `output`.
@@ -348,6 +359,8 @@ mod bucket {
     const STORE: &str = "out/store/";
     /// The state of the exporter.
     const STATE: &str = "out/state/";
+    /// The records of derivations.
+    const DERIVATIONS: &str = "out/state/records/derivations/";
     /// The pointers of the views.
     const POINTERS: &str = "out/published/";
 
@@ -456,6 +469,73 @@ mod bucket {
             .filter(|r| !matches!(r.operation, Operation::Get | Operation::Put))
             .collect();
         assert!(other_operations.is_empty(), "{other_operations:?}");
+    }
+
+    /// The derivation records in `bucket`, with the object each names: an asset document or a
+    /// file.
+    fn derivation_records(bucket: &Server) -> BTreeMap<String, Option<String>> {
+        let records = held(bucket, DERIVATIONS).into_iter().map(|name| {
+            let record: serde_json::Value =
+                serde_json::from_slice(&bucket.object(&name).unwrap()).unwrap();
+            let object = record["document"]["key"].as_str().map(str::to_owned);
+            (name, object)
+        });
+        records.collect()
+    }
+
+    /// The bytes in `bucket` of the object named `key`, as `<sha256>.<extension>`.
+    fn stored(bucket: &Server, key: &str) -> Option<Vec<u8>> {
+        bucket.object(&format!("{STORE}{}/{key}", &key[..2]))
+    }
+
+    #[test]
+    fn a_run_stopped_after_its_derivations_leaves_them_to_the_next() {
+        let scratch = Scratch::new("increment-stopped");
+        let whole = Server::start();
+        let (_, requests) = answered(&whole, || scratch.update("whole", Some(&whole)));
+        let made = derivation_records(&whole);
+        assert!(!made.is_empty());
+        // The objects and the derivation records are uploaded before the unit records, the state
+        // and the pointers.
+        let accepted = uploaded(&requests);
+        let derivation = |name: &str| name.starts_with(STORE) || name.starts_with(DERIVATIONS);
+        let derived = accepted.iter().filter(|name| derivation(name)).count();
+        let first = &accepted[..derived];
+        assert!(first.iter().all(|name| derivation(name)), "{accepted:?}");
+        let once: BTreeSet<&str> = accepted.iter().copied().collect();
+        assert_eq!(once.len(), accepted.len(), "uploaded twice: {accepted:?}");
+
+        let bucket = Server::start();
+        bucket.refuse_after(Some(derived));
+        let stopped = scratch.attempt(&["update", "r"], "stopped", Some(&bucket), &[]);
+        assert!(!stopped.status.success());
+        assert_eq!(pointer(&bucket, "canonical"), None);
+        assert_eq!(derivation_records(&bucket), made);
+        // A record names only objects that the bucket holds, and so does an asset document it
+        // names.
+        for key in made.values().flatten() {
+            let bytes = stored(&bucket, key).unwrap_or_else(|| panic!("{key}"));
+            let document: Option<serde_json::Value> = serde_json::from_slice(&bytes).ok();
+            let members = document.as_ref().and_then(|d| d["members"].as_array());
+            for member in members.into_iter().flatten() {
+                let (sha256, extension) = (&member["sha256"], &member["extension"]);
+                let key = format!(
+                    "{}.{}",
+                    sha256.as_str().unwrap(),
+                    extension.as_str().unwrap()
+                );
+                assert!(stored(&bucket, &key).is_some(), "{key}");
+            }
+        }
+
+        bucket.refuse_after(None);
+        let next = scratch.update("next", Some(&bucket));
+        assert!(next.contains(" converted 0 "), "{next}");
+        for view in VIEWS {
+            let (next, whole) = (pointer(&bucket, view), pointer(&whole, view));
+            assert!(next.is_some(), "{view}");
+            assert_eq!(next.map(contents), whole.map(contents), "{view}");
+        }
     }
 
     #[test]

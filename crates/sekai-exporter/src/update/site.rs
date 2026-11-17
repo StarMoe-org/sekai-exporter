@@ -1,6 +1,7 @@
 //! Where a region is published and where its state is kept: a bucket, or the output directory.
 
 use std::io;
+use std::ops::AddAssign;
 use std::path::{Path, PathBuf};
 
 use sekai_catalog::{Key, NoRemote, Objects, Remote};
@@ -22,6 +23,20 @@ pub(crate) enum Site<'a> {
     },
     /// A bucket, which keeps the state under its `state/`.
     Bucket(&'a Bucket),
+}
+
+/// What a store put at a site: how many objects it uploaded, and how many the site held already.
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct Stored {
+    pub(crate) uploaded: usize,
+    pub(crate) present: usize,
+}
+
+impl AddAssign for Stored {
+    fn add_assign(&mut self, other: Self) {
+        self.uploaded += other.uploaded;
+        self.present += other.present;
+    }
 }
 
 /// The state file that holds the last version of `region`.
@@ -89,14 +104,22 @@ impl<'a> Site<'a> {
     /// Puts the objects of `referred` where the site serves them, and records in the holdings of
     /// `objects` that the site holds them. The output directory serves its local store, which
     /// holds them already.
-    pub(super) fn store(&self, objects: &Objects<'_>, referred: Vec<Object>) -> Result<(), String> {
+    pub(super) fn store(
+        &self,
+        objects: &Objects<'_>,
+        referred: Vec<Object>,
+    ) -> Result<Stored, String> {
         match self {
             Self::Local { .. } => {
                 let held: Vec<(Key, u64)> = referred
                     .into_iter()
                     .map(|object| (object.key, object.size))
                     .collect();
-                objects.held.hold(&held).map_err(|e| e.to_string())
+                objects.held.hold(&held).map_err(|e| e.to_string())?;
+                Ok(Stored {
+                    uploaded: 0,
+                    present: held.len(),
+                })
             }
             Self::Bucket(bucket) => bucket.store(objects, referred),
         }

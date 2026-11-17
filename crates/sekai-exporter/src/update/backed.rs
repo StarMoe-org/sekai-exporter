@@ -4,19 +4,23 @@
 //! derivations in its catalog. A record is named by the key or fingerprint of what it holds, so
 //! the catalog and the records agree on every name they share. A run therefore looks in the
 //! catalog first, which costs no request, and in the records after it. The units it takes from the
-//! catalog are recorded with the run, so that later runs on any machine find them.
+//! catalog are recorded with the run, so that later runs on any machine find them. A derivation
+//! the run makes goes to its uploads, which record it once its objects are at the site.
 
 use std::io;
 
 use sekai_catalog::db::CatalogDerivations;
-use sekai_catalog::{Derivations, Derived};
+use sekai_catalog::{Derivations, Derived, Key};
 use sekai_pipeline::records::Records;
 use sekai_pipeline::reuse::{Found, Recorded, UnitKey};
 
-/// The records, behind the catalog of the output directory.
+use super::uploads::Uploads;
+
+/// The records, behind the catalog of the output directory, with the uploads of the run.
 pub(super) struct Backed<'a> {
     pub(super) records: &'a Records<'a>,
     pub(super) catalog: &'a CatalogDerivations,
+    pub(super) uploads: &'a Uploads<'a>,
     /// How many records are read at once.
     pub(super) requests: usize,
 }
@@ -30,7 +34,11 @@ impl Derivations for Backed<'_> {
     }
 
     fn put(&self, fingerprint: [u8; 32], derived: Derived) -> io::Result<()> {
-        self.records.put(fingerprint, derived)
+        self.uploads.send_output(fingerprint, derived)
+    }
+
+    fn put_file(&self, fingerprint: [u8; 32], file: Key) -> io::Result<()> {
+        self.uploads.send_file(fingerprint, file)
     }
 
     fn flush(&self) -> io::Result<()> {

@@ -228,9 +228,10 @@ impl Derivations for Records<'_> {
         if let Some(derived) = lock(&self.derivations).get(fingerprint) {
             return Ok(derived.clone());
         }
-        let derived = self.read_derivation(fingerprint)?;
-        lock(&self.derivations).insert(*fingerprint, derived.clone());
-        Ok(derived)
+        let read = self.read_derivation(fingerprint)?;
+        // A derivation that this run made while the record was read is kept.
+        let mut derivations = lock(&self.derivations);
+        Ok(derivations.entry(*fingerprint).or_insert(read).clone())
     }
 
     /// Remembers the derivation for this run; [`Records::record_derivation`] writes its record.
@@ -296,6 +297,8 @@ impl Recorded for Earlier<'_> {
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Barrier;
+
     use super::*;
     use crate::state::MemoryFiles;
 
@@ -346,6 +349,42 @@ mod tests {
         assert_eq!(later.get(&[3; 32]).unwrap(), None);
         assert_eq!(later.get(&[4; 32]).unwrap(), None);
         assert_eq!(later_held.size(&document).unwrap(), Some(7));
+    }
+
+    /// State files whose reads wait until they are let go on.
+    struct Paused {
+        reading: Barrier,
+        go_on: Barrier,
+    }
+
+    impl StateFiles for Paused {
+        fn read(&self, _name: &str) -> io::Result<Option<Vec<u8>>> {
+            self.reading.wait();
+            self.go_on.wait();
+            Ok(None)
+        }
+
+        fn write(&self, _name: &str, _bytes: &[u8]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_derivation_made_while_its_record_is_read_is_kept() {
+        let files = Paused {
+            reading: Barrier::new(2),
+            go_on: Barrier::new(2),
+        };
+        let held = MemoryHoldings::default();
+        let records = Records::new(&files, &held);
+        std::thread::scope(|scope| {
+            let read = scope.spawn(|| records.get(&[1; 32]).unwrap());
+            files.reading.wait();
+            assert!(records.remember([1; 32], &Derived::Nothing));
+            files.go_on.wait();
+            assert_eq!(read.join().unwrap(), Some(Derived::Nothing));
+        });
+        assert!(!records.remember([1; 32], &Derived::Nothing));
     }
 
     #[test]

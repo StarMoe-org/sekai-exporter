@@ -105,7 +105,7 @@ In development. What works today:
 | Sources | The distribution services of the `jp`, `en`, `cn`, `tw` and `kr` regions, client packages, and local directories |
 | Publishing | Path indexes, index shards and path trees, version histories and changes, and directory trees, in a local directory or an S3-compatible bucket; `gc` collects what nothing refers to |
 | Serving | The `serve` resolver, its HTTP server and a container image |
-| WebAssembly | The core builds for `wasm32`, and continuous integration compares its object documents and its store with those of the native build byte for byte |
+| WebAssembly | The core builds for `wasm32`, and continuous integration compares its object documents and its store with those of the native build byte for byte. We don't know what this is good for yet, but it works |
 
 The [Roadmap](docs/roadmap.md) lists the state of every part and the open work.
 

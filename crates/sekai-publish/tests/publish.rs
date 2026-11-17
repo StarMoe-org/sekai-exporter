@@ -264,6 +264,33 @@ fn a_removed_file_leaves_the_tree_one_publication_later() {
 }
 
 #[test]
+fn a_publication_interrupted_after_its_listing_still_retires_removed_files() {
+    let s = Scratch::new("interrupted-tree");
+    let store = s.store();
+    let root = s.0.join("tree");
+    let a = asset(&store, "a", &[("image", b"1")]);
+    let b = asset(&store, "b", &[("image", b"2")]);
+
+    let one = plan("v1", &[a.clone(), b], &store, 2).unwrap();
+    tree::publish(&store, &root, &one, 2).unwrap();
+    // v2 stops at its deletions: the listing is written and the state still names `b` retiring.
+    let two = plan("v2", std::slice::from_ref(&a), &store, 2).unwrap();
+    tree::publish(&store, &root, &two, 2).unwrap();
+    std::fs::write(
+        root.join("_state.json"),
+        br#"{"pending_delete":[],"retiring":["b.asset.json","b.webp"]}"#,
+    )
+    .unwrap();
+
+    // Running v2 again keeps `b` for readers of v1, and the next publication deletes it.
+    assert_eq!(tree::publish(&store, &root, &two, 2).unwrap().deleted, 0);
+    assert!(root.join("b.webp").exists());
+    let three = plan("v3", &[a], &store, 2).unwrap();
+    assert_eq!(tree::publish(&store, &root, &three, 2).unwrap().deleted, 2);
+    assert!(!root.join("b.webp").exists());
+}
+
+#[test]
 fn a_failed_asset_keeps_its_previous_files() {
     let s = Scratch::new("failed");
     let store = s.store();

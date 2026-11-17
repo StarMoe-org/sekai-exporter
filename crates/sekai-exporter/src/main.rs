@@ -114,11 +114,13 @@ commands:
       is in <output>/ledger.tsv. CPU and memory use and the time of each stage
       are written to <output>/metrics.jsonl. The index is published under
       <output>/published, and --tree also writes a path tree.
-  update <region> <output> --config <file> [--secrets <dir>] [--only <prefix>]...
-         [--threads <n>] [--memory <bytes>] [--plain] [--force] [--verify]
-         [--rebuild-tables] [--check] [--client]
-      Bring the site of a region of the configuration up to its current
-      version. The site is the bucket of the configuration, or else <output>.
+  update <region>... <output> --config <file> [--secrets <dir>]
+         [--only <prefix>]... [--threads <n>] [--memory <bytes>] [--plain]
+         [--force] [--verify] [--rebuild-tables] [--check] [--client]
+      Bring the site of each region of the configuration up to its current
+      version, one region after another. The site is the bucket of the
+      configuration, or else <output>. The regions share the store of the site,
+      so --verify lists it once for all of them.
       Bundles go to <output>/inputs, which holds game data and must stay
       private, and new objects go to <output>/store. The canonical and the
       storage view are published at the site with their path indexes: in the
@@ -143,21 +145,20 @@ commands:
       object the version needs that it lacks, and stops when one is in neither
       the bucket nor <output>/store. An asset built from tables is kept when
       what it read gives what it gave in the last run; --rebuild-tables builds
-      every one again. --only selects bundles by name prefix, with
-      their dependencies. A selection is neither recorded as a version nor sent
-      to a bucket; it publishes under <output>/published and needs an <output>
-      without a complete run. --check only looks up the current version and
-      prints whether it or the evaluation differs from the last one the site
-      recorded. It exits
-      with 0 when the version is unchanged and 1 when it changed, downloads and
-      writes nothing, and cannot be combined with --force, --verify,
-      --rebuild-tables or --only. --client publishes the client package that
-      the region's package entry names instead of its assets: its player data
-      and the cue sheets of its streaming assets are read as bundles, with the
-      class and script tables of the entry, and its assets are published in
-      the canonical layout at <region>/client,
-      under the version <application version>-<content hash>. Its state is
-      kept apart from the region's, under <region>-client.
+      every one again. --only selects bundles of one region by name prefix,
+      with their dependencies. A selection is neither recorded as a version
+      nor sent to a bucket; it publishes under <output>/published and needs an
+      <output> without a complete run. --check only looks up the current
+      version and prints whether it or the evaluation differs from the last
+      one the site recorded. It exits with 0 when every version is unchanged
+      and 1 when one changed, downloads and writes nothing, and cannot be
+      combined with --force, --verify, --rebuild-tables or --only. --client
+      publishes the client package that the region's package entry names
+      instead of its assets: its player data and the cue sheets of its
+      streaming assets are read as bundles, with the class and script tables
+      of the entry, and its assets are published in the canonical layout at
+      <region>/client, under the version <application version>-<content hash>.
+      Its state is kept apart from the region's, under <region>-client.
   gc <output> [--config <file>] [--secrets <dir>] [--grace <duration>]
      [--threads <n>] [--delete]
       Find the files of a site that nothing it keeps refers to, and with

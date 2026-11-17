@@ -74,7 +74,8 @@ fn versions() -> BTreeMap<String, Vec<Bundle>> {
     ])
 }
 
-/// A scratch directory with the secrets of the region `r` and of buckets, and its CDN.
+/// A scratch directory with the secrets of the regions `r` and `s` and of buckets, and the CDN
+/// that both regions read.
 struct Scratch {
     root: PathBuf,
     cdn: Cdn,
@@ -105,7 +106,7 @@ impl Scratch {
     }
 
     /// Runs the command `command` with the output directory `output`, the configuration of the
-    /// region and of `bucket` when there is one, and `options`, and returns what it printed.
+    /// regions and of `bucket` when there is one, and `options`, and returns what it printed.
     fn run(
         &self,
         command: &[&str],
@@ -128,7 +129,8 @@ impl Scratch {
         bucket: Option<&Server>,
         options: &[&str],
     ) -> Output {
-        let mut config = json!({ "regions": { "r": self.cdn.region() } });
+        let regions = ["r", "s"].map(|name| (name.to_owned(), self.cdn.region()));
+        let mut config = json!({ "regions": serde_json::Map::from_iter(regions) });
         if let Some(bucket) = bucket {
             config["publish"] = json!({ "s3": bucket.section(PREFIX) });
         }
@@ -424,9 +426,14 @@ mod bucket {
         }
     }
 
-    /// The current pointer of `view` in `bucket`.
+    /// The current pointer of `view` of the region `r` in `bucket`.
     fn pointer(bucket: &Server, view: &str) -> Option<serde_json::Value> {
-        let bytes = bucket.object(&format!("{POINTERS}r/{view}/current.json"))?;
+        pointer_of(bucket, "r", view)
+    }
+
+    /// The current pointer of `view` of `region` in `bucket`.
+    fn pointer_of(bucket: &Server, region: &str, view: &str) -> Option<serde_json::Value> {
+        let bytes = bucket.object(&format!("{POINTERS}{region}/{view}/current.json"))?;
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
@@ -528,6 +535,40 @@ mod bucket {
             })
             .collect();
         assert!(other_operations.is_empty(), "{other_operations:?}");
+    }
+
+    #[test]
+    fn the_regions_of_one_update_list_the_store_once_and_share_its_objects() {
+        let scratch = Scratch::new("increment-regions");
+        let bucket = Server::start();
+        let both = ["update", "r", "s"];
+        let (printed, requests) = answered(&bucket, || {
+            scratch.run(&both, "both", Some(&bucket), &["--verify"])
+        });
+        assert!(printed.contains("bucket holds 0 objects"), "{printed}");
+        for (region, view) in ["r", "s"].into_iter().flat_map(|r| VIEWS.map(|v| (r, v))) {
+            assert!(
+                pointer_of(&bucket, region, view).is_some(),
+                "{region} {view}"
+            );
+        }
+        // One listing of each directory of the store serves both regions.
+        let listed: Vec<&str> = requests
+            .iter()
+            .filter(|r| r.operation == Operation::List && r.name.starts_with(STORE))
+            .map(|r| r.name.as_str())
+            .collect();
+        let directories: BTreeSet<&str> = listed.iter().copied().collect();
+        assert_eq!(directories.len(), 256, "{listed:?}");
+        assert_eq!(listed.len(), directories.len(), "listed twice: {listed:?}");
+        // The second region reads the same bundles, and finds every object the first one put.
+        let objects: Vec<&str> = uploaded(&requests)
+            .into_iter()
+            .filter(|name| name.starts_with(STORE))
+            .collect();
+        let once: BTreeSet<&str> = objects.iter().copied().collect();
+        assert!(!once.is_empty());
+        assert_eq!(once.len(), objects.len(), "uploaded twice: {objects:?}");
     }
 
     /// The records in the packs of `bucket`, by subject, each with the objects it names.

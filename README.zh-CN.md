@@ -76,6 +76,7 @@ sekai-exporter objects <bundles> <output>     # 每个资源包的对象文档
 sekai-exporter account <region> --config <file> --secrets <dir>   # 需要登录的区服运行一次
 sekai-exporter update <region> <output> --config <file> --secrets <dir> --check   # 有新版本时以 1 退出
 sekai-exporter update <region> <output> --config <file> --secrets <dir>
+sekai-exporter update jp en cn tw kr <output> --config <file> --secrets <dir>   # 逐个更新多个区服
 ```
 
 **按路径提供视图**（[服务](docs/serving.zh-CN.md)）。`main` 上的每个提交也发布为镜像 `ghcr.io/starmoe-org/sekai-exporter`：

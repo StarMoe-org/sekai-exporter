@@ -539,6 +539,25 @@ mod bucket {
     }
 
     #[test]
+    fn a_verified_update_asks_only_for_the_records_its_listing_finds() {
+        let scratch = Scratch::new("increment-verified");
+        let bucket = Server::start();
+        scratch.update("first", Some(&bucket));
+        scratch.cdn.serve_version("2");
+        let (second, requests) = answered(&bucket, || {
+            scratch.run(&["update", "r"], "second", Some(&bucket), &["--verify"])
+        });
+        assert!(second.contains("units 3 reused 1"), "{second}");
+        let records = format!("{STATE}records/");
+        let asked: Vec<&Logged> = requests
+            .iter()
+            .filter(|r| r.operation == Operation::Get && r.name.starts_with(&records))
+            .collect();
+        assert!(!asked.is_empty(), "{requests:?}");
+        assert!(asked.iter().all(|r| r.status == 200), "{asked:?}");
+    }
+
+    #[test]
     fn gc_deletes_from_the_bucket_only_what_nothing_kept_refers_to() {
         let scratch = Scratch::new("gc-bucket");
         let bucket = Server::start();

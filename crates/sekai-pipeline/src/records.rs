@@ -37,6 +37,12 @@ fn unit_key(file: &str) -> Option<UnitKey> {
 /// The directory of the derivation records among the state files.
 pub const DERIVATION_RECORDS: &str = "records/derivations";
 
+/// The fingerprint of the derivation record named `file`, when it names one.
+fn derivation_fingerprint(file: &str) -> Option<[u8; 32]> {
+    let name = file.strip_prefix(DERIVATION_RECORDS)?.rsplit('/').next()?;
+    parse_hex(name.strip_suffix(".json")?)
+}
+
 fn derivation_file(fingerprint: &[u8; 32]) -> String {
     let fingerprint = hex(fingerprint);
     format!(
@@ -95,9 +101,31 @@ pub struct Records<'a> {
     derivations: Mutex<HashMap<[u8; 32], Option<Derived>>>,
     /// The keys of the unit records read, which need not be written again.
     read: Mutex<HashSet<UnitKey>>,
-    /// The keys of every unit record the files keep, when a listing of them tells; a unit whose
-    /// key is not among them is not looked for.
-    listed: Option<HashSet<UnitKey>>,
+    /// Every record the files keep, when a listing of them tells; a record not among them is
+    /// not looked for.
+    listed: Option<Listing>,
+}
+
+/// The records that a listing of the files names.
+#[derive(Default)]
+struct Listing {
+    units: HashSet<UnitKey>,
+    derivations: HashSet<[u8; 32]>,
+}
+
+impl Listing {
+    /// The records among the state files `files`.
+    fn of(files: &[String]) -> Self {
+        let mut listing = Self::default();
+        for file in files {
+            if let Some(key) = unit_key(file) {
+                listing.units.insert(key);
+            } else if let Some(fingerprint) = derivation_fingerprint(file) {
+                listing.derivations.insert(fingerprint);
+            }
+        }
+        listing
+    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -121,16 +149,15 @@ impl<'a> Records<'a> {
         }
     }
 
-    /// [`Records::new`], for files that keep the unit records `unit_files` in [`UNIT_RECORDS`]
-    /// and no others.
+    /// [`Records::new`], for files that keep the records named `record_files`, in
+    /// [`UNIT_RECORDS`] and [`DERIVATION_RECORDS`], and no others.
     pub fn listed(
         files: &'a dyn StateFiles,
         held: &'a MemoryHoldings,
-        unit_files: &[String],
+        record_files: &[String],
     ) -> Self {
-        let listed = unit_files.iter().filter_map(|file| unit_key(file));
         Self {
-            listed: Some(listed.collect()),
+            listed: Some(Listing::of(record_files)),
             ..Self::new(files, held)
         }
     }
@@ -209,6 +236,13 @@ impl<'a> Records<'a> {
 
     /// The derivation recorded under `fingerprint`, read from the files.
     fn read_derivation(&self, fingerprint: &[u8; 32]) -> io::Result<Option<Derived>> {
+        if self
+            .listed
+            .as_ref()
+            .is_some_and(|listed| !listed.derivations.contains(fingerprint))
+        {
+            return Ok(None);
+        }
         let name = derivation_file(fingerprint);
         let Some(bytes) = self.files.read(&name)? else {
             return Ok(None);
@@ -246,7 +280,7 @@ impl Recorded for Records<'_> {
         if self
             .listed
             .as_ref()
-            .is_some_and(|listed| !listed.contains(key))
+            .is_some_and(|listed| !listed.units.contains(key))
         {
             return Ok(None);
         }
@@ -403,15 +437,24 @@ mod tests {
     }
 
     #[test]
-    fn listed_records_look_only_for_the_units_the_listing_names() {
+    fn listed_records_look_only_for_the_records_the_listing_names() {
         let files = MemoryFiles::default();
         let held = MemoryHoldings::default();
         let (a, b) = (unit("a", 1, true), unit("b", 2, true));
-        Records::new(&files, &held).write(&[&a, &b], 2).unwrap();
+        let records = Records::new(&files, &held);
+        records.write(&[&a, &b], 2).unwrap();
+        for fingerprint in [[3; 32], [4; 32]] {
+            records
+                .record_derivation(&fingerprint, &Derived::Nothing)
+                .unwrap();
+        }
 
-        let listed = Records::listed(&files, &held, &[unit_file(&UnitKey([1; 32]))]);
+        let names = [unit_file(&UnitKey([1; 32])), derivation_file(&[3; 32])];
+        let listed = Records::listed(&files, &held, &names);
         assert!(listed.record("a", &UnitKey([1; 32])).unwrap().is_some());
         assert_eq!(listed.record("b", &UnitKey([2; 32])).unwrap(), None);
+        assert_eq!(listed.get(&[3; 32]).unwrap(), Some(Derived::Nothing));
+        assert_eq!(listed.get(&[4; 32]).unwrap(), None);
     }
 
     #[test]

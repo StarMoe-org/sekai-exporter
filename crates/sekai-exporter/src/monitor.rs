@@ -228,13 +228,15 @@ struct Sample {
 }
 
 impl Sample {
-    /// The use of the process `pid` and its children, or `None` when it is gone.
+    /// The use of the process `pid` and its children, or `None` when it is gone. The threads of
+    /// the process, which Linux lists as processes whose parent it is, are not children: the
+    /// process already counts their cores and memory.
     fn of(system: &System, pid: Pid) -> Option<Self> {
         let process = system.process(pid)?;
         let children = system
             .processes()
             .values()
-            .filter(|child| child.parent() == Some(pid));
+            .filter(|child| child.parent() == Some(pid) && child.thread_kind().is_none());
         let (child_cores, child_rss) = children.fold((0.0, 0), |(cores, rss), child| {
             (cores + cores_of(child.cpu_usage()), rss + child.memory())
         });

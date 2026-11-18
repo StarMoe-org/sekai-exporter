@@ -15,7 +15,7 @@ A source supplies inputs: the current version of a region, its manifest, and bun
 
 A `dir` region takes its bundles from its directory. A `cp` or `nuverse` region downloads the manifest and the bundles and records them in `<output>/inputs`, which holds game data (see [The input store](#the-input-store)).
 
-The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, through a `revision` address and a `table` address template, and `dir` reads `<table>.json` files from a local directory. The revision is recorded in the [table identity](#version-identity) of the version, and the assets built from the tables are evaluated in the [table stage](pipeline.md#table-stage).
+The game data tables have their own source, the `tables` entry of a region: `git` reads a repository of table dumps over HTTP at its current revision, through a `revision` address and a `table` address template, and `dir` reads `<table>.json` files from a local directory. The `revision` address gives either a JSON document whose `revision_field` (by default `sha`) holds the revision, such as a commit of a repository API, or the ref advertisement of the repository from its Git service, `<repository>/info/refs?service=git-upload-pack`, whose `HEAD` is the revision. `update --watch` reads the revision at every check, so the Git service suits a source that an API allows only a few requests an hour. The revision is recorded in the [table identity](#version-identity) of the version, and the assets built from the tables are evaluated in the [table stage](pipeline.md#table-stage).
 
 ## Region configuration
 

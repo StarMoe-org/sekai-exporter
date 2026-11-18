@@ -77,6 +77,7 @@ sekai-exporter account <region> --config <file> --secrets <dir>   # once, for a 
 sekai-exporter update <region> <output> --config <file> --secrets <dir> --check   # exits 1 when a new version is out
 sekai-exporter update <region> <output> --config <file> --secrets <dir>
 sekai-exporter update jp en cn tw kr <output> --config <file> --secrets <dir>   # one region after another
+sekai-exporter update jp en cn tw kr <output> --config <file> --secrets <dir> --watch 60s   # look every minute, update what changed
 ```
 
 **Serve the views by path** ([Serving](docs/serving.md)). Each commit on `main` is also published as the image `ghcr.io/starmoe-org/sekai-exporter`:

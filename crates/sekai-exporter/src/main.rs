@@ -117,6 +117,7 @@ commands:
   update <region>... <output> --config <file> [--secrets <dir>]
          [--only <prefix>]... [--threads <n>] [--memory <bytes>] [--plain]
          [--force] [--verify] [--rebuild-tables] [--check] [--client]
+         [--watch <interval>]
       Bring the site of each region of the configuration up to its current
       version, one region after another. The site is the bucket of the
       configuration, or else <output>. The regions share the store of the site,
@@ -159,6 +160,14 @@ commands:
       of the entry, and its assets are published in the canonical layout at
       <region>/client, under the version <application version>-<content hash>.
       Its state is kept apart from the region's, under <region>-client.
+      --watch keeps the regions up to date and does not return: every
+      <interval>, such as 60s or 5m, it looks up the current version of each
+      region as --check does, and updates the ones that changed, one after
+      another. With a bucket, each update works in <output>/<region>, which is
+      removed after it, and its metrics go to <output>/<region>.metrics.jsonl.
+      A region whose update fails is looked at again after twice the interval,
+      twice that after another failure, and so on up to a day. --watch cannot
+      be combined with --check, --force, --verify, --rebuild-tables or --only.
   gc <output> [--config <file>] [--secrets <dir>] [--grace <duration>]
      [--threads <n>] [--delete]
       Find the files of a site that nothing it keeps refers to, and with

@@ -31,6 +31,7 @@ use sekai_publish::history::Versions;
 use sekai_publish::{Listed, referred};
 
 use crate::bucket::Bucket;
+use crate::budget;
 use crate::update::document_objects;
 use crate::update::site::Site;
 
@@ -59,7 +60,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
             Long("secrets") => secrets = Some(PathBuf::from(parser.value()?)),
-            Long("grace") => grace = parse_duration(&parser.value()?.string()?)?,
+            Long("grace") => grace = budget::parse_duration(&parser.value()?.string()?)?,
             Long("threads") => threads = parser.value()?.parse()?,
             Long("delete") => delete = true,
             Value(v) if output.is_none() => output = Some(PathBuf::from(v)),
@@ -74,25 +75,6 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         threads: threads.max(1),
         delete,
     })
-}
-
-/// The duration `text`: a whole number of seconds (`s`), minutes (`m`), hours (`h`) or days
-/// (`d`), such as `12h`.
-fn parse_duration(text: &str) -> Result<Duration, String> {
-    let invalid = || format!("{text:?} is not a duration such as 30m, 12h or 7d");
-    let unit = text.chars().last().ok_or_else(invalid)?;
-    let seconds = match unit {
-        's' => 1,
-        'm' => 60,
-        'h' => 3600,
-        'd' => 86_400,
-        _ => return Err(invalid()),
-    };
-    let count: u64 = text[..text.len() - 1].parse().map_err(|_| invalid())?;
-    count
-        .checked_mul(seconds)
-        .map(Duration::from_secs)
-        .ok_or_else(invalid)
 }
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {

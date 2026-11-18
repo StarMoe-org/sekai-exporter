@@ -15,7 +15,7 @@
 
 `dir` 区服从其目录取得资源包。`cp` 或 `nuverse` 区服下载清单与资源包，并记录在 `<输出目录>/inputs` 中，该目录存放游戏数据（参见[输入 store](#输入-store)）。
 
-游戏数据表有自己的来源，即区服配置的 `tables` 项：`git` 通过 HTTP 经 `revision` 地址与 `table` 地址模板读取表转储仓库的当前修订，`dir` 读取本地目录中的 `<表名>.json` 文件。修订号记录在版本的[数据表身份](#版本身份)中，由数据表构建的资产在[数据表阶段](pipeline.zh-CN.md#数据表阶段)求值。
+游戏数据表有自己的来源，即区服配置的 `tables` 项：`git` 通过 HTTP 经 `revision` 地址与 `table` 地址模板读取表转储仓库的当前修订，`dir` 读取本地目录中的 `<表名>.json` 文件。`revision` 地址给出的可以是 JSON 文档，其 `revision_field` 字段（默认 `sha`）即修订号，例如仓库 API 返回的提交；也可以是仓库 Git 服务的引用通告 `<仓库>/info/refs?service=git-upload-pack`，其 `HEAD` 即修订号。`update --watch` 每次检查都会读取修订号，所以当 API 每小时只允许少量请求时，适合改用 Git 服务。修订号记录在版本的[数据表身份](#版本身份)中，由数据表构建的资产在[数据表阶段](pipeline.zh-CN.md#数据表阶段)求值。
 
 ## 区服配置
 

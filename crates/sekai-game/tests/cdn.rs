@@ -564,6 +564,43 @@ fn tables_are_read_at_the_current_revision() {
     assert_eq!(tables.read("events").unwrap_err().code, "status");
 }
 
+#[test]
+fn the_revision_can_be_the_head_that_a_git_service_advertises() {
+    let advertisement = concat!(
+        "001e# service=git-upload-pack\n",
+        "0000",
+        "004d0123456789abcdef0123456789abcdef01234567 HEAD\0multi_ack symref=HEAD:main\n",
+        "003d0123456789abcdef0123456789abcdef01234567 refs/heads/main\n",
+        "0000",
+    );
+    let base = serve(move |request| match request.path.as_str() {
+        "/tables.git/info/refs?service=git-upload-pack" => reply(200, advertisement),
+        _ => reply(404, ""),
+    });
+    let source = TableSource::Git {
+        revision: format!("http://{base}/tables.git/info/refs?service=git-upload-pack"),
+        revision_field: "sha".to_owned(),
+        table: format!("http://{base}/{{revision}}/{{name}}.json"),
+    };
+    let tables = Tables::open(&source, &Network::default()).unwrap();
+    assert_eq!(
+        tables.revision(),
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+}
+
+#[test]
+fn a_ref_advertisement_without_head_is_an_error() {
+    let base = serve(|_| reply(200, "001e# service=git-upload-pack\n0000"));
+    let source = TableSource::Git {
+        revision: format!("http://{base}/tables.git/info/refs?service=git-upload-pack"),
+        revision_field: "sha".to_owned(),
+        table: format!("http://{base}/{{name}}"),
+    };
+    let error = Tables::open(&source, &Network::default()).err().unwrap();
+    assert_eq!(error.code, "decode");
+}
+
 /// Answers every request with `body` on a local port, keeping each connection open, and returns
 /// `host:port` with the number of connections accepted so far.
 fn serve_kept_alive(body: &'static str) -> (String, Arc<AtomicUsize>) {

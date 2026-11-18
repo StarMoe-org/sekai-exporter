@@ -284,6 +284,42 @@ fn the_same_publication_again_keeps_its_history() {
 }
 
 #[test]
+fn a_version_that_changes_no_file_keeps_the_publication() {
+    let s = Scratch::new("unchanged");
+    let store = s.store();
+    let mut published = Published::default();
+    let two = two_versions(&store, &mut published);
+    let previous = Previous::read(&store, &two).unwrap();
+    // Every file is written again with the same bytes.
+    let rewritten = change(
+        &["b.png", "c.png", "d.png"],
+        &[
+            file(&store, "b.png", b"b2"),
+            file(&store, "c.png", b"c"),
+            file(&store, "d.png", b"dd"),
+        ],
+    );
+    let three = publish(
+        &store,
+        "3",
+        at(9 * 86_400),
+        &previous,
+        rewritten,
+        &published,
+    );
+    assert_eq!(three, two);
+    let three = publish(
+        &store,
+        "3",
+        at(9 * 86_400),
+        &previous,
+        Change::default(),
+        &published,
+    );
+    assert_eq!(three, two);
+}
+
+#[test]
 fn a_view_published_anew_goes_on_with_its_history() {
     let s = Scratch::new("anew");
     let store = s.store();

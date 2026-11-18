@@ -149,6 +149,8 @@ fn two_files(path: &str) -> PublishError {
 /// The roots of the previous publication of a view.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Previous {
+    /// The pointer of the publication, which a version that changes none of its files keeps.
+    pub pointer: Option<Pointer>,
     /// The index root, in a layout that has one.
     pub index: Option<IndexRoot>,
     /// The root of the path index.
@@ -174,6 +176,7 @@ impl Previous {
         let tree = pointer.tree.clone();
         let last = Some(Last::of(pointer, paths.as_ref()));
         Ok(Self {
+            pointer: Some(pointer.clone()),
             index,
             paths,
             tree,
@@ -196,6 +199,34 @@ impl Previous {
     /// from `store` as the lookups need them and kept.
     pub fn lookup<'s>(&self, store: &'s dyn Store) -> Lookup<'s> {
         Lookup::new(store, self.paths.as_ref())
+    }
+
+    /// The pointer of the publication when a publication with the path index chunks `paths` and
+    /// the index tables `tables` would have the same files, listings and failures. A pointer of an
+    /// earlier format is never kept.
+    fn unchanged_by(
+        &self,
+        paths: &[ChunkReference],
+        tables: Option<&IndexTables>,
+    ) -> Option<&Pointer> {
+        let pointer = self
+            .pointer
+            .as_ref()
+            .filter(|current| current.version == POINTER_VERSION)?;
+        let same_paths = self
+            .paths
+            .as_ref()
+            .is_some_and(|index| index.chunks == paths);
+        let same_tables = match (tables, &self.index) {
+            (None, None) => true,
+            (Some(tables), Some(root)) => {
+                tables.directories == root.directories
+                    && tables.listings == root.listings
+                    && tables.failures == root.failures
+            }
+            _ => false,
+        };
+        (same_paths && same_tables).then_some(pointer)
     }
 }
 
@@ -432,7 +463,8 @@ pub struct Edition<'a> {
 /// `edition`. The documents of earlier publications are read from `store` as the change needs
 /// them, and their pointers from `versions`; the new documents are written to `local`. Returns
 /// the pointer and the objects the publication adds: the files the change adds, and the
-/// documents written.
+/// documents written. A version that changes none of the files, listings and failures of
+/// `previous` keeps that publication as it is.
 pub fn apply(
     store: &dyn Store,
     local: &LocalStore,
@@ -476,6 +508,12 @@ pub fn apply(
         _ => None,
     };
     let (paths, files) = changes.chunks(&mut written)?;
+    if let Some(pointer) = previous.unchanged_by(&paths, tables.as_ref()) {
+        return Ok(Publication {
+            pointer: pointer.clone(),
+            objects: Vec::new(),
+        });
+    }
     let failures = tables.as_ref().map_or(&[][..], |t| &t.failures);
     let revision = revision(version, &paths, failures);
     let tree = DirectoryTree::new(view, version, &revision, tree_files)

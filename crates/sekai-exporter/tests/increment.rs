@@ -22,6 +22,21 @@ fn contents(mut pointer: serde_json::Value) -> serde_json::Value {
     pointer
 }
 
+/// What `pointer` publishes, whatever version it is named: the path index and the index root it
+/// names without their version and revision, read by their names in the store with `read`.
+fn files(pointer: &serde_json::Value, read: impl Fn(&str) -> Vec<u8>) -> serde_json::Value {
+    let document = |field: &str| {
+        let sha = pointer[field].as_str()?;
+        let bytes = read(&format!("{}/{sha}.json", &sha[..2]));
+        let mut document: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let fields = document.as_object_mut().unwrap();
+        fields.remove("published_version");
+        fields.remove("revision");
+        Some(document)
+    };
+    json!({ "paths": document("paths"), "root": document("root") })
+}
+
 /// Where the tests publish in a bucket.
 const PREFIX: &str = "out/";
 
@@ -67,10 +82,14 @@ fn versions() -> BTreeMap<String, Vec<Bundle>> {
             bundle("e/lone", 41, lone()),
         ]
     };
+    // Version 4 drops the lone bundle, which removes its files from both views.
+    let mut without_lone = version(11, "c/scene");
+    without_lone.retain(|bundle| bundle.name != "e/lone");
     BTreeMap::from([
         ("1".to_owned(), version(11, "b/scene")),
         ("2".to_owned(), version(11, "c/scene")),
         ("3".to_owned(), version(12, "c/scene")),
+        ("4".to_owned(), without_lone),
     ])
 }
 
@@ -155,6 +174,14 @@ impl Scratch {
         let bytes = std::fs::read(self.root.join(output).join(path)).unwrap();
         serde_json::from_slice(&bytes).unwrap()
     }
+
+    /// What the current pointer of `view` in the output directory `output` publishes.
+    fn files(&self, output: &str, view: &str) -> serde_json::Value {
+        let store = self.root.join(output).join("store");
+        files(&self.pointer(output, view), |name| {
+            std::fs::read(store.join(name)).unwrap()
+        })
+    }
 }
 
 #[test]
@@ -163,22 +190,35 @@ fn each_update_publishes_what_an_update_from_nothing_publishes() {
     scratch.update("earlier", None);
     for value in ["2", "3"] {
         scratch.cdn.serve_version(value);
+        let before = VIEWS.map(|view| scratch.pointer("earlier", view));
         let increment = scratch.update("earlier", None);
         // The lone bundle is the same, so its unit keeps what the last run gave.
         assert!(increment.contains("units 3 reused 1"), "{increment}");
         assert!(increment.contains(" kept 1 "), "{increment}");
         let fresh = format!("fresh-{value}");
         scratch.update(&fresh, None);
-        for view in VIEWS {
-            let increment = scratch.pointer("earlier", view);
-            // A new version records what it changed since the one before.
-            assert!(increment.get("changes").is_some(), "{value} {view}");
-            assert_eq!(
-                contents(increment),
-                contents(scratch.pointer(&fresh, view)),
-                "{value} {view}"
-            );
+        for (view, before) in VIEWS.into_iter().zip(before) {
+            let files = scratch.files("earlier", view);
+            assert_eq!(files, scratch.files(&fresh, view), "{value} {view}");
+            // The bundles moved or changed without changing a file, so the view keeps the
+            // publication it had.
+            assert_eq!(scratch.pointer("earlier", view), before, "{value} {view}");
         }
+    }
+
+    // A version that changes files is a new publication, which records what it changed since
+    // the one before.
+    scratch.cdn.serve_version("4");
+    scratch.update("earlier", None);
+    scratch.update("fresh-4", None);
+    for view in VIEWS {
+        let increment = scratch.pointer("earlier", view);
+        assert!(increment.get("changes").is_some(), "{view}");
+        assert_eq!(
+            contents(increment),
+            contents(scratch.pointer("fresh-4", view)),
+            "{view}"
+        );
     }
 }
 
@@ -381,11 +421,8 @@ mod gc {
         assert!(increment.contains("units 3 reused 1"), "{increment}");
         scratch.update("fresh", None);
         for view in VIEWS {
-            assert_eq!(
-                contents(scratch.pointer("site", view)),
-                contents(scratch.pointer("fresh", view)),
-                "{view}"
-            );
+            let files = scratch.files("site", view);
+            assert_eq!(files, scratch.files("fresh", view), "{view}");
         }
     }
 }
@@ -437,6 +474,14 @@ mod bucket {
         Some(serde_json::from_slice(&bytes).unwrap())
     }
 
+    /// What the current pointer of `view` of the region `r` in `bucket` publishes.
+    fn files_of(bucket: &Server, view: &str) -> serde_json::Value {
+        let pointer = pointer(bucket, view).unwrap();
+        files(&pointer, |name| {
+            bucket.object(&format!("{STORE}{name}")).unwrap()
+        })
+    }
+
     /// What `run` gave, and the requests `bucket` answered while it ran.
     fn answered<T>(bucket: &Server, run: impl FnOnce() -> T) -> (T, Vec<Logged>) {
         let before = bucket.requests().len();
@@ -486,9 +531,7 @@ mod bucket {
         let fresh = Server::start();
         scratch.update("fresh", Some(&fresh));
         for view in VIEWS {
-            let (updated, fresh) = (pointer(&bucket, view), pointer(&fresh, view));
-            assert!(updated.is_some(), "{view}");
-            assert_eq!(updated.map(contents), fresh.map(contents), "{view}");
+            assert_eq!(files_of(&bucket, view), files_of(&fresh, view), "{view}");
         }
 
         // A machine that finds the version unchanged reads only the last version and the pointers
@@ -505,13 +548,13 @@ mod bucket {
         scratch.update("first", Some(&bucket));
         let earlier = held(&bucket, STORE);
 
-        // The second version moves the scene bundle, which changes the unit of the data and the
-        // scene and leaves the lone bundle as it was.
-        scratch.cdn.serve_version("2");
+        // The fourth version moves the scene bundle, which changes the unit of the data and the
+        // scene, and drops the lone bundle, which changes the files of both views.
+        scratch.cdn.serve_version("4");
         let (_, requests) = answered(&bucket, || scratch.update("second", Some(&bucket)));
         let later = held(&bucket, STORE);
         let new: BTreeSet<&str> = later.difference(&earlier).map(String::as_str).collect();
-        assert!(!new.is_empty(), "the changed unit gives new objects");
+        assert!(!new.is_empty(), "the changed views give new documents");
 
         let (objects, others): (Vec<&str>, Vec<&str>) = uploaded(&requests)
             .into_iter()
@@ -700,8 +743,7 @@ mod bucket {
         let fresh = Server::start();
         scratch.update("fresh", Some(&fresh));
         for view in VIEWS {
-            let (updated, fresh) = (pointer(&bucket, view), pointer(&fresh, view));
-            assert_eq!(updated.map(contents), fresh.map(contents), "{view}");
+            assert_eq!(files_of(&bucket, view), files_of(&fresh, view), "{view}");
         }
     }
 }

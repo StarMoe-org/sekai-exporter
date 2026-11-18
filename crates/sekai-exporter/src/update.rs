@@ -879,6 +879,7 @@ impl Publications {
     /// The publication of `target`, or none.
     fn of(&self, target: &str) -> &Previous {
         static NONE: Previous = Previous {
+            pointer: None,
             index: None,
             paths: None,
             tree: None,

@@ -9,6 +9,26 @@ use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 use crate::export::BLOCK_CACHE_BYTES;
 
+/// The duration `text`: a whole number of seconds (`s`), minutes (`m`), hours (`h`) or days
+/// (`d`), such as `12h`.
+#[cfg(feature = "cdn")]
+pub(crate) fn parse_duration(text: &str) -> Result<Duration, String> {
+    let invalid = || format!("{text:?} is not a duration such as 30m, 12h or 7d");
+    let unit = text.chars().last().ok_or_else(invalid)?;
+    let seconds = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86_400,
+        _ => return Err(invalid()),
+    };
+    let count: u64 = text[..text.len() - 1].parse().map_err(|_| invalid())?;
+    count
+        .checked_mul(seconds)
+        .map(Duration::from_secs)
+        .ok_or_else(invalid)
+}
+
 /// Parses a byte count: a whole number with an optional binary suffix `K`, `M`, `G` or `T`, such
 /// as `512M` or `8G`.
 pub(crate) fn parse_bytes(text: &str) -> Result<u64, String> {

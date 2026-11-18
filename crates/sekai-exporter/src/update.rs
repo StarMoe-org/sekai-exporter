@@ -3,10 +3,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use sekai_catalog::db::{Catalog, CatalogDerivations, CostRow, IndexCache};
 use sekai_catalog::store::parse_hex;
@@ -42,6 +42,7 @@ pub(crate) mod site;
 mod tables;
 mod uploads;
 mod views;
+mod watch;
 
 use backed::Backed;
 use fetch::{Arriving, EarlierRun, Fetcher, declared_content, identify, in_opening_order};
@@ -73,6 +74,8 @@ struct Options {
     check: bool,
     /// Whether the run publishes the client package of the region instead of its assets.
     client: bool,
+    /// How often the regions are looked at again, when the run keeps them up to date.
+    watch: Option<Duration>,
 }
 
 impl Options {
@@ -81,6 +84,7 @@ impl Options {
         self.regions.iter().map(|region| Run {
             options: self,
             region,
+            work: &self.output,
         })
     }
 }
@@ -89,6 +93,8 @@ impl Options {
 struct Run<'o> {
     options: &'o Options,
     region: &'o str,
+    /// The directory the update keeps its downloads, local store, catalog and ledger in.
+    work: &'o Path,
 }
 
 impl Run<'_> {
@@ -128,6 +134,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut rebuild_tables = false;
     let mut check = false;
     let mut client = false;
+    let mut watch = None;
     while let Some(arg) = parser.next()? {
         match arg {
             Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -141,6 +148,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("rebuild-tables") => rebuild_tables = true,
             Long("check") => check = true,
             Long("client") => client = true,
+            Long("watch") => watch = Some(budget::parse_duration(&parser.value()?.string()?)?),
             Value(v) => positional.push(v),
             _ => return Err(arg.unexpected()),
         }
@@ -163,6 +171,12 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
         return Err(format!("--check only compares the version, and {flag} acts on it").into());
     }
+    let single_run = [("--check", check)].into_iter().chain(acts);
+    if watch.is_some()
+        && let Some((flag, _)) = single_run.into_iter().find(|(_, given)| *given)
+    {
+        return Err(format!("--watch cannot be combined with {flag}").into());
+    }
     if client && rebuild_tables {
         return Err("--rebuild-tables builds tables, and a client package has none".into());
     }
@@ -181,6 +195,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         rebuild_tables,
         check,
         client,
+        watch,
     })
 }
 
@@ -188,6 +203,9 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
     let options = parse(args)?;
     if options.check {
         return check(&options);
+    }
+    if let Some(interval) = options.watch {
+        return watch::watch(&options, interval);
     }
     std::fs::create_dir_all(&options.output)
         .map_err(|e| format!("{}: {e}", options.output.display()))?;
@@ -407,6 +425,23 @@ fn check(options: &Options) -> Result<bool, lexopt::Error> {
 /// Prints whether the current version of the region of `run` differs from the last one that
 /// `site` recorded, and returns whether it is unchanged.
 fn check_region(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<bool, lexopt::Error> {
+    let looked = look(run, config, site)?;
+    let described = looked.change.as_deref().unwrap_or("unchanged");
+    println!("{} {} {described}", run.state_key(), looked.version);
+    Ok(looked.change.is_none())
+}
+
+/// The current version of a region, and what an update to it would change.
+struct Looked {
+    /// The name of the current version.
+    version: String,
+    /// What would change, as [`change`] describes it, or `None` when nothing would.
+    change: Option<String>,
+}
+
+/// Looks up the current version of the region of `run` and compares it with the last one that
+/// `site` recorded. Nothing is downloaded or written.
+fn look(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<Looked, String> {
     let key = run.state_key();
     let name = key.as_str();
     let region = region_of(run, config)?;
@@ -425,10 +460,10 @@ fn check_region(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<bool, le
         )?,
         evaluation: evaluation_identity(&converters, classes.as_ref(), tables.is_some()),
     };
-    let change = change(site, &run.targets(), previous.as_ref(), &recorded)?;
-    let described = change.as_deref().unwrap_or("unchanged");
-    println!("{name} {} {described}", recorded.identity.name());
-    Ok(change.is_none())
+    Ok(Looked {
+        version: recorded.identity.name(),
+        change: change(site, &run.targets(), previous.as_ref(), &recorded)?,
+    })
 }
 
 /// What a run that would record `current` would change at `site` after the run that recorded
@@ -655,11 +690,11 @@ impl Opened {
         let tables = open_tables(options, &region)?;
         let Supply { source, classes } = open_source(run, region, &secrets)?;
         let directory = |name: &str| {
-            LocalStore::open(options.output.join(name))
-                .map_err(|e| format!("{}/{name}: {e}", options.output.display()))
+            LocalStore::open(run.work.join(name))
+                .map_err(|e| format!("{}/{name}: {e}", run.work.display()))
         };
         let store = directory("store")?;
-        let catalog = Catalog::open_or_rebuild(&options.output.join("catalog.redb"), &store)
+        let catalog = Catalog::open_or_rebuild(&run.work.join("catalog.redb"), &store)
             .map_err(|e| e.to_string())?
             .into_derivations();
         Ok(Self {
@@ -717,7 +752,7 @@ impl Opened {
         };
         let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
         let indexes =
-            IndexCache::open(&options.output.join("indexes.redb")).map_err(|e| e.to_string())?;
+            IndexCache::open(&run.work.join("indexes.redb")).map_err(|e| e.to_string())?;
         // A manifest without dependencies has its bundles read as they are evaluated, so the
         // state learns nothing of their files.
         let bundles = if self.listed {
@@ -783,7 +818,7 @@ impl Opened {
         if failed > 0 || report(&outcome.streamed) > 0 {
             return Ok(None);
         }
-        write_ledger(&outcome.streamed.ledgers, &options.output, monitor)?;
+        write_ledger(&outcome.streamed.ledgers, run.work, monitor)?;
         Ok(Some(Evaluation { outcome, bundles }))
     }
 }
@@ -1321,6 +1356,18 @@ mod tests {
         assert_eq!(runs(&client), [("jp-client".to_owned(), client_targets)]);
         assert!(options(&["--client", "--check"]).is_ok());
         assert!(options(&["--client", "--rebuild-tables"]).is_err());
+    }
+
+    #[test]
+    fn a_watch_takes_an_interval_and_no_flag_of_a_single_run() {
+        let watching = options(&["--watch", "1m"]).unwrap();
+        assert_eq!(watching.watch, Some(Duration::from_secs(60)));
+        assert!(options(&["--watch", "1m", "--client"]).is_ok());
+        assert!(options(&["--watch", "soon"]).is_err());
+        for flag in ["--check", "--force", "--verify", "--rebuild-tables"] {
+            assert!(options(&["--watch", "1m", flag]).is_err(), "{flag}");
+        }
+        assert!(options(&["--watch", "1m", "--only", "a/"]).is_err());
     }
 
     #[test]

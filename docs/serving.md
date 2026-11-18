@@ -163,7 +163,7 @@ The command is built with the `serve` feature, which `full` includes. `<output>`
 
 The server writes one line to its standard error stream for each request it answers with `500`, with the pointer or the object and what is wrong with it. When the stream takes no line, as a pipe does whose reader is gone, the lines are lost and the requests are answered as before.
 
-The `Dockerfile` at the root of the repository builds an image that holds the command built with the `serve` feature only. Each commit on `main` is published as `ghcr.io/starmoe-org/sekai-exporter`, tagged `main` and with the first 12 characters of the commit hash. Each release `v<version>` is also tagged `<version>`, and a release that is not a pre-release is tagged with its minor version too, such as `0.1`. The image runs as an unprivileged user and only needs to read the output:
+The `Dockerfile` at the root of the repository builds an image that holds the command built with the `serve` feature only. Each commit on `main` is published as `ghcr.io/starmoe-org/sekai-exporter`, tagged `main` and with the first 12 characters of the commit hash. Each release `v<version>` is also tagged `<version>`, and a release that is not a pre-release is tagged with its minor version too, such as `0.1`. The image runs as an unprivileged user and only needs to read the output. The `full` target of the `Dockerfile` holds the command built with every feature, with `ffmpeg`, and is published as the same image with the same tags after `full-` (`full` for `main`), such as `full-0.1`; it runs `update` and `gc` as well:
 
 ```bash
 docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/routes.json:ro \

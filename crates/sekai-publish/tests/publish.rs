@@ -445,6 +445,27 @@ fn a_change_gives_the_publication_of_the_new_assets() {
 }
 
 #[test]
+fn a_version_with_the_same_assets_keeps_the_publication() {
+    let s = Scratch::new("same assets");
+    let store = s.store();
+    let assets = many(&store, 300, "x");
+    for layout in [Layout::Index, Layout::Paths] {
+        let before = documents(
+            &store,
+            "jp/canonical",
+            &plan("v1", &assets, &store, 2).unwrap(),
+            layout,
+        );
+        let before = before.unwrap();
+        let previous = Previous::read(&store, &before.pointer).unwrap();
+        let same = change(&assets, &assets, &store, 2).unwrap();
+        let kept = apply(&store, "canonical", "v2", layout, &previous, same).unwrap();
+        assert_eq!(kept.pointer, before.pointer, "{layout:?}");
+        assert!(kept.objects.is_empty(), "{layout:?}");
+    }
+}
+
+#[test]
 fn a_change_to_a_publication_of_an_earlier_pointer_format_gives_the_whole_publication() {
     let s = Scratch::new("earlier-pointer");
     let store = s.store();

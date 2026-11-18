@@ -32,7 +32,7 @@ A path whose file has the same bytes in both versions is in none of them. The co
 
 ## 3. Sources
 
-The history of a publication is the history of the previous publication of the view with an entry for its own version: put first when the version is new, and in place of the newest entry when the version is published again under its name. A publication with no previous publication starts a history with its own entry, which has no counts. When the previous publication has no history, the new one starts from an entry for that publication, with its number of files and without a time or counts.
+The history of a publication is the history of the previous publication of the view with an entry for its own version: put first when the version is new, and in place of the newest entry when the version is published again under its name. A publication with no previous publication starts a history with its own entry, which has no counts. When the previous publication has no history, the new one starts from an entry for that publication, with its number of files and without a time or counts. A version that changes none of the files, listings and failures of the previous publication of the view adds no entry: the view keeps that publication, its pointer, history and changes, under the name of the version it was published as.
 
 The changes of a new version are those of the paths that the publication changed in the previous one, as described in [Publication documents](publication.md#5-correctness). The changes of a version published again stay the changes since the version before it: those the previous publication recorded, with each path that the new publication changed compared again with the file the version before has there. A publication of the same version with the same revision as the previous one keeps its history and changes.
 
@@ -46,7 +46,7 @@ Both documents are UTF-8 JSON without insignificant whitespace, with keys in the
 
 A reader rejects a document of another format or version.
 
-Tests publish versions that add, remove and change files and rewrite a file with the same bytes, and check the entries, the counts and the rows. They publish a version again with files that return to the bytes of the version before, change once more or are new, and check that its changes are still those since the version before, and that without the pointer of that version they are left out. They check that publishing the same files again keeps the documents, that a view published anew goes on with its history, and that a publication without a history starts one from its previous publication.
+Tests publish versions that add, remove and change files and rewrite a file with the same bytes, and check the entries, the counts and the rows. They publish a version again with files that return to the bytes of the version before, change once more or are new, and check that its changes are still those since the version before, and that without the pointer of that version they are left out. They check that publishing the same files again keeps the documents, that a new version whose files have the same bytes, written again or not written at all, keeps the publication before it, that a view published anew goes on with its history, and that a publication without a history starts one from its previous publication.
 
 ## 6. Version
 

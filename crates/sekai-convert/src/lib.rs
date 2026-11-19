@@ -27,6 +27,8 @@ pub mod live2d;
 pub mod model;
 #[cfg(feature = "particles")]
 pub mod particles;
+#[cfg(feature = "image")]
+mod read;
 pub mod roots;
 pub mod tables;
 #[cfg(feature = "text")]
@@ -35,6 +37,8 @@ pub mod text;
 pub mod timeline;
 #[cfg(feature = "ugui")]
 pub mod ugui;
+#[cfg(feature = "image")]
+mod vertices;
 #[cfg(feature = "video")]
 pub mod video;
 

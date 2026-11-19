@@ -68,6 +68,8 @@ jobs:
         env:
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
+          # The archives keep the names of functions for backtraces, not their line tables.
+          CARGO_PROFILE_RELEASE_STRIP: debuginfo
         run: cargo build --locked --release -p sekai-exporter --features full --target ${{ matrix.target }}
       - name: Pack
         run: |

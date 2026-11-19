@@ -5,8 +5,10 @@ use std::fmt::Write as _;
 use sekai_codec::{HdrSurface, Surface};
 use sekai_unity::Value;
 
-use super::{Texture, field, malformed, texture_memory};
+use super::{Texture, texture_memory};
+use crate::read::{bytes, count, field, malformed, unsupported};
 use crate::roots;
+use crate::vertices::{CHANNEL_POSITION, Vertices, channels};
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, Object, ObjectId,
     ObjectIndex,
@@ -17,9 +19,13 @@ const PACKED: u64 = 1;
 /// The bit of `settingsRaw` that says a packed sprite keeps a rectangle of its atlas, rather than
 /// a tight outline.
 const RECTANGLE_PACKING: u64 = 2;
-/// The place and width of the rotation of a sprite in `settingsRaw`.
+/// The place and width of the packing rotation of a sprite in `settingsRaw`.
 const ROTATION_SHIFT: u32 = 2;
 const ROTATION_MASK: u64 = 0xF;
+/// The packing rotations that mirror a sprite horizontally and vertically; both together turn it
+/// half a turn, and a larger value turns it a quarter turn.
+const FLIP_HORIZONTAL: u64 = 1;
+const FLIP_VERTICAL: u64 = 2;
 
 /// The image region and layout of a `Sprite`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,21 +72,18 @@ impl Converter for Sprite {
             Some(Asset { members }) => members.into_iter().next().map(|m| m.content),
             None => None,
         };
-        let rect = Rect::read(field(fields, "m_Rect")?, "m_Rect")?;
-        let texture_rect = Rect::read(field(placement.data, "textureRect")?, "textureRect")?;
-        let texture_rect_offset = vector(
-            field(placement.data, "textureRectOffset")?,
-            "textureRectOffset",
-        )?;
-        let cut = placement.cut(rect, texture_rect, texture_rect_offset)?;
         let layout = Layout {
-            rect,
-            texture_rect,
-            texture_rect_offset,
+            rect: Rect::read(field(fields, "m_Rect")?, "m_Rect")?,
+            texture_rect: Rect::read(field(placement.data, "textureRect")?, "textureRect")?,
+            texture_rect_offset: vector(
+                field(placement.data, "textureRectOffset")?,
+                "textureRectOffset",
+            )?,
             pivot: vector(field(fields, "m_Pivot")?, "m_Pivot")?,
             pixels_per_unit: float(field(fields, "m_PixelsToUnits")?, "m_PixelsToUnits")?,
             border: border(field(fields, "m_Border")?)?,
         };
+        let cut = placement.cut(&layout, field(fields, "m_RD")?)?;
         Ok(Some(Asset {
             members: vec![
                 Member {
@@ -88,12 +91,12 @@ impl Converter for Sprite {
                     content: match image {
                         Some(Content::Image(image)) => {
                             let (w, h, pixels) =
-                                cut.image(image.width(), image.height(), image.pixels(), &rect)?;
+                                cut.image(image.width(), image.height(), image.pixels())?;
                             Content::Image(Surface::new(w, h, pixels)?)
                         }
                         Some(Content::HdrImage(image)) => {
                             let (w, h, pixels) =
-                                cut.image(image.width(), image.height(), image.pixels(), &rect)?;
+                                cut.image(image.width(), image.height(), image.pixels())?;
                             Content::HdrImage(HdrSurface::new(w, h, pixels)?)
                         }
                         _ => return Err(malformed("the sprite's texture holds no image")),
@@ -169,10 +172,12 @@ impl<'a> Placement<'a> {
         pptr(self.data, name, self.owner, cx)
     }
 
-    /// How the image of the sprite `rect` is cut from the texture. An atlas holds a sprite whole
-    /// at `texture_rect`, or trimmed of its transparent margins to `texture_rect`, which then lies
-    /// at `offset` in the sprite; it may also rotate a sprite or keep only a tight outline.
-    fn cut(&self, rect: Rect, texture_rect: Rect, offset: [f32; 2]) -> Result<Cut, ConvertError> {
+    /// How the image of the sprite that `layout` places is cut from the texture. An atlas holds
+    /// a sprite whole at `texture_rect`, or trimmed of its transparent margins to `texture_rect`,
+    /// which then lies at `texture_rect_offset` in the sprite; it may also mirror or turn it. For
+    /// an atlas that packs tight outlines, the mesh of the sprite's own render data `own` says
+    /// which pixels are the sprite's.
+    fn cut(&self, layout: &Layout, own: &Value) -> Result<Cut, ConvertError> {
         let settings = field(self.data, "settingsRaw")?
             .as_u64()
             .ok_or_else(|| malformed("settingsRaw is not an integer"))?;
@@ -180,59 +185,210 @@ impl<'a> Placement<'a> {
             return if settings & PACKED != 0 {
                 Err(unsupported("a sprite packed into another texture"))
             } else {
-                Ok(Cut::whole(rect))
+                Ok(Cut::Whole(layout.rect))
             };
         }
-        if settings >> ROTATION_SHIFT & ROTATION_MASK != 0 {
-            return Err(unsupported("a sprite rotated in its atlas"));
-        }
+        let rotation = settings >> ROTATION_SHIFT & ROTATION_MASK;
+        let (rect, texture_rect) = (layout.rect, layout.texture_rect);
         let same_size = (rect.width, rect.height) == (texture_rect.width, texture_rect.height);
-        if same_size && offset == [0.0, 0.0] {
-            return Ok(Cut::whole(texture_rect));
+        if rotation == 0 && same_size && layout.texture_rect_offset == [0.0, 0.0] {
+            return Ok(Cut::Whole(texture_rect));
         }
-        if settings & RECTANGLE_PACKING == 0 {
-            return Err(unsupported(
-                "a sprite trimmed to a tight outline in its atlas",
-            ));
+        if settings & RECTANGLE_PACKING != 0 {
+            return if rotation == 0 {
+                Ok(Cut::Trimmed {
+                    region: texture_rect,
+                    offset: layout.texture_rect_offset,
+                    sprite: rect,
+                })
+            } else {
+                Err(unsupported("a sprite rotated in a rectangle-packing atlas"))
+            };
         }
-        Ok(Cut {
-            region: texture_rect,
-            trim: Some(offset),
-        })
+        if rotation > FLIP_HORIZONTAL | FLIP_VERTICAL {
+            return Err(unsupported("a sprite turned a quarter turn in its atlas"));
+        }
+        Ok(Cut::Outline(Outline {
+            triangles: mesh_triangles(own, layout)?,
+            size: rounded_size(rect),
+            texture_rect,
+            offset: layout.texture_rect_offset,
+            flip: [
+                rotation & FLIP_HORIZONTAL != 0,
+                rotation & FLIP_VERTICAL != 0,
+            ],
+        }))
     }
 }
 
 /// How the image of a sprite is cut from its texture.
-struct Cut {
-    /// The region of the texture that holds the image.
-    region: Rect,
-    /// For a sprite its atlas trimmed of transparent margins, where the region lies in the
-    /// rectangle of the sprite, from its bottom left.
-    trim: Option<[f32; 2]>,
+enum Cut {
+    /// The image is the region of the texture.
+    Whole(Rect),
+    /// A sprite that an atlas packing rectangles trimmed of transparent margins: the region of
+    /// the texture, at `offset` from the bottom left of a transparent image of the size of
+    /// `sprite`.
+    Trimmed {
+        region: Rect,
+        offset: [f32; 2],
+        sprite: Rect,
+    },
+    /// A sprite of an atlas that packs tight outlines.
+    Outline(Outline),
 }
 
 impl Cut {
-    /// The image of a sprite held whole at `region`.
-    fn whole(region: Rect) -> Self {
-        Self { region, trim: None }
-    }
-
-    /// The image of the sprite `rect` cut from an RGBA image of `width` x `height` pixels, given
-    /// as its channel values with rows from top to bottom: the region, which a trimmed sprite has
-    /// in a transparent image of the size of `rect`.
+    /// The image of the sprite cut from an RGBA image of `width` x `height` pixels, given as its
+    /// channel values with rows from top to bottom.
     fn image<T: Copy + Default>(
         &self,
         width: u32,
         height: u32,
         pixels: &[T],
-        rect: &Rect,
     ) -> Result<(u32, u32, Vec<T>), ConvertError> {
-        let region = crop(width, height, pixels, &self.region)?;
-        match self.trim {
-            Some(offset) => place(region, offset, rect),
-            None => Ok(region),
+        match self {
+            Cut::Whole(region) => crop(width, height, pixels, region),
+            Cut::Trimmed {
+                region,
+                offset,
+                sprite,
+            } => place(crop(width, height, pixels, region)?, *offset, sprite),
+            Cut::Outline(outline) => outline.draw(width, height, pixels),
         }
     }
+}
+
+/// A sprite of an atlas that packs tight outlines. The box around its mesh, `texture_rect`, may
+/// also hold pixels of other sprites, so its image holds only the pixels its mesh covers.
+struct Outline {
+    /// The triangles of the mesh, in pixels from the bottom left of the sprite.
+    triangles: Vec<[[f64; 2]; 3]>,
+    /// The width and height of the image.
+    size: [usize; 2],
+    texture_rect: Rect,
+    /// Where `texture_rect` lies in the sprite, from its bottom left.
+    offset: [f32; 2],
+    /// Whether the atlas mirrors the sprite horizontally and vertically within `texture_rect`.
+    flip: [bool; 2],
+}
+
+impl Outline {
+    /// The image of the sprite drawn from an RGBA texture of `width` x `height` pixels, given as
+    /// its channel values with rows from top to bottom: transparent black, except each pixel
+    /// whose centre lies in or on a triangle of the mesh, which is the texture pixel under that
+    /// centre.
+    fn draw<T: Copy + Default>(
+        &self,
+        width: u32,
+        height: u32,
+        pixels: &[T],
+    ) -> Result<(u32, u32, Vec<T>), ConvertError> {
+        let [w, h] = self.size;
+        let mut out = vec![T::default(); w * h * 4];
+        for triangle in &self.triangles {
+            for [x, y] in covered(triangle, self.size) {
+                let [u, v] = self.texel([x as f64 + 0.5, y as f64 + 0.5]);
+                if !(0.0 <= u && u < f64::from(width) && 0.0 <= v && v < f64::from(height)) {
+                    return Err(malformed(format!(
+                        "the mesh reaches ({u}, {v}), outside the {width} x {height} texture"
+                    )));
+                }
+                let from = ((height as usize - 1 - v as usize) * width as usize + u as usize) * 4;
+                let to = ((h - 1 - y) * w + x) * 4;
+                out[to..to + 4].copy_from_slice(&pixels[from..from + 4]);
+            }
+        }
+        Ok((w as u32, h as u32, out))
+    }
+
+    /// The column and row, from the bottom left, of the texture pixel under the point `point` of
+    /// the sprite.
+    fn texel(&self, point: [f64; 2]) -> [f64; 2] {
+        let r = self.texture_rect;
+        let axis = |p: f64, offset: f32, start: f32, size: f32, flip: bool| {
+            let within = p - f64::from(offset);
+            let within = if flip {
+                f64::from(size) - within
+            } else {
+                within
+            };
+            (f64::from(start) + within).floor()
+        };
+        [
+            axis(point[0], self.offset[0], r.x, r.width, self.flip[0]),
+            axis(point[1], self.offset[1], r.y, r.height, self.flip[1]),
+        ]
+    }
+}
+
+/// The pixels of an image of `size` whose centres lie in or on `triangle`, as columns and rows
+/// from the bottom left. A triangle without area covers none.
+fn covered(triangle: &[[f64; 2]; 3], size: [usize; 2]) -> impl Iterator<Item = [usize; 2]> + '_ {
+    let [a, b, c] = *triangle;
+    // Twice the signed area of the triangle `p q r`.
+    let area = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
+        (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0])
+    };
+    let whole = area(a, b, c);
+    // The pixels whose centres lie in the bounding box of the triangle, within the image.
+    let span = move |axis: usize| {
+        let low = a[axis].min(b[axis]).min(c[axis]) - 0.5;
+        let high = a[axis].max(b[axis]).max(c[axis]) - 0.5;
+        let start = low.ceil().max(0.0) as usize;
+        let end = (high.floor() + 1.0).clamp(0.0, size[axis] as f64) as usize;
+        start..end
+    };
+    let rows = if whole == 0.0 { 0..0 } else { span(1) };
+    rows.flat_map(move |y| span(0).map(move |x| [x, y]))
+        .filter(move |&[x, y]| {
+            let p = [x as f64 + 0.5, y as f64 + 0.5];
+            // On the side of each edge that the opposite corner is on, or on the edge.
+            [area(a, b, p), area(b, c, p), area(c, a, p)]
+                .iter()
+                .all(|&part| part * whole >= 0.0)
+        })
+}
+
+/// The triangles of the mesh of the render data `own`, in pixels from the bottom left of the
+/// sprite that `layout` places. A position of the mesh is in units from the pivot.
+fn mesh_triangles(own: &Value, layout: &Layout) -> Result<Vec<[[f64; 2]; 3]>, ConvertError> {
+    let vertex_data = field(own, "m_VertexData")?;
+    let vertices = Vertices::new(
+        bytes(vertex_data, "m_DataSize")?,
+        count(vertex_data, "m_VertexCount")?,
+        channels(vertex_data)?,
+    )?;
+    let positions = vertices
+        .floats::<3>(CHANNEL_POSITION, "positions")?
+        .ok_or_else(|| malformed("the sprite's mesh has no positions"))?;
+    let pixels_per_unit = f64::from(layout.pixels_per_unit);
+    let pivot = [
+        f64::from(layout.pivot[0]) * f64::from(layout.rect.width),
+        f64::from(layout.pivot[1]) * f64::from(layout.rect.height),
+    ];
+    let corner = |index: &[u8; 2]| -> Result<[f64; 2], ConvertError> {
+        let [x, y, _] = positions
+            .get(usize::from(u16::from_le_bytes(*index)))
+            .ok_or_else(|| malformed("an index of the sprite's mesh has no vertex"))?;
+        Ok([
+            f64::from(*x) * pixels_per_unit + pivot[0],
+            f64::from(*y) * pixels_per_unit + pivot[1],
+        ])
+    };
+    let (indices, odd_byte) = bytes(own, "m_IndexBuffer")?.as_chunks::<2>();
+    let (triangles, rest) = indices.as_chunks::<3>();
+    if !odd_byte.is_empty() || !rest.is_empty() {
+        return Err(malformed("the sprite's mesh is not a list of triangles"));
+    }
+    triangles
+        .iter()
+        .map(|[a, b, c]| Ok([corner(a)?, corner(b)?, corner(c)?]))
+        .collect()
+}
+
+/// The width and height of `rect`, each rounded to the nearest whole pixel, ties to even.
+fn rounded_size(rect: Rect) -> [usize; 2] {
+    [rect.width, rect.height].map(|size| f64::from(size).round_ties_even().max(0.0) as usize)
 }
 
 /// The rounded region `rect` covers in an RGBA image of `width` x `height` pixels, given as its
@@ -279,21 +435,20 @@ fn place<T: Copy + Default>(
     offset: [f32; 2],
     rect: &Rect,
 ) -> Result<(u32, u32, Vec<T>), ConvertError> {
-    let round = |value: f32| f64::from(value).round_ties_even();
-    let (outer_width, outer_height) = (round(rect.width), round(rect.height));
-    let (x, y) = (round(offset[0]), round(offset[1]));
+    let [outer_width, outer_height] = rounded_size(*rect);
+    let [x, y] = offset.map(|value| f64::from(value).round_ties_even());
+    let (width, height) = (width as usize, height as usize);
     let fits = 0.0 <= x
-        && x + f64::from(width) <= outer_width
         && 0.0 <= y
-        && y + f64::from(height) <= outer_height;
+        && x as usize + width <= outer_width
+        && y as usize + height <= outer_height;
     if !fits {
         return Err(malformed(format!(
             "the {width} x {height} region at ({x}, {y}) is not inside the {outer_width} x \
              {outer_height} sprite"
         )));
     }
-    let (outer_width, outer_height) = (outer_width as usize, outer_height as usize);
-    let (x, y, width, height) = (x as usize, y as usize, width as usize, height as usize);
+    let (x, y) = (x as usize, y as usize);
     let mut out = vec![T::default(); outer_width * outer_height * 4];
     let top = outer_height - y - height;
     for (row, line) in pixels.chunks(width * 4).enumerate() {
@@ -403,10 +558,6 @@ fn pptr(
         .as_pptr()
         .ok_or_else(|| malformed(format!("{name} is not a reference")))?;
     cx.resolve(from, reference)
-}
-
-fn unsupported(what: &str) -> ConvertError {
-    ConvertError::new("unsupported", what)
 }
 
 #[cfg(test)]

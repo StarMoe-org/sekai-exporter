@@ -919,10 +919,8 @@ fn object_logical<'i>(
 ) -> Option<Cow<'i, str>> {
     match paths.iter().min() {
         Some(path) => Some(path_in_bundle(unit, logical_path(path))),
-        None => {
-            let logical = loose_path(&object.class, object.name.as_deref(), loose)?;
-            Some(Cow::Owned(path_in_bundle(unit, &logical).into_owned()))
-        }
+        None => loose_path(&object.class, object.name.as_deref(), loose)
+            .map(|logical| path_in_bundle(unit, &logical).into_owned().into()),
     }
 }
 

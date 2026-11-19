@@ -346,6 +346,8 @@ pub(crate) struct Supply {
     pub(crate) source: Box<dyn Source>,
     /// The layouts of the engine classes and scripts that the bundles store without them.
     pub(crate) classes: Box<dyn ClassLayouts>,
+    /// The classes whose objects no container path names are assets all the same.
+    pub(crate) loose: &'static [&'static str],
 }
 
 /// The supply of `run`: the client package of `region` with `--client`, and otherwise its
@@ -361,6 +363,7 @@ fn open_source(run: &Run<'_>, region: Region, secrets: &Secrets) -> Result<Suppl
     Ok(Supply {
         source,
         classes: Box::new(NoClasses),
+        loose: &[],
     })
 }
 
@@ -372,15 +375,16 @@ fn converters_of(region: &Region, secrets: &Secrets) -> Result<Vec<Box<dyn Conve
     Ok(converters(hca_key))
 }
 
-/// What the assets of a run with `converters` and the class layouts `classes` follow from
-/// besides its inputs, by part: the identity of the evaluation of its units and, when it builds
-/// assets from tables, the form and version of each table converter.
+/// What the assets of a run with `converters`, the class layouts `classes` and the loose classes
+/// `loose` follow from besides its inputs, by part: the identity of the evaluation of its units
+/// and, when it builds assets from tables, the form and version of each table converter.
 fn evaluation_identity(
     converters: &[Box<dyn Converter>],
     classes: &dyn ClassLayouts,
+    loose: &[&str],
     tables: bool,
 ) -> BTreeMap<String, String> {
-    let mut identity = reuse::evaluation_identity(converters, classes, LIMIT);
+    let mut identity = reuse::evaluation_identity(converters, classes, LIMIT, loose);
     if tables {
         identity.extend(sekai_pipeline::tables::evaluation_identity(
             &table_converters(),
@@ -449,7 +453,11 @@ fn look(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<Looked, String> 
     let tables = open_tables(run.options, &region)?;
     let secrets = Secrets::new(run.options.secrets.clone());
     let converters = converters_of(&region, &secrets)?;
-    let Supply { source, classes } = open_source(run, region, &secrets)?;
+    let Supply {
+        source,
+        classes,
+        loose,
+    } = open_source(run, region, &secrets)?;
     let recorded = RecordedVersion {
         identity: current_identity(
             name,
@@ -458,7 +466,7 @@ fn look(run: &Run<'_>, config: &str, site: &Site<'_>) -> Result<Looked, String> 
             previous.as_ref().map(|recorded| &recorded.identity),
             &NoRecorder,
         )?,
-        evaluation: evaluation_identity(&converters, classes.as_ref(), tables.is_some()),
+        evaluation: evaluation_identity(&converters, classes.as_ref(), loose, tables.is_some()),
     };
     Ok(Looked {
         version: recorded.identity.name(),
@@ -659,6 +667,8 @@ struct Opened {
     source: Box<dyn Source>,
     /// The layouts of the engine classes and scripts of the bundles of the source.
     classes: Box<dyn ClassLayouts>,
+    /// The classes whose objects no container path names are assets all the same.
+    loose: &'static [&'static str],
     tables: Option<Tables>,
     /// The local store, which keeps the objects of the run and caches those of the site.
     store: LocalStore,
@@ -688,7 +698,11 @@ impl Opened {
         let secrets = Secrets::new(options.secrets.clone());
         let converters = converters_of(&region, &secrets)?;
         let tables = open_tables(options, &region)?;
-        let Supply { source, classes } = open_source(run, region, &secrets)?;
+        let Supply {
+            source,
+            classes,
+            loose,
+        } = open_source(run, region, &secrets)?;
         let directory = |name: &str| {
             LocalStore::open(run.work.join(name))
                 .map_err(|e| format!("{}/{name}: {e}", run.work.display()))
@@ -700,6 +714,7 @@ impl Opened {
         Ok(Self {
             source,
             classes,
+            loose,
             tables,
             inputs: directory("inputs")?,
             store,
@@ -716,6 +731,7 @@ impl Opened {
         evaluation_identity(
             &self.converters,
             self.classes.as_ref(),
+            self.loose,
             self.tables.is_some(),
         )
     }
@@ -779,6 +795,7 @@ impl Opened {
         let stream = Stream {
             converters: &self.converters,
             naming: &InBundle,
+            loose: self.loose,
             store: objects,
             derivations: backed,
             indexes: &indexes,
@@ -1205,17 +1222,19 @@ impl Context<'_> {
     }
 }
 
-/// Prints what the run of `region` published and committed.
+/// Prints what the run of `region` published and committed: among others the names that several
+/// assets claim, and the roots of the units it evaluated that are left unnamed.
 fn print_summary(region: &str, committed: &Committed, views: &Views, outcome: &reuse::Outcome) {
     let state = &committed.state;
     let owned = state.claims.iter().filter_map(Claims::owner);
     let errors = owned.clone().filter(|owner| owner.failed).count();
     let unnamed = state.claims.iter().filter(|c| c.owner().is_none()).count();
     let evaluation = &outcome.streamed.evaluation;
+    let unnamed_roots = evaluation.unnamed.len();
     println!(
         "{region} {} published revision {} assets {} errors {errors} unnamed {unnamed} \
-         evaluated {} kept {} converted {} reused {} uploaded {} present {} records {} \
-         state chunks {} bytes {}",
+         unnamed roots {unnamed_roots} evaluated {} kept {} converted {} reused {} uploaded {} \
+         present {} records {} state chunks {} bytes {}",
         state.version,
         views.canonical().pointer.revision,
         owned.count() + views.tables.len(),

@@ -68,6 +68,7 @@ fn evaluate(
     let stream = Stream {
         converters,
         naming: &InBundle,
+        loose: &[],
         store: &store,
         derivations,
         indexes: &NoBundleIndexes,

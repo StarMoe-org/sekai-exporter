@@ -32,6 +32,7 @@ pub(crate) fn update_source(
     Ok(crate::update::Supply {
         source: Box::new(source),
         classes: Box::new(layouts),
+        loose: super::LOOSE,
     })
 }
 

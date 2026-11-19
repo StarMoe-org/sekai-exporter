@@ -38,7 +38,7 @@ use crate::eval::{
 };
 use crate::ledger::{BundleLedger, Tally};
 use crate::metrics::Recorder;
-use crate::naming::{Candidate, Origin, assign, logical_path, path_in_bundle};
+use crate::naming::{Candidate, Origin, assign, logical_path, loose_path, path_in_bundle};
 use crate::sched::Scheduler;
 use crate::version::{BundleError, BundleFiles, BundleInput, Parsed, Version, bundle_files};
 
@@ -146,6 +146,10 @@ pub struct Stream<'a> {
     pub converters: &'a [Box<dyn Converter>],
     /// How roots are named.
     pub naming: &'a dyn Naming,
+    /// The classes whose objects without a container path are roots all the same, with the
+    /// logical path that [`loose_path`] gives them. Any other object without a container path
+    /// is never a root.
+    pub loose: &'a [&'a str],
     /// The store of documents and member files.
     pub store: &'a dyn Store,
     /// The records of earlier derivations.
@@ -903,21 +907,40 @@ fn count_reads(tallies: &mut BTreeMap<usize, Tally>, units: &Units<'_>, document
     }
 }
 
+/// The logical path of `object` of the bundle `unit`, whose container paths are `paths`, in the
+/// directory of that bundle: from its first container path or, for an object without one, as
+/// [`loose_path`] gives it with the classes `loose`. An object without a logical path is never a
+/// root.
+fn object_logical<'i>(
+    unit: &str,
+    object: &ObjectIndex,
+    paths: &'i [String],
+    loose: &[&str],
+) -> Option<Cow<'i, str>> {
+    match paths.iter().min() {
+        Some(path) => Some(path_in_bundle(unit, logical_path(path))),
+        None => loose_path(&object.class, object.name.as_deref(), loose)
+            .map(|logical| path_in_bundle(unit, &logical).into_owned().into()),
+    }
+}
+
 /// Whether one of `converters` has a root in the unit of `bundle`, whose window holds the bundles
-/// `window` of `index`: an object of `bundle` with a container path that the converter takes as
-/// a root, or a file of `bundle` that it takes as a root, as [`plan_unit`] finds them.
+/// `window` of `index`: an object of `bundle` with a logical path, as [`object_logical`] gives it
+/// with the classes `loose`, that the converter takes as a root, or a file of `bundle` that it
+/// takes as a root, as [`plan_unit`] finds them.
 pub(crate) fn has_roots(
     index: &VersionIndex,
     bundle: usize,
     window: &BTreeSet<usize>,
     converters: &[&dyn Converter],
+    loose: &[&str],
 ) -> bool {
     let unit = &index.bundles()[bundle].name;
     let mut files = index.bundles()[bundle].files.iter().enumerate();
     let object_root = files.any(|(f, file)| {
         file.objects.iter().enumerate().any(|(o, object)| {
             let paths = index.container_paths(bundle, f, object.path_id);
-            if paths.is_empty() {
+            if object_logical(unit, object, paths, loose).is_none() {
                 return false;
             }
             let script = script_within(index, unit, bundle, f, o, window, &mut BTreeSet::new());
@@ -1003,14 +1026,14 @@ pub(crate) fn plan_unit<'a>(
     for (f, file) in index.bundles()[bundle].files.iter().enumerate() {
         for (o, object) in file.objects.iter().enumerate() {
             let paths = index.container_paths(bundle, f, object.path_id);
-            let path = paths.iter().min();
-            if path.is_none() && tally.is_none() {
+            let logical = object_logical(unit, object, paths, stream.loose);
+            if logical.is_none() && tally.is_none() {
                 continue;
             }
-            // Only roots list the references their scripts make; an object without a container
-            // path is never a root.
+            // Only roots list the references their scripts make, and only an object with a
+            // logical path is a root.
             let mut unlisted = BTreeSet::new();
-            let listed = if path.is_some() {
+            let listed = if logical.is_some() {
                 &mut *outside
             } else {
                 &mut unlisted
@@ -1020,7 +1043,7 @@ pub(crate) fn plan_unit<'a>(
             for converter in stream.converters {
                 if converter.is_root(object, script, paths) {
                     root = true;
-                    if let Some(path) = path {
+                    if let Some(logical) = &logical {
                         let id = ObjectId {
                             bundle,
                             file: f,
@@ -1029,7 +1052,7 @@ pub(crate) fn plan_unit<'a>(
                         found.push(Found {
                             converter: converter.as_ref(),
                             root: FoundRoot::Object(id, object),
-                            logical: path_in_bundle(unit, logical_path(path)),
+                            logical: logical.clone(),
                         });
                     }
                 }

@@ -242,19 +242,110 @@ fn a_sprite_its_atlas_holds_whole_is_cut_from_the_atlas_texture() {
 }
 
 #[test]
+fn a_sprite_its_atlas_trimmed_is_its_region_in_a_transparent_image() {
+    // The atlas packs rectangles and kept one column of the 2 x 2 sprite, 1 pixel from its left.
+    let file = File(vec![
+        sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
+        texture(),
+        atlas_holding(rect(1.0, 0.0, 1.0, 2.0), vector(1.0, 0.0), 3),
+    ]);
+    let got = members(Sprite.convert(id(1), &file).unwrap().unwrap());
+    let Content::Image(image) = &got[0].1 else {
+        panic!("unexpected members {got:?}");
+    };
+    assert_eq!((image.width(), image.height()), (2, 2));
+    let alphas: Vec<u8> = image.pixels().chunks(4).map(|p| p[3]).collect();
+    assert_eq!(alphas, [0, 3, 0, 3]);
+    let reds: Vec<u8> = image.pixels().chunks(4).map(|p| p[0]).collect();
+    assert_eq!(reds, [0, 11, 0, 21]);
+}
+
+/// A 3 x 2 sprite, with 1 pixel per unit and its pivot at its bottom left, whose mesh is the
+/// triangle (1, 0), (3, 0), (3, 2): it covers the pixels whose centres are (1.5, 0.5), on its
+/// edge, (2.5, 0.5) and (2.5, 1.5), on its edge. An atlas that packs tight outlines holds the
+/// box (1, 0) to (3, 2) around the mesh at (2, 1) of the texture, with `settings`.
+fn outlined(settings: i64) -> File {
+    let mut sprite = sprite(3, 0, 0, rect(0.0, 0.0, 3.0, 2.0));
+    let corners = [[1.0f32, 0.0, 0.0], [3.0, 0.0, 0.0], [3.0, 2.0, 0.0]];
+    let vertex_data = s(vec![
+        ("m_VertexCount", i(3)),
+        (
+            "m_Channels",
+            Value::Array(vec![s(vec![
+                ("stream", i(0)),
+                ("offset", i(0)),
+                ("format", i(0)),
+                ("dimension", i(3)),
+            ])]),
+        ),
+        (
+            "m_DataSize",
+            Value::Bytes(
+                corners
+                    .iter()
+                    .flatten()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
+        ),
+    ]);
+    let indices: Vec<u8> = [0u16, 1, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
+    let Value::Struct(fields) = &mut sprite.fields else {
+        unreachable!("a sprite is a struct")
+    };
+    for (name, value) in fields.iter_mut() {
+        match (name.as_str(), value) {
+            ("m_PixelsToUnits", value) => *value = f(1.0),
+            ("m_Pivot", value) => *value = vector(0.0, 0.0),
+            ("m_RD", Value::Struct(own)) => own.extend([
+                ("m_VertexData".to_owned(), vertex_data.clone()),
+                ("m_IndexBuffer".to_owned(), Value::Bytes(indices.clone())),
+            ]),
+            _ => {}
+        }
+    }
+    File(vec![
+        sprite,
+        texture(),
+        atlas_holding(rect(2.0, 1.0, 2.0, 2.0), vector(1.0, 0.0), settings),
+    ])
+}
+
+/// The red and alpha values of the image of the sprite of `file`, rows from top to bottom.
+fn reds_and_alphas(file: &File) -> (Vec<u8>, Vec<u8>) {
+    let got = members(Sprite.convert(id(1), file).unwrap().unwrap());
+    let Content::Image(image) = &got[0].1 else {
+        panic!("unexpected members {got:?}");
+    };
+    assert_eq!((image.width(), image.height()), (3, 2));
+    let channel = |c: usize| image.pixels().chunks(4).map(|p| p[c]).collect();
+    (channel(0), channel(3))
+}
+
+#[test]
+fn a_sprite_of_a_tight_atlas_is_the_pixels_its_mesh_covers() {
+    // Settings 1 packs tight outlines. The texture pixel at column 2, row 2 from the bottom lies
+    // in the box but under no covered pixel, so it stays out of the image.
+    let (reds, alphas) = reds_and_alphas(&outlined(1));
+    assert_eq!(reds, [0, 0, 3, 0, 12, 13]);
+    assert_eq!(alphas, [0, 0, 3, 0, 3, 3]);
+}
+
+#[test]
+fn a_sprite_a_tight_atlas_mirrors_is_mirrored_back() {
+    // Settings 9 also mirrors the sprite vertically within its box.
+    let (reds, alphas) = reds_and_alphas(&outlined(9));
+    assert_eq!(reds, [0, 0, 13, 0, 2, 3]);
+    assert_eq!(alphas, [0, 0, 3, 0, 3, 3]);
+}
+
+#[test]
 fn sprites_drawn_from_elsewhere_are_unsupported() {
     let whole = || rect(0.0, 0.0, 4.0, 3.0);
+    // Settings 17 turns a sprite of a tight atlas a quarter turn, and 11 mirrors a sprite of an
+    // atlas that packs rectangles.
     let cases = [
-        File(vec![
-            sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
-            texture(),
-            atlas_holding(rect(1.0, 0.0, 1.5, 2.0), vector(0.0, 0.0), 3),
-        ]),
-        File(vec![
-            sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
-            texture(),
-            atlas_holding(rect(1.0, 0.0, 2.0, 2.0), vector(1.0, 0.0), 3),
-        ]),
+        outlined(17),
         File(vec![
             sprite(3, 0, 0, rect(0.0, 0.0, 2.0, 2.0)),
             texture(),

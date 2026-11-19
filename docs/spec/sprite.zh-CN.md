@@ -34,15 +34,22 @@
 
 **根对象：** 每个 `Sprite`（类 213）。形式不读取游戏数据表。
 
-**读取的字段：** `m_Rect`、`m_Pivot`、`m_PixelsToUnits`、`m_Border`、`m_SpriteAtlas`、`m_RenderDataKey`，以及渲染数据（`m_RD`，或图集按 `m_RenderDataKey` 列出的那一项，前提是图集列出了它）中的：`texture`、`alphaTexture`、`textureRect`、`textureRectOffset`、`settingsRaw`。从精灵图集取 `m_RenderDataMap`。从贴图取 `texture` 形式所读取的字段。
+**读取的字段：** `m_Rect`、`m_Pivot`、`m_PixelsToUnits`、`m_Border`、`m_SpriteAtlas`、`m_RenderDataKey`，以及渲染数据（`m_RD`，或图集按 `m_RenderDataKey` 列出的那一项，前提是图集列出了它）中的：`texture`、`alphaTexture`、`textureRect`、`textureRectOffset`、`settingsRaw`；紧凑轮廓图集中的精灵还读取 `m_RD` 的 `m_VertexData` 与 `m_IndexBuffer`。从精灵图集取 `m_RenderDataMap`。从贴图取 `texture` 形式所读取的字段。
 
 **图像。** 渲染数据的 `texture` 按 `texture` 形式解码 `Texture2D` 的方式解码。`m_Rect` 的每条边（渲染数据来自图集时为 `textureRect` 的边）舍入到最近的整像素，相同时取偶数：左边缘为 `x`，右边缘为 `x + width`，下边缘为 `y`，上边缘为 `y + height`，求和以双精度进行。图像为这些边缘之间的像素，`y` 从贴图的最下一行计数。
+
+**裁边的精灵。** 按矩形打包的图集（`settingsRaw` 第 1 位为 1）可能裁去精灵的透明边距：此时其 `textureRect` 小于 `m_Rect`，或其 `textureRectOffset` 不为零。这类精灵的图像大小为 `m_Rect`，每边舍入到最近的整像素，相同时取偶数。图像除从 `textureRect` 裁出的像素外均为透明黑色；这些像素的左下角位于自图像左下角起 `textureRectOffset` 处，按同样方式舍入。
+
+**紧凑图集中的精灵。** 按紧凑轮廓打包的图集（`settingsRaw` 第 1 位为 0）把精灵网格的包围框 `textureRect` 放在与其他精灵轮廓相邻的位置，因此框内也可能有其他精灵的像素。这类精灵被裁边或被镜像（`settingsRaw` 第 2 至 5 位的打包旋转为 1、2 或 3：水平、垂直或两者）时，图像大小为 `m_Rect`，每边按上文舍入。图像为透明黑色，只有中心落在精灵自身网格某个三角形内或边上的像素例外（`m_RD`：`m_VertexData` 通道 0 的位置，`m_IndexBuffer` 每三个 16 位索引为一个三角形）。网格位置 `p` 位于自精灵左下角起 `p * m_PixelsToUnits + m_Pivot * (m_Rect.width, m_Rect.height)` 像素处。这样的像素取其中心 `c` 下方的贴图像素：每条轴上为 `textureRect.x + (c.x - textureRectOffset.x)`，图集镜像该轴时为 `textureRect.x + textureRect.width - (c.x - textureRectOffset.x)`，向下取整；`y` 同理。面积为零的三角形不覆盖像素。
 
 **图像以外的结果：**
 
 | 情况 | 结果 |
 |---|---|
-| 渲染数据来自图集，且被旋转（`settingsRaw` 的第 2 至 5 位）、`textureRectOffset` 不为零，或 `textureRect` 的大小与 `m_Rect` 不同 | 错误 `unsupported` |
+| 渲染数据来自按矩形打包的图集，且有打包旋转 | 错误 `unsupported` |
+| 渲染数据来自按紧凑轮廓打包的图集，且把精灵转了四分之一圈（打包旋转为 4 或以上） | 错误 `unsupported` |
+| 裁边精灵的区域越出其图像 | 错误 `malformed` |
+| 紧凑图集中精灵的网格没有位置、不是三角形列表、引用了不存在的顶点，或覆盖的像素所对应的贴图像素越出贴图 | 错误 `malformed` |
 | 渲染数据为 `m_RD`，且 `settingsRaw` 设置了打包位（第 0 位） | 错误 `unsupported` |
 | 渲染数据的 `alphaTexture` 不为 null | 错误 `unsupported` |
 | 舍入后的矩形为空或越出贴图 | 错误 `malformed` |
@@ -50,7 +57,7 @@
 | 布局的某个浮点数不是有限数 | 错误 `malformed` |
 | 贴图无法解码 | `texture` 形式的错误 |
 
-精灵的网格未覆盖的矩形像素按存储保留：形式裁出矩形，而不按网格做遮罩。
+除紧凑图集中被裁边或镜像的精灵外，精灵的网格未覆盖的矩形像素按存储保留：形式裁出矩形，而不按网格做遮罩。
 
 ## 4. 容器
 
@@ -58,13 +65,13 @@
 
 ## 5. 正确性
 
-图像即定义精灵时所用的矩形，因此它保持图片的大小及其中内容的位置，包括透明边距。`m_RD.textureRect` 是网格周围更小的框，网格紧凑时以小数像素计；布局记录它，供绘制网格的程序使用。矩形舍入到整像素的方式，与图像库裁切以小数像素给出的框相同。
+图像即定义精灵时所用的矩形，因此它保持图片的大小及其中内容的位置，包括透明边距。按矩形打包的图集只裁去像素完全透明的边距，因此把区域放回透明图像中的偏移处即得到精灵的图片；边距在 alpha 为零时所存的颜色值不予保留。在紧凑图集中，网格的包围框并不只属于这个精灵；属于精灵的像素是其网格覆盖的像素，也就是渲染器绘制该网格时绘制的像素：光栅化器在像素中心落在三角形内时着色。中心恰好落在边上的像素予以保留，因此网格的三角形之间没有缝隙，结果也与三角形的顺序和绕向无关。`m_RD.textureRect` 是网格周围更小的框，网格紧凑时以小数像素计；布局记录它，供绘制网格的程序使用。矩形舍入到整像素的方式，与图像库裁切以小数像素给出的框相同。
 
-在真实资源包上，裁切与布局对照 UnityPy 检查：图像对照从 `tools/compare-texture` 的参考解码器解码的贴图中裁出的同一矩形，布局的每个值对照 UnityPy 读取的字段。
+在真实资源包上，裁切与布局对照 UnityPy 检查：图像对照从 `tools/compare-texture` 的参考解码器解码的贴图中裁出的同一矩形，布局的每个值对照 UnityPy 读取的字段。紧凑图集中精灵的图像（无论是否镜像）对照 UnityPy 按网格绘制的图像检查，两者在其所在位置逐像素一致。
 
 ## 6. 版本
 
 | 版本 | 变更 |
 |---|---|
 | 1 | 第一版 |
-| 2 | 图像为矩形 `m_Rect` |
+| 2 | 图像为矩形 `m_Rect`。修订 1 转换图集裁过边或镜像过的精灵，版本 2 曾拒绝它们 |

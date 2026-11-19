@@ -75,6 +75,7 @@ fn context<'a>(
     Stream {
         converters,
         naming: &InBundle,
+        loose: &[],
         store,
         derivations,
         indexes,

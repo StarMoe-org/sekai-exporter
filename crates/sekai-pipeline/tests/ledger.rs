@@ -56,6 +56,7 @@ fn streamed(root: &Path, manifest: &[Entry], ignored: &[&str], segment: Segment)
     let stream = Stream {
         converters: &converters,
         naming: &InBundle,
+        loose: &[],
         store: &store,
         derivations: &MemoryDerivations::default(),
         indexes: &NoBundleIndexes,

@@ -248,7 +248,7 @@ impl<'m> Reuse<'m> {
     ) -> io::Result<Self> {
         let _span = stream.recorder.span("plan", "reuse", "");
         let units = Units::new(manifest);
-        let context = context(stream.classes, stream.limit);
+        let context = context(stream.classes, stream.limit, stream.loose);
         let identities = identities(stream);
         let current: BTreeSet<&str> = identities.values().flat_map(Identities::both).collect();
         let scanned: BTreeSet<String> = identities.keys().map(|&form| form.to_owned()).collect();
@@ -409,32 +409,38 @@ fn entries_to_evaluate(
 }
 
 /// What the results of units follow from besides the bytes of their bundles, for an evaluation
-/// with `converters`, the class layouts `classes` and the size limit of assets `limit`: the start
-/// of every unit key under `unit`, and the identities of each converter under `form <name>`.
+/// with `converters`, the class layouts `classes`, the size limit of assets `limit` and the
+/// classes `loose` of [`Stream::loose`]: the start of every unit key under `unit`, and the
+/// identities of each converter under `form <name>`.
 /// Evaluations with the same identity give a unit with the same bundles the same result, so a
 /// run whose inputs and evaluation identity are those of the last run has nothing to evaluate.
 pub fn evaluation_identity(
     converters: &[Box<dyn Converter>],
     classes: &dyn ClassLayouts,
     limit: Option<u64>,
+    loose: &[&str],
 ) -> BTreeMap<String, String> {
     let forms = converters.iter().map(|converter| {
         let identity = Identities::of(converter.as_ref()).failing;
         (format!("form {}", converter.name()), identity)
     });
-    let unit = ("unit".to_owned(), context(classes, limit));
+    let unit = ("unit".to_owned(), context(classes, limit, loose));
     std::iter::once(unit).chain(forms).collect()
 }
 
-/// What every unit key of an evaluation with the class layouts `classes` and the size limit of
-/// assets `limit` starts with: the revision, the class layouts and the limit.
-fn context(classes: &dyn ClassLayouts, limit: Option<u64>) -> String {
+/// What every unit key of an evaluation with the class layouts `classes`, the size limit of
+/// assets `limit` and the classes `loose` of [`Stream::loose`] starts with: the revision, the
+/// class layouts, the limit and those classes.
+fn context(classes: &dyn ClassLayouts, limit: Option<u64>, loose: &[&str]) -> String {
     let mut text = format!("{REVISION}\n");
     if let Some(identity) = classes.identity() {
         text.push_str(&format!("classes {}\n", eval::hex(&identity)));
     }
     if let Some(limit) = limit {
         text.push_str(&format!("limit {limit}\n"));
+    }
+    if !loose.is_empty() {
+        text.push_str(&format!("loose {}\n", loose.join(" ")));
     }
     text
 }
@@ -516,7 +522,7 @@ fn holds_for(
         return Ok(None);
     };
     let window: BTreeSet<usize> = (0..index.bundles().len()).collect();
-    let rootless = !stream::has_roots(&index, bundle, &window, &unscanned);
+    let rootless = !stream::has_roots(&index, bundle, &window, &unscanned, stream.loose);
     Ok(rootless.then_some(found))
 }
 

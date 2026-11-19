@@ -280,6 +280,8 @@ pub(crate) struct Source<'a> {
     pub(crate) inputs: Box<dyn Inputs + 'a>,
     /// The layouts of engine classes.
     pub(crate) classes: Box<dyn ClassLayouts>,
+    /// The classes whose objects no container path names are assets all the same.
+    pub(crate) loose: &'static [&'static str],
 }
 
 /// The source of an export: a client package when a class table comes with it, and otherwise a
@@ -302,6 +304,7 @@ fn directory(root: &Path) -> Result<Source<'_>, lexopt::Error> {
         manifest,
         inputs: Box::new(Directory { root }),
         classes: Box::new(NoClasses),
+        loose: &[],
     })
 }
 
@@ -360,6 +363,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         mut manifest,
         inputs,
         classes,
+        loose,
     } = source(&options.input, &options.tables)?;
     let inputs = inputs.as_ref();
     let cache = BoundedBlockCache::new(BLOCK_CACHE_BYTES);
@@ -385,6 +389,7 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
         &Stream {
             converters: &converters,
             naming: &InBundle,
+            loose,
             store: &store,
             derivations: derivations.as_ref(),
             indexes: &NoBundleIndexes,
@@ -429,11 +434,14 @@ fn export(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     Ok(failed == 0)
 }
 
-/// Prints the bundles that could not be evaluated and the references that leave the window of
-/// their unit, and returns the number of such bundles.
+/// Prints the bundles that could not be evaluated, the roots left unnamed and the references that
+/// leave the window of their unit, and returns the number of such bundles.
 pub(crate) fn report(streamed: &Streamed) -> usize {
     for e in &streamed.errors {
         eprintln!("{}: {}: {}", e.name, e.code, e.message);
+    }
+    for (logical, _) in &streamed.evaluation.unnamed {
+        eprintln!("{logical}: unnamed: another root has the same name");
     }
     for o in &streamed.outside {
         eprintln!(

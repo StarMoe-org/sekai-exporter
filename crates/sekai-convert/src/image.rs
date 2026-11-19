@@ -11,6 +11,7 @@ pub use sprite::Sprite;
 use sekai_codec::texture;
 use sekai_unity::Value;
 
+use crate::read::{field, malformed};
 use crate::roots::{self, TEXTURE_2D_ARRAY, TEXTURE_3D};
 use crate::{
     Asset, Content, Context, ConvertError, Converter, Cost, CostClass, Member, ObjectId,
@@ -165,19 +166,9 @@ impl StreamData {
     }
 }
 
-fn field<'a>(value: &'a Value, name: &str) -> Result<&'a Value, ConvertError> {
-    value
-        .get(name)
-        .ok_or_else(|| malformed(format!("the field {name} is missing")))
-}
-
 fn dimension(fields: &Value, name: &str) -> Result<u32, ConvertError> {
     field(fields, name)?
         .as_i64()
         .and_then(|v| u32::try_from(v).ok())
         .ok_or_else(|| malformed(format!("{name} is not a size")))
-}
-
-fn malformed(message: impl Into<String>) -> ConvertError {
-    ConvertError::new("malformed", message)
 }

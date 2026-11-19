@@ -54,7 +54,7 @@ flowchart LR
 
 ## Quick start
 
-Build the command-line program. The default preset converts everything the `storage` and `canonical` views need; `preset-mysekai` adds MySekai, and `full` every feature ([Features](docs/features.md)):
+Each release attaches the command-line program built with every feature, for Linux (x86_64 and aarch64, statically linked), Windows (x86_64) and macOS (x86_64 and arm64), with a `SHA256SUMS` file; see [Releases](https://github.com/StarMoe-org/sekai-exporter/releases). Or build it. The default preset converts everything the `storage` and `canonical` views need; `preset-mysekai` adds MySekai, and `full` every feature ([Features](docs/features.md)):
 
 ```bash
 cargo build --release -p sekai-exporter

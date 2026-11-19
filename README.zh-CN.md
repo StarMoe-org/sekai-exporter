@@ -54,7 +54,7 @@ flowchart LR
 
 ## 快速开始
 
-构建命令行程序。默认预设转换 `storage` 与 `canonical` 视图所需的全部内容；`preset-mysekai` 另加 MySekai，`full` 包含全部 feature（[功能开关](docs/features.zh-CN.md)）：
+每个发布版本都附带带全部 feature 构建的命令行程序，覆盖 Linux（x86_64 与 aarch64，静态链接）、Windows（x86_64）和 macOS（x86_64 与 arm64），并附 `SHA256SUMS` 文件，见 [Releases](https://github.com/StarMoe-org/sekai-exporter/releases)。也可以自行构建。默认预设转换 `storage` 与 `canonical` 视图所需的全部内容；`preset-mysekai` 另加 MySekai，`full` 包含全部 feature（[功能开关](docs/features.zh-CN.md)）：
 
 ```bash
 cargo build --release -p sekai-exporter

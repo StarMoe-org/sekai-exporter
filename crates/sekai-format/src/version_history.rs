@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::paths::PathFile;
 
 /// The version of the version history and version changes formats.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// The version before, whose documents read as documents of this version that know no causes.
+const WITHOUT_CAUSES: u32 = 1;
 
 /// The extension of both documents in the store: they are stored gzip-compressed.
 pub const EXTENSION: &str = "json.gz";
@@ -48,6 +51,10 @@ pub struct HistoryEntry {
     /// that is known.
     #[serde(flatten)]
     pub counts: Option<ChangeCounts>,
+    /// How many of them only the conversion added, removed and changed, when the cause of every
+    /// change is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversion: Option<ChangeCounts>,
 }
 
 /// How many files a version added, removed and changed.
@@ -82,6 +89,29 @@ pub struct VersionChanges {
     pub changed: Vec<ChangedFile>,
 }
 
+/// What a change at a path follows from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Cause {
+    /// The sources of the file changed: the bundles or the tables it is made from.
+    Source,
+    /// The sources are the same, and the conversion that makes the file from them is not.
+    Conversion,
+}
+
+impl Cause {
+    /// The cause of a change made of two changes that follow from `a` and `b`, each `None` when
+    /// it is not known: the sources changed when either says so, and only the conversion when
+    /// both say so.
+    pub fn of_both(a: Option<Cause>, b: Option<Cause>) -> Option<Cause> {
+        match (a, b) {
+            (Some(Cause::Source), _) | (_, Some(Cause::Source)) => Some(Cause::Source),
+            (Some(Cause::Conversion), Some(Cause::Conversion)) => Some(Cause::Conversion),
+            _ => None,
+        }
+    }
+}
+
 /// A file at a path the version before had none at.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddedFile {
@@ -91,6 +121,9 @@ pub struct AddedFile {
     pub size: u64,
     /// The media type.
     pub media_type: String,
+    /// What the change follows from, when that is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Cause>,
 }
 
 /// A file of the version before at a path the version has no file at.
@@ -100,6 +133,9 @@ pub struct RemovedFile {
     pub path: String,
     /// The size in bytes in the version before.
     pub size: u64,
+    /// What the change follows from, when that is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Cause>,
 }
 
 /// A file whose bytes differ from those at the same path in the version before.
@@ -111,6 +147,9 @@ pub struct ChangedFile {
     pub size: u64,
     /// The size in bytes in the version before.
     pub previous_size: u64,
+    /// What the change follows from, when that is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<Cause>,
 }
 
 /// What became of the file at one path.
@@ -125,24 +164,31 @@ pub enum FileChange {
 }
 
 impl FileChange {
-    /// What became of a path that held `before` and now holds `after`: nothing when both hold
-    /// the same bytes or neither holds a file.
-    pub fn between(before: Option<&PathFile>, after: Option<&PathFile>) -> Option<Self> {
+    /// What became of a path that held `before` and now holds `after`, following from `cause`:
+    /// nothing when both hold the same bytes or neither holds a file.
+    pub fn between(
+        before: Option<&PathFile>,
+        after: Option<&PathFile>,
+        cause: Option<Cause>,
+    ) -> Option<Self> {
         match (before, after) {
             (None, Some(after)) => Some(Self::Added(AddedFile {
                 path: after.path.clone(),
                 size: after.size,
                 media_type: after.media_type.clone(),
+                cause,
             })),
             (Some(before), None) => Some(Self::Removed(RemovedFile {
                 path: before.path.clone(),
                 size: before.size,
+                cause,
             })),
             (Some(before), Some(after)) if before.sha256 != after.sha256 => {
                 Some(Self::Changed(ChangedFile {
                     path: after.path.clone(),
                     size: after.size,
                     previous_size: before.size,
+                    cause,
                 }))
             }
             _ => None,
@@ -156,6 +202,25 @@ impl FileChange {
             Self::Removed(file) => &file.path,
             Self::Changed(file) => &file.path,
         }
+    }
+
+    /// What the change follows from, when that is known.
+    pub fn cause(&self) -> Option<Cause> {
+        match self {
+            Self::Added(file) => file.cause,
+            Self::Removed(file) => file.cause,
+            Self::Changed(file) => file.cause,
+        }
+    }
+
+    /// The change, following from `cause`.
+    fn with_cause(mut self, cause: Option<Cause>) -> Self {
+        match &mut self {
+            Self::Added(file) => file.cause = cause,
+            Self::Removed(file) => file.cause = cause,
+            Self::Changed(file) => file.cause = cause,
+        }
+        self
     }
 }
 
@@ -171,7 +236,8 @@ impl fmt::Display for VersionHistoryError {
 
 impl std::error::Error for VersionHistoryError {}
 
-/// Reads a document of the format `format` as JSON, checking its format and version.
+/// Reads a document of the format `format` as JSON, checking its format and version. A document
+/// of the version before reads as one of this version whose causes are not known.
 fn from_json<T: DeserializeOwned>(
     bytes: &[u8],
     format: &str,
@@ -180,7 +246,7 @@ fn from_json<T: DeserializeOwned>(
     let document: T =
         serde_json::from_slice(bytes).map_err(|e| VersionHistoryError(e.to_string()))?;
     let (found, version) = header(&document);
-    if found != format || version != VERSION {
+    if found != format || !matches!(version, VERSION | WITHOUT_CAUSES) {
         return Err(VersionHistoryError(format!(
             "format {found} version {version} is not {format} version {VERSION}"
         )));
@@ -251,8 +317,19 @@ impl VersionChanges {
         }
     }
 
+    /// How many files only the conversion adds, removes and changes, when the cause of every
+    /// change is known.
+    pub fn conversion(&self) -> Option<ChangeCounts> {
+        Some(ChangeCounts {
+            added: conversions(self.added.iter().map(|file| file.cause))?,
+            removed: conversions(self.removed.iter().map(|file| file.cause))?,
+            changed: conversions(self.changed.iter().map(|file| file.cause))?,
+        })
+    }
+
     /// The changes since the same version for the version `to`: these, with the change at each
-    /// path of `revised` replaced by the one given with it, or taken out where none is given.
+    /// path of `revised` replaced by the one given with it, or taken out where none is given. A
+    /// change given at a path these already changed follows from both causes.
     pub fn revise(
         self,
         to: &str,
@@ -267,13 +344,24 @@ impl VersionChanges {
             .map(|change| (change.path().to_owned(), change))
             .collect();
         for (path, change) in revised {
-            match change {
-                Some(change) => by_path.insert(path, change),
-                None => by_path.remove(&path),
-            };
+            let earlier = by_path.remove(&path);
+            if let Some(change) = change {
+                let cause = match earlier {
+                    Some(earlier) => Cause::of_both(earlier.cause(), change.cause()),
+                    None => change.cause(),
+                };
+                by_path.insert(path, change.with_cause(cause));
+            }
         }
         Self::new(&self.view, &self.from, to, by_path.into_values())
     }
+}
+
+/// How many of `causes` are the conversion, when every one is known.
+fn conversions(causes: impl IntoIterator<Item = Option<Cause>>) -> Option<u64> {
+    causes.into_iter().try_fold(0, |count, cause| {
+        Some(count + u64::from(cause? == Cause::Conversion))
+    })
 }
 
 #[cfg(test)]
@@ -294,19 +382,20 @@ mod tests {
     fn a_path_changes_when_its_bytes_do() {
         let (a, b) = (file("x.png", 1, 3), file("x.png", 2, 5));
         let same_bytes = file("x.png", 1, 3);
-        assert_eq!(FileChange::between(Some(&a), Some(&same_bytes)), None);
-        assert_eq!(FileChange::between(None, None), None);
-        let changed = FileChange::between(Some(&a), Some(&b)).unwrap();
+        assert_eq!(FileChange::between(Some(&a), Some(&same_bytes), None), None);
+        assert_eq!(FileChange::between(None, None, None), None);
+        let changed = FileChange::between(Some(&a), Some(&b), Some(Cause::Conversion)).unwrap();
         assert_eq!(
             changed,
             FileChange::Changed(ChangedFile {
                 path: "x.png".to_owned(),
                 size: 5,
                 previous_size: 3,
+                cause: Some(Cause::Conversion),
             })
         );
-        let added = FileChange::between(None, Some(&b)).unwrap();
-        let removed = FileChange::between(Some(&a), None).unwrap();
+        let added = FileChange::between(None, Some(&b), Some(Cause::Source)).unwrap();
+        let removed = FileChange::between(Some(&a), None, Some(Cause::Conversion)).unwrap();
         let changes = VersionChanges::new("storage", "1", "2", [added, removed, changed]);
         assert_eq!(
             changes.counts(),
@@ -316,6 +405,42 @@ mod tests {
                 changed: 1
             }
         );
+        assert_eq!(
+            changes.conversion(),
+            Some(ChangeCounts {
+                added: 0,
+                removed: 1,
+                changed: 1
+            })
+        );
+    }
+
+    #[test]
+    fn conversion_counts_need_the_cause_of_every_change() {
+        let (a, b) = (file("a.png", 1, 1), file("b.png", 2, 2));
+        let rows = [
+            FileChange::between(None, Some(&a), Some(Cause::Conversion)),
+            FileChange::between(None, Some(&b), None),
+        ];
+        let changes = VersionChanges::new("storage", "1", "2", rows.into_iter().flatten());
+        assert_eq!(changes.conversion(), None);
+        assert_eq!(
+            VersionChanges::new("storage", "1", "2", []).conversion(),
+            Some(ChangeCounts::default())
+        );
+    }
+
+    #[test]
+    fn two_changes_follow_from_the_conversion_only_when_both_do() {
+        use Cause::{Conversion, Source};
+        assert_eq!(
+            Cause::of_both(Some(Conversion), Some(Conversion)),
+            Some(Conversion)
+        );
+        assert_eq!(Cause::of_both(Some(Conversion), Some(Source)), Some(Source));
+        assert_eq!(Cause::of_both(None, Some(Source)), Some(Source));
+        assert_eq!(Cause::of_both(Some(Conversion), None), None);
+        assert_eq!(Cause::of_both(None, None), None);
     }
 
     #[test]
@@ -328,32 +453,43 @@ mod tests {
         );
         let c2 = file("c.png", 5, 5);
         let rows = [
-            FileChange::between(None, Some(&a)),
-            FileChange::between(Some(&b), None),
-            FileChange::between(Some(&c), Some(&c2)),
+            FileChange::between(None, Some(&a), Some(Cause::Source)),
+            FileChange::between(Some(&b), None, Some(Cause::Conversion)),
+            FileChange::between(Some(&c), Some(&c2), Some(Cause::Source)),
         ];
         let changes = VersionChanges::new("storage", "1", "2", rows.into_iter().flatten());
-        let added_d = FileChange::between(None, Some(&d));
+        let added_d = FileChange::between(None, Some(&d), Some(Cause::Conversion));
+        let c3 = file("c.png", 6, 6);
+        let changed_c = FileChange::between(Some(&c), Some(&c3), Some(Cause::Conversion));
         let revised = changes.revise(
             "2",
-            [("a.png".to_owned(), None), ("d.png".to_owned(), added_d)],
+            [
+                ("a.png".to_owned(), None),
+                ("c.png".to_owned(), changed_c),
+                ("d.png".to_owned(), added_d),
+            ],
         );
         assert_eq!((revised.from.as_str(), revised.to.as_str()), ("1", "2"));
         let added = AddedFile {
             path: "d.png".to_owned(),
             size: 4,
             media_type: "image/png".to_owned(),
+            cause: Some(Cause::Conversion),
         };
         assert_eq!(revised.added, [added]);
         let removed = RemovedFile {
             path: "b.png".to_owned(),
             size: 2,
+            cause: Some(Cause::Conversion),
         };
         assert_eq!(revised.removed, [removed]);
+        // The sources of c.png changed in the first publication of the version; publishing it
+        // again with another conversion does not make that change one of the conversion only.
         let changed = ChangedFile {
             path: "c.png".to_owned(),
-            size: 5,
+            size: 6,
             previous_size: 3,
+            cause: Some(Cause::Source),
         };
         assert_eq!(revised.changed, [changed]);
     }
@@ -366,12 +502,13 @@ mod tests {
             published_at: None,
             files: 4,
             counts: None,
+            conversion: None,
         };
         let history = VersionHistory::new("canonical", vec![entry.clone()]);
         let json = serde_json::to_string(&history).unwrap();
         assert_eq!(
             json,
-            r#"{"format":"version-history","version":1,"view":"canonical","entries":[{"published_version":"1.0","revision":"r","files":4}]}"#
+            r#"{"format":"version-history","version":2,"view":"canonical","entries":[{"published_version":"1.0","revision":"r","files":4}]}"#
         );
         assert_eq!(VersionHistory::from_json(json.as_bytes()).unwrap(), history);
 
@@ -382,12 +519,17 @@ mod tests {
                 removed: 0,
                 changed: 2,
             }),
+            conversion: Some(ChangeCounts {
+                added: 0,
+                removed: 0,
+                changed: 1,
+            }),
             ..entry
         };
         let json = serde_json::to_string(&counted).unwrap();
         assert_eq!(
             json,
-            r#"{"published_version":"1.0","revision":"r","published_at":"2025-01-02T03:04:05Z","files":4,"added":1,"removed":0,"changed":2}"#
+            r#"{"published_version":"1.0","revision":"r","published_at":"2025-01-02T03:04:05Z","files":4,"added":1,"removed":0,"changed":2,"conversion":{"added":0,"removed":0,"changed":1}}"#
         );
         assert_eq!(
             serde_json::from_str::<HistoryEntry>(&json).unwrap(),
@@ -396,10 +538,23 @@ mod tests {
     }
 
     #[test]
+    fn a_document_of_the_version_before_reads_without_causes() {
+        let json = r#"{"format":"version-changes","version":1,"view":"storage","from":"1","to":"2","added":[{"path":"a.png","size":1,"media_type":"image/png"}],"removed":[],"changed":[]}"#;
+        let changes = VersionChanges::from_json(json.as_bytes()).unwrap();
+        assert_eq!(changes.added[0].cause, None);
+        assert_eq!(changes.conversion(), None);
+        let json = r#"{"format":"version-history","version":1,"view":"storage","entries":[{"published_version":"2","revision":"r","files":1,"added":1,"removed":0,"changed":0}]}"#;
+        let history = VersionHistory::from_json(json.as_bytes()).unwrap();
+        assert_eq!(history.entries[0].conversion, None);
+    }
+
+    #[test]
     fn a_document_of_another_format_is_refused() {
         let changes = VersionChanges::new("storage", "1", "2", []);
         let json = serde_json::to_vec(&changes).unwrap();
         assert_eq!(VersionChanges::from_json(&json).unwrap(), changes);
         assert!(VersionHistory::from_json(&json).is_err());
+        let newer = r#"{"format":"version-changes","version":3,"view":"storage","from":"1","to":"2","added":[],"removed":[],"changed":[]}"#;
+        assert!(VersionChanges::from_json(newer.as_bytes()).is_err());
     }
 }

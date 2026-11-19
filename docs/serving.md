@@ -111,7 +111,7 @@ A route to the tree answers it as a file: the object that the pointer of the vie
 
 ## Version histories
 
-Every publication of a view also has a [version history](spec/version-history.md): the published versions of the view, newest first, each with its number of files and how many files it added, removed and changed since the version before. When those are known, the publication also has the changes of its version, which list those files by path, with their sizes and media types. A page that follows a view across versions reads the history, then the changes of a version it chooses, and reads a file of either version by its path.
+Every publication of a view also has a [version history](spec/version-history.md): the published versions of the view, newest first, each with its number of files and how many files it added, removed and changed since the version before, and how many of those only the conversion changed. When those are known, the publication also has the changes of its version, which list those files by path, with their sizes and media types. A page that follows a view across versions reads the history, then the changes of a version it chooses, and reads a file of either version by its path.
 
 A route to the history or to the changes answers them as the [tree](#directory-trees) is answered: the object that the pointer names under `history` or `changes`, with `Content-Type: application/gzip` and the file name `version-history.json.gz` or `version-changes.json.gz`. A route without `{version}` answers for the current version, and one with it for the named version, whose history ends with that version. A publication whose pointer names no history or no changes has none, and the request is `404`.
 

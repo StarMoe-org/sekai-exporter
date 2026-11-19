@@ -50,7 +50,7 @@ use files::KnownIndexes;
 use site::{Site, Stored};
 use tables::{build_tables, table_bindings, table_converters};
 use uploads::Uploads;
-use views::Advance;
+use views::{Advance, Causes};
 
 /// The size limit of the assets of a run: none.
 const LIMIT: Option<u64> = None;
@@ -633,6 +633,10 @@ fn export_version(
         let Some(Evaluation { outcome, bundles }) = evaluation else {
             return Ok(Outcome::Incomplete);
         };
+        let same_content = previous
+            .as_ref()
+            .is_some_and(|last| last.identity.same_content(&recorded.identity));
+        let causes = Causes::new(&state.bundles, &bundles, &outcome.results, same_content);
         let rulings = state.advance(bundles, &outcome);
 
         let context = Context {
@@ -650,6 +654,7 @@ fn export_version(
             state: &state,
             results: &outcome.results,
             records: &backed,
+            causes: &causes,
         };
         let name = recorded.identity.name();
         let views = context.publish(&name, &publications, &advance, &opened)?;
@@ -1090,7 +1095,8 @@ impl Context<'_> {
         }));
         let change = {
             let _span = self.monitor.span("publish", "canonical change", "");
-            views::canonical_change(old, new, self.objects, self.requests())?
+            let cause = advance.asset_cause();
+            views::canonical_change(old, new, cause, self.objects, self.requests())?
         };
         self.apply(view, name, self.site.layout(), previous, change)
     }

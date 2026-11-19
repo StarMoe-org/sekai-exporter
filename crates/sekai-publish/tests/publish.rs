@@ -418,7 +418,7 @@ fn a_change_gives_the_publication_of_the_new_assets() {
         );
         let before = before.unwrap();
         let previous = Previous::read(&store, &before.pointer).unwrap();
-        let change = change(&old, &new, &store, 2).unwrap();
+        let change = change(&old, &new, |_| None, &store, 2).unwrap();
         let patch = |previous: &Previous| {
             apply(&store, "canonical", "v2", layout, previous, change.clone())
         };
@@ -458,7 +458,7 @@ fn a_version_with_the_same_assets_keeps_the_publication() {
         );
         let before = before.unwrap();
         let previous = Previous::read(&store, &before.pointer).unwrap();
-        let same = change(&assets, &assets, &store, 2).unwrap();
+        let same = change(&assets, &assets, |_| None, &store, 2).unwrap();
         let kept = apply(&store, "canonical", "v2", layout, &previous, same).unwrap();
         assert_eq!(kept.pointer, before.pointer, "{layout:?}");
         assert!(kept.objects.is_empty(), "{layout:?}");
@@ -487,7 +487,7 @@ fn a_change_to_a_publication_of_an_earlier_pointer_format_gives_the_whole_public
         ..before.unwrap().pointer
     };
     let previous = Previous::read(&store, &earlier).unwrap();
-    let change = change(&old, &new, &store, 2).unwrap();
+    let change = change(&old, &new, |_| None, &store, 2).unwrap();
     let patched = apply(&store, "canonical", "v2", Layout::Index, &previous, change).unwrap();
     let whole = plan("v2", &new, &store, 2).unwrap();
     let whole = documents(&store, "jp/canonical", &whole, Layout::Index).unwrap();
@@ -592,8 +592,8 @@ fn a_directory_is_replaced_file_by_file() {
         role: "image".to_owned(),
     };
     let mut change = Change::default();
-    change.remove_file(paths[0]);
-    change.add_file(added.clone()).unwrap();
+    change.remove_file(paths[0], None);
+    change.add_file(added.clone(), None).unwrap();
     let mut files: Vec<File> = assets
         .files
         .iter()
@@ -637,7 +637,7 @@ fn a_change_that_changes_nothing_keeps_every_document() {
     );
     let before = before.unwrap();
     let previous = Previous::read(&store, &before.pointer).unwrap();
-    let change = change(&assets, &assets, &store, 2).unwrap();
+    let change = change(&assets, &assets, |_| None, &store, 2).unwrap();
     assert!(change.is_empty());
     let after = apply(&store, "canonical", "v1", Layout::Index, &previous, change).unwrap();
     assert_eq!(after.pointer, before.pointer);
@@ -659,7 +659,7 @@ fn a_change_may_not_publish_two_files_at_one_path() {
     let mut new = old.clone();
     new.push(asset(&store, "d/a/image", &[("image", b"3")]));
     for layout in [Layout::Index, Layout::Paths] {
-        let change = change(&old, &new, &store, 2).unwrap();
+        let change = change(&old, &new, |_| None, &store, 2).unwrap();
         let error = apply(&store, "t", "v2", layout, &previous, change);
         let error = error.unwrap_err();
         assert!(error.message.contains("d/a/image.webp"), "{error}");

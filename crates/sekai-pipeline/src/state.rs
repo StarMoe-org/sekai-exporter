@@ -617,6 +617,7 @@ mod tests {
         UnitResult {
             unit: unit.to_owned(),
             key: Some(key(unit)),
+            window: vec![unit.to_owned()],
             reusable: true,
             record: Record::read(&serde_json::to_vec(&record).unwrap()).unwrap(),
         }

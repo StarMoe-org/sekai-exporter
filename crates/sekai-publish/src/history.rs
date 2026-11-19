@@ -6,13 +6,14 @@
 //! of the newest one. The changes of a new version are what the change applied to the previous
 //! publication did at its paths. The changes of a version published again stay those since the
 //! version before it: the ones the previous publication recorded, with each path that the change
-//! touched looked up again in the version before.
+//! touched looked up again in the version before. Each change says what it follows from, as the
+//! change applied at its path does; where both publications changed a path, it follows from both.
 
 use sekai_catalog::Store;
 use sekai_format::paths::{PathFile, PathIndex};
 use sekai_format::publication::{ObjectReference, Pointer};
 use sekai_format::version_history::{
-    self, FileChange, HistoryEntry, VersionChanges, VersionHistory,
+    self, Cause, FileChange, HistoryEntry, VersionChanges, VersionHistory,
 };
 use serde::Serialize;
 
@@ -63,12 +64,22 @@ impl Last {
     }
 }
 
-/// The files at a path before and after a change, which hold other bytes.
+/// The files at a path before and after a change, which hold other bytes, and what the change
+/// follows from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathDiff {
     pub(crate) path: String,
     pub(crate) before: Option<PathFile>,
     pub(crate) after: Option<PathFile>,
+    pub(crate) cause: Option<Cause>,
+}
+
+impl PathDiff {
+    /// The change from `before`, the file at the path in an earlier publication, to the file
+    /// after.
+    fn change_from(&self, before: Option<&PathFile>) -> Option<FileChange> {
+        FileChange::between(before, self.after.as_ref(), self.cause)
+    }
 }
 
 /// The publication that a history gains its entry for.
@@ -119,7 +130,7 @@ pub(crate) fn record(
         Some(diffs) => {
             let changes = diffs
                 .iter()
-                .filter_map(|diff| FileChange::between(diff.before.as_ref(), diff.after.as_ref()));
+                .filter_map(|diff| diff.change_from(diff.before.as_ref()));
             let from = &last.published_version;
             Some(VersionChanges::new(made.view, from, made.version, changes))
         }
@@ -143,6 +154,7 @@ fn entries(store: &dyn Store, last: &Last) -> Result<Vec<HistoryEntry>, PublishE
         published_at: None,
         files,
         counts: None,
+        conversion: None,
     });
     Ok(entry.into_iter().collect())
 }
@@ -171,8 +183,7 @@ fn recompose(
     let revised = diffs
         .into_iter()
         .map(|diff| {
-            let was = before.file(&diff.path)?;
-            let change = FileChange::between(was.as_ref(), diff.after.as_ref());
+            let change = diff.change_from(before.file(&diff.path)?.as_ref());
             Ok((diff.path, change))
         })
         .collect::<Result<Vec<_>, PublishError>>()?;
@@ -187,6 +198,7 @@ fn write(
     changes: Option<VersionChanges>,
 ) -> Result<Recorded, PublishError> {
     let counts = changes.as_ref().map(VersionChanges::counts);
+    let conversion = changes.as_ref().and_then(VersionChanges::conversion);
     let changes = changes.map(|c| put(written, &c)).transpose()?;
     let entry = HistoryEntry {
         published_version: made.version.to_owned(),
@@ -194,6 +206,7 @@ fn write(
         published_at: made.published_at.clone(),
         files: made.files,
         counts,
+        conversion,
     };
     let entries = std::iter::once(entry).chain(earlier).collect();
     let history = put(written, &VersionHistory::new(made.view, entries))?;

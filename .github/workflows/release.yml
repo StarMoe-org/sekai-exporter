@@ -1,0 +1,115 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build the binaries of, such as v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The release tag a manual run builds; otherwise the ref that triggered the run.
+  REF: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+
+jobs:
+  # The command built with every feature for each platform, packed with the license and the
+  # README. The Linux builds link musl statically, so they run on any distribution.
+  binary:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - if: contains(matrix.target, 'linux-musl')
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends musl-tools
+      - name: Name the archive
+        id: name
+        run: |
+          declared=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [[ "$REF" == refs/tags/v* && "${REF#refs/tags/v}" != "$declared" ]]; then
+            echo "::error::tag ${REF#refs/tags/} does not match the workspace version $declared"
+            exit 1
+          fi
+          echo "archive=sekai-exporter-$declared-${{ matrix.target }}" >> "$GITHUB_OUTPUT"
+      - name: Build
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+        run: cargo build --locked --release -p sekai-exporter --features full --target ${{ matrix.target }}
+      - name: Pack
+        run: |
+          archive="${{ steps.name.outputs.archive }}"
+          mkdir -p "dist/$archive"
+          cp LICENSE README.md "dist/$archive/"
+          cd dist
+          if [[ "${{ matrix.target }}" == *windows* ]]; then
+            cp "../target/${{ matrix.target }}/release/sekai-exporter.exe" "$archive/"
+            7z a -tzip "$archive.zip" "$archive" > /dev/null
+          else
+            cp "../target/${{ matrix.target }}/release/sekai-exporter" "$archive/"
+            tar -czf "$archive.tar.gz" "$archive"
+          fi
+          rm -r "$archive"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/*
+          retention-days: 7
+
+  # Attaches the archives and their checksums to the release of the tag, which is made as a draft
+  # when the tag has none yet.
+  upload:
+    if: github.event_name != 'pull_request'
+    needs: binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${REF#refs/tags/}"
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+          if ! gh release view "$tag" > /dev/null 2>&1; then
+            gh release create "$tag" --draft --verify-tag --title "sekai-exporter ${tag#v}" --notes ""
+          fi
+          gh release upload "$tag" ./* --clobber

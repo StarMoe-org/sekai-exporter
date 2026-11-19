@@ -163,6 +163,8 @@ pub struct UnitResult {
     pub unit: String,
     /// The key of the unit, when the content of every bundle of its window is identified.
     pub key: Option<UnitKey>,
+    /// The names of the bundles of its window, whose contents its result follows from.
+    pub window: Vec<String>,
     /// Whether a later run may take the result: the unit has a key, no bundle of its window had
     /// an error and none of its assets failed to convert.
     pub reusable: bool,
@@ -279,6 +281,7 @@ impl<'m> Reuse<'m> {
         let mut recorded = Vec::new();
         let mut pending = Vec::new();
         for (unit, (key, found)) in found.into_iter().enumerate() {
+            let window = || units.windows[unit].iter().map(|&entry| name(entry));
             match found {
                 Some(Found::Kept(_)) if !needed.contains(&unit) => {
                     kept.push(name(unit).to_owned());
@@ -287,6 +290,7 @@ impl<'m> Reuse<'m> {
                     recorded.push(UnitResult {
                         unit: name(unit).to_owned(),
                         key,
+                        window: window().map(str::to_owned).collect(),
                         reusable: true,
                         record,
                     });
@@ -294,10 +298,7 @@ impl<'m> Reuse<'m> {
                 _ => pending.push(Pending {
                     unit: name(unit),
                     key,
-                    window: units.windows[unit]
-                        .iter()
-                        .map(|&entry| name(entry))
-                        .collect(),
+                    window: window().collect(),
                 }),
             }
         }
@@ -356,6 +357,11 @@ impl<'m> Reuse<'m> {
                 UnitResult {
                     unit: pending.unit.to_owned(),
                     key: pending.key,
+                    window: pending
+                        .window
+                        .iter()
+                        .map(|&bundle| bundle.to_owned())
+                        .collect(),
                     reusable: pending.key.is_some() && !broken,
                     record: record.unwrap_or_else(|| Record::empty(&self.scanned)),
                 }

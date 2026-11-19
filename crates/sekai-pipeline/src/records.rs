@@ -375,6 +375,7 @@ mod tests {
         UnitResult {
             unit: name.to_owned(),
             key: Some(UnitKey([key; 32])),
+            window: vec![name.to_owned()],
             reusable,
             record: Record::default(),
         }

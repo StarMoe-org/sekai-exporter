@@ -22,6 +22,7 @@ use sekai_format::publication::{
     AssetFailure, IndexChunk, IndexEntry, IndexRoot, IndexShard, ListingEntry, ListingTable,
     ObjectReference, POINTER_VERSION, Pointer, ShardReference, TableChunk, VERSION,
 };
+use sekai_format::version_history::Cause;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
@@ -34,11 +35,13 @@ use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path
 const JSON: &str = "application/json";
 const CHUNK_MEDIA_TYPE: &str = "application/octet-stream";
 
-/// What a change does at a path: whether it removes the file there, and the file it adds.
+/// What a change does at a path: whether it removes the file there, the file it adds, and what
+/// both follow from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PathEdit {
     removed: Option<Owner>,
     added: Option<File>,
+    cause: Option<Cause>,
 }
 
 /// The asset whose file a change removes.
@@ -61,11 +64,24 @@ pub struct Change {
 }
 
 impl Change {
-    /// Removes what `asset`, an asset of the previous publication, contributed to it.
-    pub(crate) fn remove(&mut self, asset: &Contribution) {
+    /// The edit at `path`, of which a part follows from `cause`.
+    fn edit(&mut self, path: &str, cause: Option<Cause>) -> &mut PathEdit {
+        let edit = self
+            .paths
+            .entry(path.to_owned())
+            .or_insert_with(|| PathEdit {
+                cause,
+                ..PathEdit::default()
+            });
+        edit.cause = Cause::of_both(edit.cause, cause);
+        edit
+    }
+
+    /// Removes what `asset`, an asset of the previous publication, contributed to it, following
+    /// from `cause`.
+    pub(crate) fn remove(&mut self, asset: &Contribution, cause: Option<Cause>) {
         for file in &asset.files {
-            let edit = self.paths.entry(file.path.clone()).or_default();
-            edit.removed = Some(Owner::Asset(asset.asset.name.clone()));
+            self.edit(&file.path, cause).removed = Some(Owner::Asset(asset.asset.name.clone()));
         }
         let name = asset.asset.name.clone();
         match &asset.outcome {
@@ -78,10 +94,15 @@ impl Change {
         }
     }
 
-    /// Adds what `asset` contributes. Fails if another added asset has a file at the same path.
-    pub(crate) fn add(&mut self, asset: Contribution) -> Result<(), PublishError> {
+    /// Adds what `asset` contributes, following from `cause`. Fails if another added asset has a
+    /// file at the same path.
+    pub(crate) fn add(
+        &mut self,
+        asset: Contribution,
+        cause: Option<Cause>,
+    ) -> Result<(), PublishError> {
         for file in asset.files {
-            self.add_file(file)?;
+            self.add_file(file, cause)?;
         }
         let name = asset.asset.name;
         match asset.outcome {
@@ -96,15 +117,15 @@ impl Change {
     }
 
     /// Removes the file at `path`, whichever asset it belongs to, from a view whose assets are
-    /// neither listed nor failed, such as the storage view.
-    pub fn remove_file(&mut self, path: &str) {
-        self.paths.entry(path.to_owned()).or_default().removed = Some(Owner::Any);
+    /// neither listed nor failed, such as the storage view, following from `cause`.
+    pub fn remove_file(&mut self, path: &str, cause: Option<Cause>) {
+        self.edit(path, cause).removed = Some(Owner::Any);
     }
 
-    /// Adds `file` to a view whose assets are neither listed nor failed. Fails if the change adds
-    /// another file at its path.
-    pub fn add_file(&mut self, file: File) -> Result<(), PublishError> {
-        let edit = self.paths.entry(file.path.clone()).or_default();
+    /// Adds `file` to a view whose assets are neither listed nor failed, following from `cause`.
+    /// Fails if the change adds another file at its path.
+    pub fn add_file(&mut self, file: File, cause: Option<Cause>) -> Result<(), PublishError> {
+        let edit = self.edit(&file.path, cause);
         if edit.added.is_some() {
             return Err(two_files(&file.path));
         }
@@ -504,7 +525,7 @@ pub fn apply(
     let tree_files = changes.tree_files(previous.tree.as_ref())?;
     // The paths tell what changed since the last publication only when the change applies to it.
     let diffs = match (&previous.last, &previous.paths) {
-        (Some(_), Some(_)) => Some(changes.diffs()?),
+        (Some(_), Some(_)) => Some(changes.diffs(&edits)?),
         _ => None,
     };
     let (paths, files) = changes.chunks(&mut written)?;
@@ -645,17 +666,19 @@ impl<'a> PathChanges<'a> {
         Ok(files)
     }
 
-    /// The paths whose bytes the change changes, in path order, with the files before and after.
-    fn diffs(&self) -> Result<Vec<PathDiff>, PublishError> {
+    /// The paths whose bytes `edits`, the edits of the change, change, in path order, with the
+    /// files before and after and what the edits follow from.
+    fn diffs(&self, edits: &BTreeMap<String, PathEdit>) -> Result<Vec<PathDiff>, PublishError> {
         let mut diffs = Vec::new();
-        for (path, after) in &self.rows {
+        for (path, edit) in edits {
             let before = self.table.get(path)?;
+            let after = edit.added.as_ref().map(path_file);
             if before.as_ref().map(|f| f.sha256) != after.as_ref().map(|f| f.sha256) {
-                let (path, after) = (path.clone(), after.clone());
                 diffs.push(PathDiff {
-                    path,
+                    path: path.clone(),
                     before,
                     after,
+                    cause: edit.cause,
                 });
             }
         }

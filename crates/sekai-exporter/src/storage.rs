@@ -5,13 +5,14 @@
 //! the directories of the units it touches: each is made again from the assets its unit owns, and
 //! compared with what the previous publication of the view has there.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io;
 
 use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Derivations, Derived, Key, LocalStore, Objects, Store};
 use sekai_convert::Asset;
 use sekai_format::AssetDocument;
+use sekai_format::version_history::Cause;
 use sekai_moesekai::storage_view::{self, Transform, ViewFile};
 use sekai_pipeline::isolate::{PANICKED, isolated};
 use sekai_pipeline::metrics::Recorder;
@@ -230,11 +231,16 @@ fn files(
     Ok(files)
 }
 
+/// The directories of the storage view that a change makes again, by the unit each belongs to,
+/// with what the change of each follows from.
+pub(crate) type Directories<'a> = BTreeMap<&'a str, Option<Cause>>;
+
 /// The change to the storage view in the directories of `units`, which now hold the files of
-/// `assets`, every produced asset that those units own. What the directories held before is read
-/// from `previous`, the previous publication of the view.
+/// `assets`, every produced asset that those units own. Each unit comes with what the change of
+/// its directory follows from. What the directories held before is read from `previous`, the
+/// previous publication of the view.
 pub(crate) fn change(
-    units: &BTreeSet<&str>,
+    units: &Directories<'_>,
     assets: &[Binding],
     previous: &Lookup<'_>,
     objects: &Objects<'_>,
@@ -244,10 +250,9 @@ pub(crate) fn change(
 ) -> Result<Change, String> {
     let _span = monitor.span("publish", "storage", "");
     let files = files(assets, objects, derivations, threads, monitor)?;
-    let outside = files.values().find(|file| {
-        let directory = file.path.rsplit_once('/').map(|(directory, _)| directory);
-        !directory.is_some_and(|directory| units.contains(directory))
-    });
+    let outside = files
+        .values()
+        .find(|file| !directory(&file.path).is_some_and(|directory| units.contains_key(directory)));
     if let Some(file) = outside {
         return Err(format!(
             "the storage file {} of {} lies outside the directory of its unit",
@@ -256,13 +261,20 @@ pub(crate) fn change(
     }
     // Every file of the directories is replaced; a file that stays the same gives the same row.
     let mut change = Change::default();
-    for unit in units {
+    for (unit, cause) in units {
         for old in previous.directory(unit).map_err(|e| e.to_string())? {
-            change.remove_file(&old.path);
+            change.remove_file(&old.path, *cause);
         }
     }
     for file in files.into_values() {
-        change.add_file(file).map_err(|e| e.to_string())?;
+        let unit = directory(&file.path).and_then(|unit| units.get(unit));
+        let cause = unit.copied().flatten();
+        change.add_file(file, cause).map_err(|e| e.to_string())?;
     }
     Ok(change)
+}
+
+/// The directory of the file at `path`, which is that of its unit.
+fn directory(path: &str) -> Option<&str> {
+    path.rsplit_once('/').map(|(directory, _)| directory)
 }

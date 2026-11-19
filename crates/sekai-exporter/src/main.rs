@@ -46,11 +46,12 @@ mod stats;
 mod storage;
 #[cfg(all(feature = "cdn", not(feature = "storage-view")))]
 mod storage {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
     use sekai_catalog::{Derivations, LocalStore, Objects};
     use sekai_convert::Asset;
     use sekai_format::AssetDocument;
+    use sekai_format::version_history::Cause;
     use sekai_publish::Binding;
     use sekai_publish::patch::{Change, Lookup};
 
@@ -75,9 +76,13 @@ mod storage {
         }
     }
 
+    /// The directories of the storage view that a change makes again, by unit, with what the
+    /// change of each follows from.
+    pub(crate) type Directories<'a> = BTreeMap<&'a str, Option<Cause>>;
+
     /// The empty change: a build without the storage view leaves it as it was.
     pub(crate) fn change(
-        _units: &BTreeSet<&str>,
+        _units: &Directories<'_>,
         _assets: &[Binding],
         _previous: &Lookup<'_>,
         _objects: &Objects<'_>,

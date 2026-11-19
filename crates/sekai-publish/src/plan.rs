@@ -8,6 +8,7 @@ use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, Store};
 use sekai_format::AssetDocument;
 use sekai_format::publication::{AssetFailure, ListingEntry};
+use sekai_format::version_history::Cause;
 
 use crate::parallel;
 use crate::patch::Change;
@@ -259,11 +260,12 @@ pub fn plan(
 }
 
 /// The change from a publication of the assets `old` to one of the assets `new`, both in name
-/// order. Only the asset documents of the bindings that differ are read from `store`, on up to
-/// `threads` threads.
+/// order, where `cause` tells what the change of each asset, by name, follows from. Only the
+/// asset documents of the bindings that differ are read from `store`, on up to `threads` threads.
 pub fn change(
     old: &[Binding],
     new: &[Binding],
+    cause: impl Fn(&str) -> Option<Cause>,
     store: &dyn Store,
     threads: usize,
 ) -> Result<Change, PublishError> {
@@ -281,10 +283,13 @@ pub fn change(
     };
     let mut change = Change::default();
     for removed in read(&removed) {
-        change.remove(&removed?);
+        let removed = removed?;
+        change.remove(&removed, cause(&removed.asset.name));
     }
     for added in read(&added) {
-        change.add(added?)?;
+        let added = added?;
+        let cause = cause(&added.asset.name);
+        change.add(added, cause)?;
     }
     Ok(change)
 }

@@ -10,7 +10,8 @@ use sekai_catalog::store::parse_hex;
 use sekai_catalog::{Key, LocalStore};
 use sekai_format::publication::{ObjectReference, Pointer};
 use sekai_format::version_history::{
-    AddedFile, ChangeCounts, ChangedFile, HistoryEntry, RemovedFile, VersionChanges, VersionHistory,
+    AddedFile, Cause, ChangeCounts, ChangedFile, HistoryEntry, RemovedFile, VersionChanges,
+    VersionHistory,
 };
 use sekai_publish::history::{NoVersions, Versions};
 use sekai_publish::patch::{self, Change, Edition, Previous};
@@ -141,6 +142,7 @@ fn entry(
             removed,
             changed,
         }),
+        conversion: None,
     }
 }
 
@@ -149,17 +151,23 @@ fn added(path: &str, size: u64) -> AddedFile {
         path: path.to_owned(),
         size,
         media_type: "image/png".to_owned(),
+        cause: None,
     }
 }
 
-/// The change that replaces the files at `removed` and puts `added`.
+/// The change that replaces the files at `removed` and puts `added`, with no cause known.
 fn change(removed: &[&str], added: &[File]) -> Change {
+    caused(removed, added, None)
+}
+
+/// The change that replaces the files at `removed` and puts `added`, following from `cause`.
+fn caused(removed: &[&str], added: &[File], cause: Option<Cause>) -> Change {
     let mut change = Change::default();
     for path in removed {
-        change.remove_file(path);
+        change.remove_file(path, cause);
     }
     for file in added {
-        change.add_file(file.clone()).unwrap();
+        change.add_file(file.clone(), cause).unwrap();
     }
     change
 }
@@ -212,12 +220,14 @@ fn a_history_lists_each_version_newest_first_with_its_changes() {
     let removed = RemovedFile {
         path: "a.png".to_owned(),
         size: 1,
+        cause: None,
     };
     assert_eq!(changes.removed, [removed]);
     let changed = ChangedFile {
         path: "b.png".to_owned(),
         size: 2,
         previous_size: 1,
+        cause: None,
     };
     assert_eq!(changes.changed, [changed]);
 }
@@ -360,4 +370,47 @@ fn a_publication_without_a_history_starts_one() {
         entry(&older, None, 1, None),
     ];
     assert_eq!(history(&store, &two), expected);
+}
+
+#[test]
+fn each_change_tells_what_it_follows_from() {
+    let s = Scratch::new("causes");
+    let store = s.store();
+    let one = first(
+        &store,
+        vec![
+            file(&store, "a.png", b"a"),
+            file(&store, "b.png", b"b"),
+            file(&store, "c.png", b"c"),
+        ],
+    );
+    let previous = Previous::read(&store, &one).unwrap();
+    // Only the conversion removes `a` and changes `b`; the sources of the new `c` changed.
+    let b = file(&store, "b.png", b"b2");
+    let mut edit = caused(&["a.png", "b.png"], &[b], Some(Cause::Conversion));
+    edit.remove_file("c.png", Some(Cause::Conversion));
+    let c = file(&store, "c.png", b"c2");
+    edit.add_file(c, Some(Cause::Source)).unwrap();
+    let two = publish(&store, "2", at(0), &previous, edit, &NoVersions);
+
+    let changes = changes(&store, &two).unwrap();
+    assert_eq!(changes.removed[0].cause, Some(Cause::Conversion));
+    let changed: Vec<_> = changes
+        .changed
+        .iter()
+        .map(|file| (file.path.as_str(), file.cause))
+        .collect();
+    assert_eq!(
+        changed,
+        [
+            ("b.png", Some(Cause::Conversion)),
+            ("c.png", Some(Cause::Source))
+        ]
+    );
+    let conversion = ChangeCounts {
+        added: 0,
+        removed: 1,
+        changed: 1,
+    };
+    assert_eq!(history(&store, &two)[0].conversion, Some(conversion));
 }

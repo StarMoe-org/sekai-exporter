@@ -97,6 +97,8 @@ A run knows which objects the bucket holds from the records it reads and the upl
 
 `update` keeps the state of each region at its site: under `<prefix>state/` in the bucket, or under `<output>/state` without one. A run reads only this state and the pointers of the views, so a machine with an empty `<output>` continues where the last run stopped.
 
+One run at a time writes the state and the pointers of a bucket. A run of `update`, each update of `update --watch` and `gc` hold the lease of the site while they run: the state file `lease.json`, which names the operation, the host and when the run took it. A run takes the lease by writing the file only when the bucket has none (`If-None-Match: *`), keeps it every two minutes by writing it again only while it has the entity tag of its last write (`If-Match`), and deletes it the same way when it is done. A run that finds the lease held waits, looks again every 30 seconds and prints which run holds it. A lease that was not kept for ten minutes, by the `Date` and `Last-Modified` the bucket gives, is taken over with `If-Match` on that file. A run whose lease was taken over writes no more state or pointers; the objects it uploaded stay in the store, where the next run finds them. The bucket has to support conditional writes.
+
 | File | Content |
 |---|---|
 | `versions/<region>.json` | The identity of the last version, with the identity of the evaluation that gave its assets under `evaluation`, by part (`unit`, `form <name>`, `table <name>`). `update` and `update --check` compare with it, and a record without `evaluation` counts as evaluated differently |

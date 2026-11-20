@@ -90,6 +90,13 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
+    let delete = if options.delete { " --delete" } else { "" };
+    site.while_held(&format!("gc{delete}"), || collect(&options, &site))?
+}
+
+/// Lists the garbage of `site` and, with `--delete`, deletes it, with the leftovers of the output
+/// directory.
+fn collect(options: &Options, site: &Site<'_>) -> Result<bool, lexopt::Error> {
     let store = LocalStore::open(options.output.join("store")).map_err(|e| e.to_string())?;
     let held = MemoryHoldings::default();
     let objects = Objects {
@@ -98,7 +105,7 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
         remote: site.remote(),
     };
     let collector = Collector {
-        site: &site,
+        site,
         objects: &objects,
         written_before: SystemTime::now()
             .checked_sub(options.grace)
@@ -115,9 +122,9 @@ pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::
     println!("{RECORD_PACKS}: new {} files, {bytes} bytes", packs.len());
     if options.delete {
         // The records kept are in their new packs before the packs they came from go.
-        collector.write(&site, &packs)?;
+        collector.write(site, &packs)?;
         for kind in &kinds {
-            collector.delete(&site, kind)?;
+            collector.delete(site, kind)?;
         }
         for kind in &leftovers {
             collector.delete(&output, kind)?;

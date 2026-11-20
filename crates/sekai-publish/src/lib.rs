@@ -8,6 +8,8 @@ mod clock;
 pub mod history;
 mod index;
 mod layout;
+#[cfg(feature = "s3")]
+pub mod lease;
 mod parallel;
 pub mod patch;
 pub mod plan;

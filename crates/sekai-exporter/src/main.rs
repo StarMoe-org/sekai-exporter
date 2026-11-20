@@ -143,7 +143,10 @@ commands:
       are fetched, and the publications are patched where those units changed
       them. Content is the hash the manifest declares, or else the bytes, which
       are fetched to compare; --force evaluates every bundle again and records
-      the results anew. One run per site goes at a time. A run puts every new
+      the results anew. One run per site goes at a time: a run with a bucket
+      holds the lease of the site, state/lease.json, while it runs, and a run
+      that finds it held waits and says which run holds it; a lease that its
+      run stopped keeping for ten minutes is taken over. A run puts every new
       object at the site before the records and the state that name it, and
       those before the pointers of the views, so an interrupted run leaves the
       last version in place. An object missing from <output>/store is read back
@@ -185,8 +188,8 @@ commands:
       records among them name. Every other object of the store, state chunk
       and record is listed with its size, and without --delete nothing is
       deleted. Records go first, then state chunks and objects, so no record
-      names a deleted object. Run it while no update runs on the site: a run
-      may take a record whose objects gc deletes.
+      names a deleted object. With a bucket, gc holds the lease of the site as
+      update does, so no update runs while it deletes.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.

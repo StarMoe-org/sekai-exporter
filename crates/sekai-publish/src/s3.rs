@@ -102,6 +102,9 @@ pub struct S3 {
     host: String,
     /// The path of the endpoint, empty or starting with `/`, without a trailing `/`.
     path: String,
+    /// Whether another run took over the lease of the site that this client held; it then
+    /// writes no more state or pointers (see [`crate::lease`]).
+    pub(crate) lease_lost: AtomicBool,
 }
 
 impl fmt::Debug for S3 {
@@ -173,6 +176,7 @@ impl S3 {
             },
             bucket,
             credentials,
+            lease_lost: AtomicBool::new(false),
         })
     }
 
@@ -347,6 +351,11 @@ impl S3 {
         payload: &str,
         request: impl Fn(&str, Vec<(&'static str, String)>) -> Result<Response<Body>, ureq::Error>,
     ) -> Result<Reply, String> {
+        if method != "GET" && self.lease_lost.load(Ordering::SeqCst) && self.is_shared(name) {
+            return Err(format!(
+                "{method} {name}: another run took over the lease of the site"
+            ));
+        }
         let uri = format!("{}/{}", self.path, encode(name));
         let url = match query {
             "" => format!("{}{uri}", self.origin),
@@ -637,6 +646,82 @@ impl S3 {
     }
 
     /// Sends `DELETE` of `name` with the canonical query string `query`.
+    /// Whether `name` is a state file or a pointer, which the run that holds the lease of the site
+    /// writes, rather than an object of the store.
+    fn is_shared(&self, name: &str) -> bool {
+        let under = |directory: &str| {
+            name.strip_prefix(&self.bucket.prefix)
+                .is_some_and(|name| name.starts_with(directory))
+        };
+        under("state/") || under("published/")
+    }
+
+    /// Writes `bytes` as the state file `file` when `condition` holds, and returns the entity tag
+    /// of what it wrote, or `None` when the condition does not hold.
+    pub(crate) fn put_state_if(
+        &self,
+        file: &str,
+        bytes: &[u8],
+        condition: &Condition,
+    ) -> Result<Option<String>, String> {
+        let name = self.state(file);
+        let digest = Sha256::digest(bytes);
+        let reply = self.send("PUT", &name, "", &hex(&digest), |url, headers| {
+            let request = signed(self.agent.put(url), headers)
+                .header("content-type", "application/json")
+                .header("cache-control", STATE_CACHE_CONTROL);
+            condition.on(request).send(bytes)
+        })?;
+        match reply.status().as_u16() {
+            200 | 201 | 204 => entity_tag(&reply).map(Some),
+            412 => Ok(None),
+            status => Err(format!("PUT {name}: HTTP {status}")),
+        }
+    }
+
+    /// The state file `file` with its entity tag and how long ago it was written by the clock of
+    /// the bucket, or `None` when the bucket keeps none.
+    pub(crate) fn state_with_age(&self, file: &str) -> Result<Option<Aged>, String> {
+        let name = self.state(file);
+        let reply = self.send("GET", &name, "", EMPTY, |url, headers| {
+            signed(self.agent.get(url), headers).call()
+        })?;
+        match reply.status().as_u16() {
+            200 => {}
+            404 => return Ok(None),
+            status => return Err(format!("GET {name}: HTTP {status}")),
+        }
+        let time = |header: &str| {
+            let value = reply.headers().get(header).and_then(|v| v.to_str().ok());
+            let time = value.and_then(Utc::parse_http).map(|time| time.time());
+            time.ok_or_else(|| format!("GET {name}: no {header} header"))
+        };
+        let age = time("date")?
+            .duration_since(time("last-modified")?)
+            .unwrap_or_default();
+        let entity_tag = entity_tag(&reply)?;
+        Ok(Some(Aged {
+            bytes: reply.into_body(),
+            entity_tag,
+            age,
+        }))
+    }
+
+    /// Deletes the state file `file` when its entity tag is `entity_tag`, and returns whether it
+    /// did; a file that is gone or was written again is left as it is.
+    pub(crate) fn delete_state_if(&self, file: &str, entity_tag: &str) -> Result<bool, String> {
+        let name = self.state(file);
+        let condition = Condition::Matches(entity_tag.to_owned());
+        let reply = self.send("DELETE", &name, "", EMPTY, |url, headers| {
+            condition.on(signed(self.agent.delete(url), headers)).call()
+        })?;
+        match reply.status().as_u16() {
+            200 | 204 => Ok(true),
+            404 | 412 => Ok(false),
+            status => Err(format!("DELETE {name}: HTTP {status}")),
+        }
+    }
+
     fn send_delete(&self, name: &str, query: &str) -> Result<(), String> {
         let response = self.send("DELETE", name, query, EMPTY, |url, headers| {
             signed(self.agent.delete(url), headers).call()
@@ -690,6 +775,40 @@ impl Drop for Slot<'_> {
 
 /// A response with its whole body.
 type Reply = Response<Vec<u8>>;
+
+/// When a conditional write goes ahead.
+pub(crate) enum Condition {
+    /// The bucket holds no file of that name.
+    Absent,
+    /// The file has this entity tag.
+    Matches(String),
+}
+
+impl Condition {
+    /// `request` with the header of the condition.
+    fn on<B>(&self, request: ureq::RequestBuilder<B>) -> ureq::RequestBuilder<B> {
+        match self {
+            Self::Absent => request.header("if-none-match", "*"),
+            Self::Matches(entity_tag) => request.header("if-match", entity_tag),
+        }
+    }
+}
+
+/// A state file as the bucket keeps it: its bytes, its entity tag, and how long ago it was
+/// written by the clock of the bucket.
+pub(crate) struct Aged {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) entity_tag: String,
+    pub(crate) age: Duration,
+}
+
+/// The entity tag of `reply`.
+fn entity_tag(reply: &Reply) -> Result<String, String> {
+    let value = reply.headers().get("etag").and_then(|v| v.to_str().ok());
+    value
+        .map(str::to_owned)
+        .ok_or_else(|| "the bucket gave no entity tag".to_owned())
+}
 
 /// `request` with the signed `headers`.
 fn signed<B>(

@@ -64,14 +64,16 @@ fn keep(options: &Options, region: &str, config: &str, site: &Site<'_>) -> Resul
     println!("{} {} {change}", run.state_key(), looked.version);
     std::fs::create_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     let metrics = options.output.join(format!("{region}.metrics.jsonl"));
-    let updated = Monitor::watch(&metrics, |monitor| {
-        let region = region_of(&run, config)?;
-        export_version(&run, region, site, &MemoryHoldings::default(), monitor)
+    let updated = site.while_held(&format!("watch {region}"), || {
+        Monitor::watch(&metrics, |monitor| {
+            let region = region_of(&run, config)?;
+            export_version(&run, region, site, &MemoryHoldings::default(), monitor)
+        })
     });
     if scratch {
         std::fs::remove_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     }
-    let updated = updated.map_err(|e| format!("{}: {e}", metrics.display()))?;
+    let updated = updated?.map_err(|e| format!("{}: {e}", metrics.display()))?;
     Ok(updated.map_err(|e| e.to_string())?.succeeded())
 }
 

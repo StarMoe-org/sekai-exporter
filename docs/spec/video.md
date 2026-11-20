@@ -33,7 +33,7 @@ An ADX audio track can end before the sample count of its header. The whole fram
 
 ## 4. Container
 
-The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 5) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
+The member is an MP4 file with its index at the start, written by the `mp4-h264-aac` encoder (version 6) through the `ffmpeg` program, which must be installed with `libx264`. The environment variable `SEKAI_FFMPEG` can name the program.
 
 | Stream | Parameters |
 |---|---|
@@ -42,11 +42,13 @@ The member is an MP4 file with its index at the start, written by the `mp4-h264-
 
 **Bitrate.** The MPEG-1 stream is already lossy, so encoding it again adds the errors of a second codec. H.264 keeps the same pictures in fewer bits than MPEG-1, so at one and a half times the source bitrate this second loss stays small. The bitrate follows the source, so a stream encoded at a low bitrate does not become a large file, and a large picture encoded at a high bitrate keeps its detail. Programs that analyse the pictures frame by frame, or train models on them, take the MPEG-1 stream from the USM file instead.
 
-The container carries no metadata. The same input and the same FFmpeg build give the same bytes. The thread count is fixed because `libx264` output depends on it, and the threads encode slices of the same frame, so the output does not depend on how they are timed, also when other work runs at the same time.
+**Colour.** MPEG-1 stores its pictures as BT.601 YCbCr at limited range, and the game's client converts them to RGB with the BT.601 matrix at that range. It renders in gamma space and shows the RGB values as they are, so they are values for an sRGB screen. The MPEG-1 stream states none of this; the video stream (its VUI) and the container (a `colr` box of type `nclx`) state it for the H.264 pictures, which keep the YCbCr values of the source: colour primaries BT.709 (1), transfer characteristics sRGB, IEC 61966-2-1 (13), matrix coefficients BT.601, SMPTE 170M (6), and limited range. A decoder that honours them shows the colours the game shows.
+
+The container carries no other metadata. The same input and the same FFmpeg build give the same bytes. The thread count is fixed because `libx264` output depends on it, and the threads encode slices of the same frame, so the output does not depend on how they are timed, also when other work runs at the same time.
 
 ## 5. Correctness
 
-Separating the streams of a USM file is checked byte for byte against an independent USM demultiplexer. The frame count and the duration of the MP4 files are checked against the USM headers with `ffprobe`.
+Separating the streams of a USM file is checked byte for byte against an independent USM demultiplexer. The frame count and the duration of the MP4 files are checked against the USM headers with `ffprobe`. The colour description is read back with `ffprobe` from the container and with the `trace_headers` bitstream filter from the stream, and the pictures an encoding decodes to are the same with and without it.
 
 ## 6. Version
 

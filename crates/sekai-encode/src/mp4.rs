@@ -18,7 +18,7 @@ use crate::EncodeError;
 pub const NAME: &str = "mp4-h264-aac";
 
 /// The encoder version.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 
 /// The threads that decode the video stream. The stream decodes to the same frames whatever the
 /// count, and one keeps up with the encoder.
@@ -30,6 +30,21 @@ const VIDEO_THREADS: &str = "2";
 /// of an MPEG-1 or MPEG-2 stream in fewer bits, so one and a half times the source leaves the loss
 /// of the second encoding small, and the size follows the source.
 const BITRATE_PER_SOURCE: (u64, u64) = (3, 2);
+/// The colour of the pictures. MPEG-1 stores BT.601 YCbCr at limited range, as the game's movie
+/// shader reads it, and the game shows the RGB values the shader gives on the screen as they are,
+/// in gamma space: values for an sRGB screen, whose primaries are those of BT.709. The stream does
+/// not state any of it, so the options state it for the decoded pictures, and again for the
+/// encoder, which writes it into the stream and the container without converting the pictures.
+const COLOUR: [&str; 8] = [
+    "-color_primaries",
+    "bt709",
+    "-color_trc",
+    "iec61966-2-1",
+    "-colorspace",
+    "smpte170m",
+    "-color_range",
+    "tv",
+];
 /// The longest error text kept from the program.
 const MESSAGE_LEN: usize = 400;
 
@@ -144,12 +159,10 @@ fn arguments(
             "mpegvideo",
             "-framerate",
             &framerate,
-            "-threads",
-            DECODE_THREADS,
-            "-i",
-            "pipe:0",
         ],
     );
+    add(&mut args, &COLOUR);
+    add(&mut args, &["-threads", DECODE_THREADS, "-i", "pipe:0"]);
     if let Some(audio) = audio {
         add(&mut args, &["-i"]);
         args.push(audio.into());
@@ -161,6 +174,7 @@ fn arguments(
     if !movie.width.is_multiple_of(2) || !movie.height.is_multiple_of(2) {
         add(&mut args, &["-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2"]);
     }
+    add(&mut args, &COLOUR);
     add(
         &mut args,
         &[
@@ -337,6 +351,22 @@ mod tests {
         let args = strings(&movie(640, false), None);
         let input = args.iter().position(|a| a == "pipe:0").unwrap();
         assert_eq!(args[input - 3..input], ["-threads", "1", "-i"]);
+    }
+
+    #[test]
+    fn the_colour_is_stated_for_the_decoded_pictures_and_for_the_encoder() {
+        let args = strings(&movie(640, true), Some(Path::new("a")));
+        let stated: Vec<usize> = args
+            .windows(COLOUR.len())
+            .enumerate()
+            .filter(|(_, window)| *window == COLOUR)
+            .map(|(at, _)| at)
+            .collect();
+        let pipe = args.iter().position(|a| a == "pipe:0").unwrap();
+        let encoder = args.iter().position(|a| a == "libx264").unwrap();
+        assert!(
+            matches!(stated[..], [input, output] if input < pipe && pipe < output && output < encoder)
+        );
     }
 
     #[test]

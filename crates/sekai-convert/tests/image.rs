@@ -164,7 +164,10 @@ fn atlas(keys: &[u64]) -> Object {
     object(
         3,
         687078895,
-        s(vec![("m_RenderDataMap", Value::Map(entries))]),
+        s(vec![
+            ("m_Name", Value::String("CommonAtlas".into())),
+            ("m_RenderDataMap", Value::Map(entries)),
+        ]),
     )
 }
 
@@ -180,7 +183,10 @@ fn atlas_holding(texture_rect: Value, offset: Value, settings: i64) -> Object {
     object(
         3,
         687078895,
-        s(vec![("m_RenderDataMap", Value::Map(vec![(key(7), data)]))]),
+        s(vec![
+            ("m_Name", Value::String("CommonAtlas".into())),
+            ("m_RenderDataMap", Value::Map(vec![(key(7), data)])),
+        ]),
     )
 }
 
@@ -221,7 +227,8 @@ fn a_sprite_is_its_rounded_rectangle_and_its_layout() {
         "{\"rect\":{\"x\":1,\"y\":0.5,\"width\":2.4,\"height\":2},\
          \"texture_rect\":{\"x\":2,\"y\":1,\"width\":1,\"height\":1},\
          \"texture_rect_offset\":{\"x\":1,\"y\":0},\"pivot\":{\"x\":0.5,\"y\":0},\
-         \"pixels_per_unit\":100,\"border\":{\"left\":1,\"bottom\":0,\"right\":1,\"top\":0.25}}"
+         \"pixels_per_unit\":100,\"border\":{\"left\":1,\"bottom\":0,\"right\":1,\"top\":0.25},\
+         \"atlas\":\"CommonAtlas\"}"
     );
 }
 

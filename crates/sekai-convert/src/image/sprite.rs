@@ -37,11 +37,11 @@ impl Converter for Sprite {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn revision(&self) -> u32 {
-        1
+        0
     }
 
     fn encoders(&self) -> crate::Encoders {
@@ -82,6 +82,7 @@ impl Converter for Sprite {
             pivot: vector(field(fields, "m_Pivot")?, "m_Pivot")?,
             pixels_per_unit: float(field(fields, "m_PixelsToUnits")?, "m_PixelsToUnits")?,
             border: border(field(fields, "m_Border")?)?,
+            atlas: atlas.as_ref().map(atlas_name).transpose()?,
         };
         let cut = placement.cut(&layout, field(fields, "m_RD")?)?;
         Ok(Some(Asset {
@@ -131,6 +132,14 @@ fn atlas_of(
     pptr(fields, "m_SpriteAtlas", root, cx)?
         .map(|atlas| cx.object(atlas))
         .transpose()
+}
+
+/// The name of a sprite atlas, `m_Name`.
+fn atlas_name(atlas: &Object) -> Result<String, ConvertError> {
+    field(&atlas.fields, "m_Name")?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| malformed("the sprite atlas has no name"))
 }
 
 /// The render data that places a sprite in a texture: the entry of its atlas when the atlas lists
@@ -467,6 +476,8 @@ struct Layout {
     pixels_per_unit: f32,
     /// Left, bottom, right, top.
     border: [f32; 4],
+    /// The name of the atlas the sprite is packed in.
+    atlas: Option<String>,
 }
 
 impl Layout {
@@ -484,6 +495,10 @@ impl Layout {
             s,
             "\"border\":{{\"left\":{l},\"bottom\":{b},\"right\":{r},\"top\":{t}}}"
         );
+        if let Some(atlas) = &self.atlas {
+            let name = serde_json::Value::from(atlas.as_str());
+            let _ = write!(s, ",\"atlas\":{name}");
+        }
         s.push('}');
         s
     }
@@ -612,6 +627,7 @@ mod tests {
             pivot: [0.5, 0.0],
             pixels_per_unit: 0.60625,
             border: [1.0, 2.0, 3.0, 4.0],
+            atlas: Some("Common\"Atlas".into()),
         };
         assert_eq!(
             layout.to_json(),
@@ -619,7 +635,8 @@ mod tests {
              \"texture_rect\":{\"x\":39.076122,\"y\":19.042908,\"width\":1926.8477,\"height\":48.880974},\
              \"texture_rect_offset\":{\"x\":39.076122,\"y\":19.042908},\
              \"pivot\":{\"x\":0.5,\"y\":0},\"pixels_per_unit\":0.60625,\
-             \"border\":{\"left\":1,\"bottom\":2,\"right\":3,\"top\":4}}"
+             \"border\":{\"left\":1,\"bottom\":2,\"right\":3,\"top\":4},\
+             \"atlas\":\"Common\\\"Atlas\"}"
         );
     }
 }

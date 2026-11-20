@@ -9,7 +9,7 @@ use sekai_convert::{Content, ConvertError};
 use sekai_format::AssetDocument;
 use sekai_format::asset::MemberFile;
 use sekai_format::audio::{CueEntry, CueTable, CueWaveform, FORMAT as CUE_FORMAT};
-use sekai_format::episode::{EpisodeDocument, MotionRef, StoryType, WarningKind};
+use sekai_format::episode::{Effect, EpisodeDocument, MotionRef, StoryType, WarningKind};
 use sekai_format::story::{
     ACTION_SET_FORMAT, ActionSet, ActionSetDetail, SCENARIO_BACKGROUND_FORMAT, ScenarioBackground,
 };
@@ -278,7 +278,11 @@ fn an_episode_names_everything_it_uses() {
         .plain("scenario/movie/m", "a", "video")
         .cues("sound/scenario/bgm/bgm1", "bgm1", &["bgm1"])
         .cues("sound/scenario/voice/s", "s", &["v1 "])
-        .cues("sound/scenario/se/se_pack00001", "pack", &["se00001"]);
+        .cues("sound/scenario/se/se_pack00001", "pack", &["se00001"])
+        .plain("scenario/effect/spark", "spark", "scenario-prefab")
+        .plain("scenario/effect/spark", "tex_spark", "texture")
+        .cues("scenario/effect/spark", "se_spark.acb", &["se_spark"])
+        .plain("scenario/effect/hologram", "hologram", "scenario-prefab");
 
     let episodes = converted(&version);
     assert_eq!(episodes.len(), 1);
@@ -328,8 +332,19 @@ fn an_episode_names_everything_it_uses() {
         "sound/scenario/se/se_pack00001/pack"
     );
     assert_eq!(doc.voices["v1 "].cue, "v1 ");
-    assert_eq!(doc.effects["spark"], "scenario/effect/spark");
-    assert_eq!(doc.effects["hologram"], "scenario/effect/hologram");
+    let spark = "scenario/effect/spark";
+    let expected = Effect {
+        bundle: spark.to_owned(),
+        prefab: Some(format!("{spark}/spark")),
+        sounds: vec![format!("{spark}/se_spark.acb")],
+    };
+    assert_eq!(doc.effects["spark"], expected);
+    let hologram = &doc.effects["hologram"];
+    assert_eq!(
+        hologram.prefab.as_deref(),
+        Some("scenario/effect/hologram/hologram")
+    );
+    assert!(hologram.sounds.is_empty());
     assert_eq!(doc.music_videos, ["42"]);
     assert!(doc.area_talk.is_none());
     assert_eq!(doc.warnings, []);
@@ -342,6 +357,8 @@ fn an_episode_names_everything_it_uses() {
         "scenario/background/bg/bg",
         "scenario/movie/m/a",
         "sound/scenario/bgm/bgm1/bgm1",
+        "scenario/effect/spark/spark",
+        "scenario/effect/spark/se_spark.acb",
     ] {
         assert!(references.iter().any(|known| known == name), "{name}");
     }
@@ -565,16 +582,70 @@ fn backgrounds_choose_their_file_and_add_their_movies() {
             "prefab",
             &["scenario/movie/own", "scenario/movie/extra"],
         )
+        .plain(
+            "scenario/background/two",
+            "prefab@scenario-prefab",
+            "scenario-prefab",
+        )
         .plain("scenario/movie/own", "v", "video")
         .plain("scenario/movie/extra", "v", "video");
     let doc = only(&version);
     assert_eq!(doc.backgrounds["one"], "scenario/background/one/whatever");
     assert_eq!(doc.backgrounds["two/b"], "scenario/background/two/b");
+    let prefab = "scenario/background/two/prefab@scenario-prefab";
+    assert_eq!(
+        doc.background_prefabs,
+        BTreeMap::from([("two/b".to_owned(), prefab.to_owned())])
+    );
     assert_eq!(
         doc.movies.keys().map(String::as_str).collect::<Vec<_>>(),
         ["extra", "own"]
     );
     assert_eq!(doc.warnings, []);
+}
+
+#[test]
+fn an_effect_names_the_prefab_of_its_name_or_the_only_one_and_the_sounds_of_its_bundle() {
+    let scene = json!({
+        "SpecialEffectData": [
+            {"EffectType": 15, "StringVal": "Rain", "StringValSub": "scenario/effect/weather"},
+            {"EffectType": 15, "StringVal": "fog", "StringValSub": "scenario/effect/weather"},
+            {"EffectType": 16, "StringVal": "glow", "StringValSub": "scenario/effect/light"}
+        ],
+        "IncludeSoundDataBundleNames": ["scenario/effect/gone"]
+    });
+    let weather = "scenario/effect/weather";
+    let version = Version::default()
+        .table("unitStories", unit_table(&["s"]))
+        .scene(UNIT, "s", scene)
+        .plain(weather, "rain", "scenario-prefab")
+        .plain(weather, "snow", "scenario-prefab")
+        .cues(weather, "se_rain.acb", &["se_rain"])
+        .plain("scenario/effect/light", "light_01", "scenario-prefab")
+        .plain("scenario/effect/light", "tex_light", "texture");
+    let doc = only(&version);
+    let rain = Effect {
+        bundle: weather.to_owned(),
+        prefab: Some(format!("{weather}/rain")),
+        sounds: vec![format!("{weather}/se_rain.acb")],
+    };
+    assert_eq!(doc.effects["Rain"], rain);
+    assert_eq!(
+        doc.effects["fog"].prefab, None,
+        "two prefabs, neither named fog"
+    );
+    let glow = doc.effects["glow"].prefab.as_deref();
+    assert_eq!(
+        glow,
+        Some("scenario/effect/light/light_01"),
+        "the only prefab"
+    );
+    assert_eq!(doc.effects["gone"].bundle, "scenario/effect/gone");
+    assert_eq!(doc.effects["gone"].prefab, None);
+    assert_eq!(
+        kinds(&doc),
+        [WarningKind::AssetMissing, WarningKind::AssetMissing]
+    );
 }
 
 #[test]

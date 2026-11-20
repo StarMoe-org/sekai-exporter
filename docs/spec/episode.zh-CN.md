@@ -2,7 +2,7 @@
 
 [English](episode.md)
 
-`episode` 形式是剧情一话所需的全部内容，写成一份指明所用资产的 JSON 文档。转换器：`sekai-moesekai` 中的 `episode`（feature `episode`）。形式版本：2。
+`episode` 形式是剧情一话所需的全部内容，写成一份指明所用资产的 JSON 文档。转换器：`sekai-moesekai` 中的 `episode`（feature `episode`）。形式版本：3。
 
 ## 1. 运行时
 
@@ -20,13 +20,14 @@
 
 | 键 | 值 |
 |---|---|
-| `format`、`version` | `"episode"` 与本文档格式的版本，1 |
+| `format`、`version` | `"episode"` 与本文档格式的版本，2 |
 | `story` | 这是哪一话（见下文） |
 | `scenario` | [`scenario`](scenario.zh-CN.md) 资产的名称 |
 | `characters` | 场景数据中的每个角色，以 `Character2dId` 为键（见下文） |
 | `backgrounds` | 背景键 → [`texture`](texture.zh-CN.md) 资产的名称。键为背景名称，场景数据所指的文件不是背景自身时则为 `<名称>/<文件>` |
+| `background_prefabs` | 背景键 → 预制体背景构建数据的 [`scenario-prefab`](scenario-prefab.zh-CN.md) 资产名称，只列出资源包含有该资产的键 |
 | `bgm`、`se`、`voices` | cue 名称 → 声音（见下文）。语音以其 `VoiceId` 为键，精确匹配，含末尾空格 |
-| `effects` | 效果名称 → 含有该效果的资源包名称 |
+| `effects` | 效果名称 → 效果（见下） |
 | `movies` | 影片名称 → 其资源包中 [`video`](video.zh-CN.md) 资产的名称，按名称顺序排列 |
 | `music_videos` | 该话播放的音乐视频 ID，按首次使用的顺序排列 |
 | `area_talk` | 区域对话时出现（见下文） |
@@ -47,6 +48,14 @@
 | `scenario_id` | 表中该行所指的场景数据 |
 
 `<key>` 为章节的 `assetbundleName`、活动 ID、卡牌 ID、特别剧情 ID 或区域 ID。`<episode>` 为话的编号，卡牌为 `first` 或 `second`（没有分段的卡牌话为行 ID），区域对话为动作集 ID。
+
+### 效果
+
+```json
+{ "bundle": "scenario/effect/rain_07", "prefab": "scenario/effect/rain_07/rain_07", "sounds": [ … ] }
+```
+
+`bundle` 是含有该效果的资源包。`prefab` 是游戏为该效果加载的 [`scenario-prefab`](scenario-prefab.zh-CN.md) 资产名称，资源包中没有时省略。`sounds` 是该资源包中 [`audio`](audio.zh-CN.md) 资产的名称，即效果播放的声音，按名称排序；没有时省略。
 
 ### 角色
 
@@ -96,7 +105,7 @@
 
 **数据表：** `unitStories`、`eventStories`、`cardEpisodes`、`cards`、`specialStories`、`character2ds`、`actionSets`、`costume2ds` 与 `areaPlaylists`。每一话一行构建一个资产，每个带有 `scenarioId` 的 `actionSets` 行也是如此。场景数据不在该版本中的行不产出资产。
 
-**读取的资产：** [`scenario`](scenario.zh-CN.md) 资产、`audio` 资产的 `cues` 成员、`live2d-model` 与 `live2d-motions` 资产的文档，以及 [`action-set`](action-set.zh-CN.md) 与 [`scenario-background`](scenario-background.zh-CN.md) 资产。资产按资源包与形式查找。资产的词干为其名称的最后一段去掉 `@` 后缀，比较时不区分大小写。
+**读取的资产：** [`scenario`](scenario.zh-CN.md) 资产、`audio` 资产的 `cues` 成员、`live2d-model` 与 `live2d-motions` 资产的文档，以及 [`action-set`](action-set.zh-CN.md) 与 [`scenario-background`](scenario-background.zh-CN.md) 资产。[`scenario-prefab`](scenario-prefab.zh-CN.md) 资产与其他 `audio` 资产只读取名称。资产按资源包与形式查找。资产的词干为其名称的最后一段去掉 `@` 后缀，比较时不区分大小写。
 
 **场景数据。** 资源包名称总是取自表的 `scenarioId`，绝不取自场景数据内部的 `ScenarioId`。场景数据按其词干在下列资源包中查找，取第一个含有它的资源包：
 
@@ -120,7 +129,9 @@
 
 **模型与动作。** 服装的模型是 `live2d/model/<CostumeType>` 的 `live2d-model` 资产。动作组是 `live2d/motion/<assetName>_motion_base` 的 `live2d-motions` 资产，`assetName` 取自角色的 `character2ds` 行，至多为 1 的 ID 视为 1。名称查找不区分大小写：先查模型的 `motion/` 成员，再查动作组的 `motion/` 成员，然后是动作组的 `facial/` 成员。
 
-**背景。** 背景是 `scenario/background/<名称>` 中词干为其文件的 `texture` 资产，或资源包中唯一的贴图。这些资源包的每份 `scenario-background` 资产都会加上其影片，名称去掉 `scenario/movie/`。
+**背景。** 背景是 `scenario/background/<名称>` 中词干为其文件的 `texture` 资产，或资源包中唯一的贴图。含有 `scenario-prefab` 资产（预制体背景的构建数据）的资源包，把按名称排序的第一份写入 `background_prefabs`。这些资源包的每份 `scenario-background` 资产都会加上其影片，名称去掉 `scenario/movie/`。
+
+**效果。** 效果的预制体是其资源包中词干为效果名称的 `scenario-prefab` 资产，或资源包中唯一的一份。资源包不在该版本中、或没有这样的预制体时，给出 `asset_missing` 警告。
 
 **声音。** 按顺序所列的资源包中，第一个其 cue 表具有该 cue 的资产中的第一个资产，精确匹配；在同一个资源包内，词干为 `scenarioId` 的资产优先尝试。
 
@@ -162,3 +173,4 @@ UTF-8 JSON，无多余空白，键的顺序如上，缺省的值省略。数的�
 |---|---|
 | 1 | 第一版 |
 | 2 | 声音带有其 cue 的编配 |
+| 3 | 效果写出其预制体与所在资源包的声音，预制体背景写出其构建数据的预制体（文档格式 2） |

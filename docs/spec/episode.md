@@ -2,7 +2,7 @@
 
 [中文](episode.zh-CN.md)
 
-The `episode` form is everything one story episode needs, as a JSON document that names the assets it uses. Converter: `episode` in `sekai-moesekai` (feature `episode`). Form version: 2.
+The `episode` form is everything one story episode needs, as a JSON document that names the assets it uses. Converter: `episode` in `sekai-moesekai` (feature `episode`). Form version: 3.
 
 ## 1. Runtime
 
@@ -20,13 +20,14 @@ The asset is named `episode/<type>/<key>/<episode>`, where `<type>`, `<key>` and
 
 | Key | Value |
 |---|---|
-| `format`, `version` | `"episode"` and the version of this document format, 1 |
+| `format`, `version` | `"episode"` and the version of this document format, 2 |
 | `story` | Which episode this is (below) |
 | `scenario` | The name of the [`scenario`](scenario.md) asset |
 | `characters` | Each character of the scene data, keyed by `Character2dId` (below) |
 | `backgrounds` | Background key → name of the [`texture`](texture.md) asset. The key is the background name, or `<name>/<file>` when the scene data names a file other than the background's own |
+| `background_prefabs` | Background key → name of the [`scenario-prefab`](scenario-prefab.md) asset of the build data of a prefab background, for each key whose bundle holds one |
 | `bgm`, `se`, `voices` | Cue name → sound (below). A voice is keyed by its `VoiceId`, matched exactly, trailing spaces included |
-| `effects` | Effect name → the name of the bundle that holds the effect |
+| `effects` | Effect name → the effect (below) |
 | `movies` | Movie name → names of the [`video`](video.md) assets of its bundle, in name order |
 | `music_videos` | The music video IDs the episode plays, in order of first use |
 | `area_talk` | Present for area conversations (below) |
@@ -47,6 +48,14 @@ Every map is ordered by key. Lists keep the order of first appearance in the sce
 | `scenario_id` | The scene data the table row names |
 
 `<key>` is the `assetbundleName` of a chapter, the event ID, the card ID, the special story ID or the area ID. `<episode>` is the episode number, `first` or `second` for a card (the row ID for a card episode without a part), and the action set ID for an area conversation.
+
+### Effects
+
+```json
+{ "bundle": "scenario/effect/rain_07", "prefab": "scenario/effect/rain_07/rain_07", "sounds": [ … ] }
+```
+
+`bundle` is the bundle that holds the effect. `prefab` is the name of the [`scenario-prefab`](scenario-prefab.md) asset the game loads for the effect, absent when the bundle holds none. `sounds` are the names of the [`audio`](audio.md) assets of the bundle, the sounds the effect plays, in name order; absent when it holds none.
 
 ### Characters
 
@@ -96,7 +105,7 @@ Which model a character wears in an area conversation depends on the date, so th
 
 **Tables:** `unitStories`, `eventStories`, `cardEpisodes`, `cards`, `specialStories`, `character2ds`, `actionSets`, `costume2ds` and `areaPlaylists`. One asset is built per episode row, and per `actionSets` row with a `scenarioId`. A row whose scene data is not in the version gives no asset.
 
-**Assets read:** the [`scenario`](scenario.md) asset, the `cues` member of `audio` assets, the documents of `live2d-model` and `live2d-motions` assets, and [`action-set`](action-set.md) and [`scenario-background`](scenario-background.md) assets. Assets are found by bundle and form. The stem of an asset is the last segment of its name without an `@` suffix, compared without case.
+**Assets read:** the [`scenario`](scenario.md) asset, the `cues` member of `audio` assets, the documents of `live2d-model` and `live2d-motions` assets, and [`action-set`](action-set.md) and [`scenario-background`](scenario-background.md) assets. Of [`scenario-prefab`](scenario-prefab.md) and other `audio` assets, only the names are read. Assets are found by bundle and form. The stem of an asset is the last segment of its name without an `@` suffix, compared without case.
 
 **Scene data.** Bundle names always come from the table's `scenarioId`, never from the `ScenarioId` inside the scene data. It is found by its stem in the first of these bundles that holds it:
 
@@ -120,7 +129,9 @@ Which model a character wears in an area conversation depends on the date, so th
 
 **Models and motions.** The model of a costume is the `live2d-model` asset of `live2d/model/<CostumeType>`. The motion set is the `live2d-motions` asset of `live2d/motion/<assetName>_motion_base`, with `assetName` from the `character2ds` row of the character, IDs of at most 1 taken as 1. A name is looked up without case: first the `motion/` members of the model, then the `motion/` and then the `facial/` members of the motion set.
 
-**Backgrounds.** A background is the `texture` asset of `scenario/background/<name>` whose stem is its file, or the only texture of the bundle. Each `scenario-background` asset of those bundles adds its movies, named without `scenario/movie/`.
+**Backgrounds.** A background is the `texture` asset of `scenario/background/<name>` whose stem is its file, or the only texture of the bundle. A bundle that holds a `scenario-prefab` asset, the build data of a prefab background, gives the first of them in name order to `background_prefabs`. Each `scenario-background` asset of those bundles adds its movies, named without `scenario/movie/`.
+
+**Effects.** The prefab of an effect is the `scenario-prefab` asset of its bundle whose stem is the effect name, or the only one of the bundle. A bundle that is not in the version, or that holds no such prefab, is an `asset_missing` warning.
 
 **Sounds.** The first asset of the first listed bundle whose cue table has the cue, matched exactly; an asset whose stem is the `scenarioId` is tried first within a bundle.
 
@@ -162,3 +173,4 @@ The rules of section 3 are those the game's client applies to find the resources
 |---|---|
 | 1 | First version |
 | 2 | Sounds carry the arrangement of their cue |
+| 3 | Effects name their prefab and the sounds of their bundle, and prefab backgrounds the prefab of their build data (document format 2) |

@@ -15,8 +15,8 @@ use sekai_convert::tables::{
 use sekai_convert::{Asset, Content, ConvertError, Member};
 use sekai_format::audio::CueTable;
 use sekai_format::episode::{
-    AreaCostume, AreaTalk, Character, Costume, EpisodeDocument, FORMAT, MotionRef, Sound, VERSION,
-    Warning, WarningKind,
+    AreaCostume, AreaTalk, Character, Costume, Effect, EpisodeDocument, FORMAT, MotionRef, Sound,
+    VERSION, Warning, WarningKind,
 };
 use sekai_format::story::{ActionSet, ScenarioBackground};
 use serde::Serialize;
@@ -33,6 +33,7 @@ const MODEL: &str = "live2d-model";
 const MOTIONS: &str = "live2d-motions";
 const ACTION_SET: &str = "action-set";
 const SCENARIO_BACKGROUND: &str = "scenario-background";
+const SCENARIO_PREFAB: &str = "scenario-prefab";
 
 /// The motions and facials of an asset: lower-case name to role.
 type MotionIndex = HashMap<String, String>;
@@ -50,7 +51,7 @@ impl TableConverter for Episode {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
@@ -272,13 +273,13 @@ impl<'p> Builder<'p> {
         self.references.insert(entry.scenario.clone());
 
         let characters = self.characters(&refs, area)?;
-        let (backgrounds, background_bundles) = self.backgrounds(&refs, area);
-        let movies = self.movies(&refs, &background_bundles)?;
+        let backgrounds = self.backgrounds(&refs, area);
+        let movies = self.movies(&refs, &backgrounds.bundles)?;
         let bgm = self.music(&refs, area)?;
         let se = self.sound_effects(&refs)?;
         let voices = self.voices(&refs)?;
-        let area_talk = area.map(|area| area_talk(area, &backgrounds, &bgm));
-        let effects = effect_bundles(&refs.effects);
+        let area_talk = area.map(|area| area_talk(area, &backgrounds.textures, &bgm));
+        let effects = self.effects(&refs.effects);
 
         let document = EpisodeDocument {
             format: FORMAT.to_owned(),
@@ -286,7 +287,8 @@ impl<'p> Builder<'p> {
             story: entry.row.story.clone(),
             scenario: entry.scenario.clone(),
             characters,
-            backgrounds,
+            backgrounds: backgrounds.textures,
+            background_prefabs: backgrounds.prefabs,
             bgm,
             se,
             voices,
@@ -527,12 +529,8 @@ impl<'p> Builder<'p> {
         Ok(found.collect())
     }
 
-    /// The textures by background key, and the bundles that hold the backgrounds.
-    fn backgrounds(
-        &mut self,
-        refs: &References,
-        area: Option<&AreaSource>,
-    ) -> (BTreeMap<String, String>, Vec<String>) {
+    /// The textures and the prefabs of the backgrounds, and the bundles that hold them.
+    fn backgrounds(&mut self, refs: &References, area: Option<&AreaSource>) -> Backgrounds {
         let area_image = area.map(|area| rules::area_background(area.area_id));
         let wanted = area_image
             .iter()
@@ -547,20 +545,28 @@ impl<'p> Builder<'p> {
                 let bundle = format!("{}{}", rules::BACKGROUND_PREFIX, background.name);
                 (background.key(), bundle, background.file.as_str())
             }));
-        let mut textures = BTreeMap::new();
-        let mut bundles = Vec::new();
+        let mut backgrounds = Backgrounds::default();
         for (key, bundle, file) in wanted {
             if !self.require(&bundle, "background") {
                 continue;
             }
             if let Some(texture) = self.texture(&key, &bundle, file) {
-                textures.insert(key, texture);
+                backgrounds.textures.insert(key.clone(), texture);
             }
-            if !bundles.contains(&bundle) {
-                bundles.push(bundle);
+            if let Some(prefab) = self.background_prefab(&bundle) {
+                backgrounds.prefabs.insert(key, prefab);
+            }
+            if !backgrounds.bundles.contains(&bundle) {
+                backgrounds.bundles.push(bundle);
             }
         }
-        (textures, bundles)
+        backgrounds
+    }
+
+    /// The scenario prefab of the build data that `bundle` holds when it is a prefab background.
+    fn background_prefab(&mut self, bundle: &str) -> Option<String> {
+        let entry = of_form(self.assets(bundle), SCENARIO_PREFAB).next()?;
+        Some(self.refer(&entry.name))
     }
 
     /// The texture `file` of `bundle`, or the only texture of the bundle.
@@ -632,6 +638,59 @@ impl<'p> Builder<'p> {
             }
         }
         Ok(movies)
+    }
+
+    /// The effects `effects` of the scene data, as names and bundles, by key: the name, or the
+    /// bundle for a name used with a second bundle.
+    fn effects(&mut self, effects: &[(String, String)]) -> BTreeMap<String, Effect> {
+        let mut keyed: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
+        for (name, bundle) in effects {
+            let key = match keyed.get(name.as_str()) {
+                Some((_, known)) if known != bundle => bundle,
+                _ => name,
+            };
+            keyed.insert(key, (name, bundle));
+        }
+        keyed
+            .into_iter()
+            .map(|(key, (name, bundle))| (key.to_owned(), self.effect(name, bundle)))
+            .collect()
+    }
+
+    /// The effect `name` of `bundle`, with its prefab and the sounds of the bundle.
+    fn effect(&mut self, name: &str, bundle: &str) -> Effect {
+        let prefab = if self.require(bundle, "effect") {
+            self.effect_prefab(name, bundle)
+        } else {
+            None
+        };
+        let sounds = of_form(self.assets(bundle), AUDIO)
+            .map(|entry| self.refer(&entry.name))
+            .collect();
+        Effect {
+            bundle: bundle.to_owned(),
+            prefab,
+            sounds,
+        }
+    }
+
+    /// The scenario prefab of the effect `name` in `bundle`: the one of that name, or the only one
+    /// of the bundle.
+    fn effect_prefab(&mut self, name: &str, bundle: &str) -> Option<String> {
+        let prefabs: Vec<&AssetEntry> = of_form(self.assets(bundle), SCENARIO_PREFAB).collect();
+        let named = prefabs
+            .iter()
+            .find(|entry| stem(&entry.name).eq_ignore_ascii_case(name));
+        let only = prefabs.first().filter(|_| prefabs.len() == 1);
+        let Some(entry) = named.or(only) else {
+            let detail = format!(
+                "effect {name}: no prefab {name:?} in {bundle} ({} prefabs)",
+                prefabs.len()
+            );
+            self.warn(WarningKind::AssetMissing, detail);
+            return None;
+        };
+        Some(self.refer(&entry.name))
     }
 
     fn music(
@@ -763,15 +822,13 @@ fn area_talk(
     }
 }
 
-/// Effect name to bundle. A name used with a second bundle is also keyed by that bundle.
-fn effect_bundles(effects: &[(String, String)]) -> BTreeMap<String, String> {
-    let mut out: BTreeMap<String, String> = BTreeMap::new();
-    for (name, bundle) in effects {
-        let key = match out.get(name) {
-            Some(known) if known != bundle => bundle,
-            _ => name,
-        };
-        out.insert(key.clone(), bundle.clone());
-    }
-    out
+/// The backgrounds of an episode.
+#[derive(Default)]
+struct Backgrounds {
+    /// The texture of each background key.
+    textures: BTreeMap<String, String>,
+    /// The scenario prefab of the build data of each prefab background, by background key.
+    prefabs: BTreeMap<String, String>,
+    /// The bundles that hold the backgrounds, in order of first use.
+    bundles: Vec<String>,
 }

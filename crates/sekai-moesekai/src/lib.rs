@@ -4,7 +4,7 @@
 pub mod costume;
 #[cfg(feature = "episode")]
 pub mod episode;
-#[cfg(feature = "graph")]
+#[cfg(any(feature = "episode", feature = "virtual-live"))]
 mod graph;
 pub mod roots;
 #[cfg(feature = "scenario")]

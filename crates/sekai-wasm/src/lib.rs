@@ -52,6 +52,7 @@ pub fn converters() -> Vec<Box<dyn Converter>> {
         Absent::boxed("site-model", site_model),
         Box::new(sekai_moesekai::scenario::Scenario),
         Box::new(sekai_moesekai::virtual_live::VirtualLiveScript),
+        Box::new(sekai_moesekai::virtual_live::VirtualLiveTimeline),
         Box::new(ActionSetForm),
         Box::new(ScenarioBackgroundForm),
         Box::new(sekai_moesekai::costume::CostumeModel),

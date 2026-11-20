@@ -83,6 +83,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 | `action-set` | Done | [Action set](spec/action-set.md) |
 | `episode` | Done | [Episode](spec/episode.md) |
 | `virtual-live-script` | Done | [Virtual live script](spec/virtual-live-script.md) |
+| `virtual-live-timeline` | Done | [Virtual live timeline](spec/virtual-live-timeline.md) |
 
 ## Costumes
 

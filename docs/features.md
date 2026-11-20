@@ -38,7 +38,7 @@ In `sekai-moesekai`, specific to this game, for the default consumer:
 |---|---|
 | `scenario` | Scenario objects into scenario documents |
 | `episode` | Story episodes: one table row with every asset it refers to resolved |
-| `virtual-live` | The [scripts](spec/virtual-live-script.md) of virtual lives |
+| `virtual-live` | The [scripts](spec/virtual-live-script.md) and [timelines](spec/virtual-live-timeline.md) of virtual lives |
 | `costume` | Costume parts, motions and combinations for 3D viewing, in the [costume forms](spec/costume.md) |
 
 `costume` produces the `costume-model` and `costume-motion` forms, and from the game data tables the `costume-role` form, one per character and unit with every part it can wear, and the `costume` form, the looks of each costume.

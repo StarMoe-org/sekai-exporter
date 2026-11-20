@@ -10,8 +10,10 @@ use sekai_convert::Content;
 use sekai_encode::webp;
 use sekai_format::AssetDocument;
 
-/// The version of the view. It changes whenever a path or a transform changes.
-pub const VERSION: u32 = 2;
+/// The version of the transforms, part of the fingerprint of every file the view derives. It
+/// changes whenever the output of a transform changes; files that the view adds or moves do not
+/// change it.
+pub const TRANSFORM_VERSION: u32 = 2;
 
 /// The libwebp quality factor of the WebP files.
 const WEBP_QUALITY: f32 = 75.0;
@@ -152,7 +154,11 @@ pub fn files(document: &AssetDocument) -> Vec<ViewFile> {
                 }
             }
             ("video", "video") => add(at(format!("{}.mp4", movie_stem(file))), Transform::Copy),
-            ("scenario", "scenario") => add(at(format!("{file}.json")), Transform::Copy),
+            ("scenario", "scenario")
+            | ("virtual-live-script", "script")
+            | ("virtual-live-timeline", "timeline") => {
+                add(at(format!("{file}.json")), Transform::Copy);
+            }
             ("text", "file") => add(at(text_name(bundle, file, &m.extension)), Transform::Copy),
             ("font", _) => add(at(format!("{file}.{}", m.extension)), Transform::Copy),
             _ => {}
@@ -373,6 +379,29 @@ mod tests {
         assert_eq!(paths(&plain)[0].0, "a/b.json");
         let named = document("a/b", "text", "a", &[("file", "txt")]);
         assert_eq!(paths(&named)[0].0, "a/b.txt");
+    }
+
+    #[test]
+    fn scripts_of_stories_and_virtual_lives_are_their_documents() {
+        let cases = [
+            ("scenario/a", "scenario", "scenario"),
+            (
+                "virtual_live/mc/scenario/mc_1",
+                "virtual-live-script",
+                "script",
+            ),
+            (
+                "virtual_live/mc/timeline/mc_2",
+                "virtual-live-timeline",
+                "timeline",
+            ),
+        ];
+        for (bundle, form, role) in cases {
+            let file = bundle.rsplit_once('/').unwrap().1;
+            let d = document(&format!("{bundle}/{file}"), form, bundle, &[(role, "json")]);
+            let path = format!("{bundle}/{file}.json");
+            assert_eq!(paths(&d), [(path, Transform::Copy)]);
+        }
     }
 
     #[test]

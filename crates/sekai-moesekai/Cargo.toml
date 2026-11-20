@@ -31,7 +31,7 @@ episode = [
     "dep:sha2",
     "dep:base64",
 ]
-virtual-live = ["scenario"]
+virtual-live = ["scenario", "dep:sha2", "dep:base64"]
 costume = [
     "sekai-convert/model",
     "sekai-convert/animation",

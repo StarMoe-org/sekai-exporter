@@ -1,6 +1,6 @@
 # storage 视图
 
-`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update` 以 `<区服>/storage` 下的路径索引发布该视图。视图版本：2。
+`storage` 视图把一个版本的资产写成资源存储站提供的路径树。模块：`sekai-moesekai` 的 `storage_view`（feature `storage-view`）。`sekai-exporter update` 以 `<区服>/storage` 下的路径索引发布该视图。视图版本：3。
 
 ## 1. 运行时
 
@@ -13,7 +13,7 @@
 | `texture`、`sprite` | 图像的 `<file>.png` 与 `<file>.webp` |
 | `audio` | 每个 cue 一个 `<cue>.mp3`；有多个波形的 cue，其余为 `<cue>_2.mp3` 等 |
 | `video` | `<base>.mp4` |
-| `scenario` | `<file>.json` |
+| `scenario`、`virtual-live-script`、`virtual-live-timeline` | `<file>.json` |
 | `text` | 见下文 |
 | `font` | `<file>.<扩展名>` |
 
@@ -37,7 +37,7 @@
 | MP4 | 规范层成员，不作改动；见[视频](video.zh-CN.md) |
 | JSON 与文本 | 规范层成员，不作改动 |
 
-变换也是派生：其指纹由视图版本、变换、编码器版本与成员哈希构成。第二次运行复用全部结果。
+变换也是派生：其指纹由变换版本（2）、变换、编码器版本与成员哈希构成。第二次运行复用全部结果。
 
 [解析器](../serving.zh-CN.md)让视图的所有路径同时切换到新版本。
 
@@ -51,3 +51,4 @@
 |---|---|
 | 1 | 第一版 |
 | 2 | 图片为规范 PNG 及由其生成的 WebP；声音为规范 MP3 |
+| 3 | 虚拟演唱会的剧本与时间轴即其文档；变换版本仍为 2 |

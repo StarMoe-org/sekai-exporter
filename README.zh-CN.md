@@ -31,7 +31,7 @@
 | 视频 | H.264 码率为 MPEG-1 视频流 1.5 倍的 MP4，音频为 AAC（[视频](docs/spec/video.zh-CN.md)） |
 | 模型 | 带骨骼、形态键、材质与贴图的 glTF 二进制文件：服装，以及 MySekai 家具与场地（[模型](docs/spec/model.zh-CN.md)） |
 | Live2D | Cubism 模型，含贴图、物理与动作（[Live2D](docs/spec/live2d.zh-CN.md)） |
-| 文档 | 剧本、剧集、虚拟演唱会剧本、动作集、动画曲线，以及[规范](docs/spec/README.zh-CN.md)中其他形式的 JSON |
+| 文档 | 剧本、剧集、虚拟演唱会剧本与时间轴、动作集、动画曲线，以及[规范](docs/spec/README.zh-CN.md)中其他形式的 JSON |
 
 音频与视频是由有损来源再次编码的，是供收听与观看的副本。需要分析采样或画面、或用其训练模型的程序，应使用 `sekai-codec` 解码 HCA 流，并从 USM 文件中取出 MPEG-1 流。测量结果及复现方法见[使用发布的资产](docs/using-the-assets.zh-CN.md#关于音频与视频的问题)。
 
@@ -103,7 +103,7 @@ sekai-exporter gc <output> --config <file> --secrets <dir>
 | 解包 | `objects` 为每个资源包写出[对象文档](docs/spec/object-documents.zh-CN.md)，其字段值在持续集成中与 UnityPy 相比对 |
 | 解码 | Alpha8、R8、RGB24、RGBA32、RGB565、ETC1、ETC2 RGB、ETC2 RGBA8、EAC R、crunch DXT5、ASTC LDR 与 ASTC HDR 贴图（含贴图数组与 3D 贴图），HCA 与 ADX 音频，ACB 与 AWB 归档，以及 USM 容器 |
 | 编码 | PNG、有损 WebP、OpenEXR 与 MP3，以及经 `ffmpeg` 程序写出的 MP4 |
-| 转换器 | 贴图、精灵、字体、文本资产、剧情场景与剧集、动作集、剧情背景、虚拟演唱会剧本、CRI 视频与 cue 表、Live2D 模型与动作集、服装部件、动作与组合，以及 MySekai 家具及其附件、场地、表情、角色动作与对话。[功能开关](docs/features.zh-CN.md)列出了每个 feature 转换什么 |
+| 转换器 | 贴图、精灵、字体、文本资产、剧情场景与剧集、动作集、剧情背景、虚拟演唱会剧本与时间轴、CRI 视频与 cue 表、Live2D 模型与动作集、服装部件、动作与组合，以及 MySekai 家具及其附件、场地、表情、角色动作与对话。[功能开关](docs/features.zh-CN.md)列出了每个 feature 转换什么 |
 | 来源 | `jp`、`en`、`cn`、`tw`、`kr` 区服的分发服务，客户端安装包，以及本地目录 |
 | 发布 | 路径索引、索引分片与路径树，版本历史与变更，以及目录树，目标为本地目录或 S3 兼容存储桶；`gc` 回收无人引用的文件 |
 | 服务 | `serve` 解析器、它的 HTTP 服务器与容器镜像 |

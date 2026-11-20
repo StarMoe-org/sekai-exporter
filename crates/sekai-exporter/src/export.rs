@@ -136,16 +136,18 @@ fn scenario() -> Vec<Box<dyn Converter>> {
 
 #[cfg(feature = "virtual-live")]
 fn virtual_live() -> Vec<Box<dyn Converter>> {
-    vec![Box::new(sekai_moesekai::virtual_live::VirtualLiveScript)]
+    use sekai_moesekai::virtual_live::{VirtualLiveScript, VirtualLiveTimeline};
+    vec![Box::new(VirtualLiveScript), Box::new(VirtualLiveTimeline)]
 }
 
 #[cfg(not(feature = "virtual-live"))]
 fn virtual_live() -> Vec<Box<dyn Converter>> {
     use sekai_convert::roots::Absent;
-    vec![Absent::boxed(
-        "virtual-live-script",
-        sekai_moesekai::roots::virtual_live_script,
-    )]
+    use sekai_moesekai::roots::{virtual_live_script, virtual_live_timeline};
+    vec![
+        Absent::boxed("virtual-live-script", virtual_live_script),
+        Absent::boxed("virtual-live-timeline", virtual_live_timeline),
+    ]
 }
 
 #[cfg(feature = "episode")]

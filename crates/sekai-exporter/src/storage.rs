@@ -36,7 +36,7 @@ struct Job {
 fn fingerprint(transform: Transform, source: &Key) -> [u8; 32] {
     let text = format!(
         "storage transform {}\n{}\nsource {source}\n",
-        storage_view::VERSION,
+        storage_view::TRANSFORM_VERSION,
         transform.identity()
     );
     Sha256::digest(text.as_bytes()).into()

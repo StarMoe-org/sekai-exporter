@@ -38,7 +38,7 @@
 |---|---|
 | `scenario` | 剧本对象，转换为剧本文档 |
 | `episode` | 剧情的一话：一条数据表记录，以及其所引用的全部已解析资产 |
-| `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.zh-CN.md) |
+| `virtual-live` | 虚拟演唱会的[剧本](spec/virtual-live-script.zh-CN.md)与[时间轴](spec/virtual-live-timeline.zh-CN.md) |
 | `costume` | 供 3D 浏览的服装部件、动作与组合，见[服装形式](spec/costume.zh-CN.md) |
 
 `costume` 产出 `costume-model` 与 `costume-motion` 两种形式，并由游戏数据表产出 `costume-role` 形式（每个角色在每个单元一份，含其可穿戴的全部部件）和 `costume` 形式（每套服装的各个造型）。

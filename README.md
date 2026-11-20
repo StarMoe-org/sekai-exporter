@@ -31,7 +31,7 @@ The files take these forms:
 | Video | MP4 with H.264 at one and a half times the bitrate of the MPEG-1 stream, and AAC ([video](docs/spec/video.md)) |
 | Models | glTF binary with skeletons, blend shapes, materials and textures: costumes and MySekai furniture and sites ([model](docs/spec/model.md)) |
 | Live2D | Cubism models with their textures, physics and motions ([Live2D](docs/spec/live2d.md)) |
-| Documents | JSON for scenarios, episodes, virtual live scripts, action sets, animation curves and the other forms in the [specifications](docs/spec/README.md) |
+| Documents | JSON for scenarios, episodes, virtual live scripts and timelines, action sets, animation curves and the other forms in the [specifications](docs/spec/README.md) |
 
 The audio and video are encoded again from lossy sources. They are copies for listening and viewing; programs that analyse or train on the samples or pictures decode the HCA streams with `sekai-codec` and take the MPEG-1 streams out of the USM files. [Using the published assets](docs/using-the-assets.md#questions-about-audio-and-video) gives the measurements and how to repeat them.
 
@@ -103,7 +103,7 @@ In development. What works today:
 | Unpacking | `objects` writes the [object document](docs/spec/object-documents.md) of every bundle, and its field values are compared with UnityPy in continuous integration |
 | Decoding | Alpha8, R8, RGB24, RGBA32, RGB565, ETC1, ETC2 RGB, ETC2 RGBA8, EAC R, crunched DXT5, ASTC LDR and ASTC HDR textures (including texture arrays and 3D textures), HCA and ADX audio, ACB and AWB archives, and USM containers |
 | Encoding | PNG, lossy WebP, OpenEXR and MP3, and MP4 through the `ffmpeg` program |
-| Converters | Textures, sprites, fonts, text assets, story scenes and episodes, action sets, scenario backgrounds, virtual live scripts, CRI movies and cue sheets, Live2D models and motion sets, costume parts, motions and combinations, and MySekai furniture with its attachments, sites, emoticons, character actions and talks. [Features](docs/features.md) lists what each feature converts |
+| Converters | Textures, sprites, fonts, text assets, story scenes and episodes, action sets, scenario backgrounds, virtual live scripts and timelines, CRI movies and cue sheets, Live2D models and motion sets, costume parts, motions and combinations, and MySekai furniture with its attachments, sites, emoticons, character actions and talks. [Features](docs/features.md) lists what each feature converts |
 | Sources | The distribution services of the `jp`, `en`, `cn`, `tw` and `kr` regions, client packages, and local directories |
 | Publishing | Path indexes, index shards and path trees, version histories and changes, and directory trees, in a local directory or an S3-compatible bucket; `gc` collects what nothing refers to |
 | Serving | The `serve` resolver, its HTTP server and a container image |

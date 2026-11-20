@@ -9,7 +9,7 @@ use crate::audio::{CueArrangement, CueWaveform};
 /// The value of the `format` key.
 pub const FORMAT: &str = "episode";
 /// The version of the document format.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// Everything one story episode needs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,14 +26,17 @@ pub struct EpisodeDocument {
     pub characters: BTreeMap<i64, Character>,
     /// Background key to the name of the texture asset.
     pub backgrounds: BTreeMap<String, String>,
+    /// Background key to the name of the scenario prefab asset of the build data of a prefab
+    /// background.
+    pub background_prefabs: BTreeMap<String, String>,
     /// The music, by cue name.
     pub bgm: BTreeMap<String, Sound>,
     /// The sound effects, by cue name.
     pub se: BTreeMap<String, Sound>,
     /// The voices, by `VoiceId`.
     pub voices: BTreeMap<String, Sound>,
-    /// Effect name to the name of the bundle that holds it.
-    pub effects: BTreeMap<String, String>,
+    /// The effects, by effect name.
+    pub effects: BTreeMap<String, Effect>,
     /// Movie name to the names of its video assets.
     pub movies: BTreeMap<String, Vec<String>>,
     /// The music video IDs, in order of first use.
@@ -157,6 +160,19 @@ pub struct MotionRef {
     pub role: String,
 }
 
+/// An effect an episode shows: its bundle and the assets of the bundle the effect uses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Effect {
+    /// The bundle that holds the effect.
+    pub bundle: String,
+    /// The name of the scenario prefab asset of the effect, absent when the bundle holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefab: Option<String>,
+    /// The names of the audio assets of the bundle, in name order, absent when it holds none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<String>,
+}
+
 /// One cue an episode plays.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sound {
@@ -259,10 +275,18 @@ mod tests {
                 },
             )]),
             backgrounds: BTreeMap::new(),
+            background_prefabs: BTreeMap::new(),
             bgm: BTreeMap::new(),
             se: BTreeMap::new(),
             voices: BTreeMap::new(),
-            effects: BTreeMap::new(),
+            effects: BTreeMap::from([(
+                "rain".to_owned(),
+                Effect {
+                    bundle: "scenario/effect/rain".to_owned(),
+                    prefab: Some("scenario/effect/rain/rain".to_owned()),
+                    sounds: Vec::new(),
+                },
+            )]),
             movies: BTreeMap::new(),
             music_videos: Vec::new(),
             area_talk: None,
@@ -274,7 +298,7 @@ mod tests {
     fn the_bytes_are_fixed() {
         assert_eq!(
             String::from_utf8(document().to_bytes().unwrap()).unwrap(),
-            r#"{"format":"episode","version":1,"story":{"type":"area","selector":"area:8/1","story_id":8,"episode_no":1,"episode_id":1,"title":"","scenario_id":"s"},"scenario":"b/s","characters":{"17":{"motion_set":"m","costumes":[{"costume_type":"c","motions":{}}]}},"backgrounds":{},"bgm":{},"se":{},"voices":{},"effects":{},"movies":{},"music_videos":[],"warnings":[{"kind":"asset_missing","detail":"x"}]}"#
+            r#"{"format":"episode","version":2,"story":{"type":"area","selector":"area:8/1","story_id":8,"episode_no":1,"episode_id":1,"title":"","scenario_id":"s"},"scenario":"b/s","characters":{"17":{"motion_set":"m","costumes":[{"costume_type":"c","motions":{}}]}},"backgrounds":{},"background_prefabs":{},"bgm":{},"se":{},"voices":{},"effects":{"rain":{"bundle":"scenario/effect/rain","prefab":"scenario/effect/rain/rain"}},"movies":{},"music_videos":[],"warnings":[{"kind":"asset_missing","detail":"x"}]}"#
         );
     }
 

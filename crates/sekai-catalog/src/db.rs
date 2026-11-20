@@ -467,6 +467,13 @@ impl Batch {
         Ok(())
     }
 
+    /// Forgets that the bucket holds `key`.
+    pub fn release(&mut self, key: &Key) -> io::Result<()> {
+        let mut table = self.0.open_table(OBJECTS).map_err(other)?;
+        table.remove(key.to_string().as_str()).map_err(other)?;
+        Ok(())
+    }
+
     /// Forgets every object recorded as held.
     pub fn release_all(&mut self) -> io::Result<()> {
         let mut table = self.0.open_table(OBJECTS).map_err(other)?;
@@ -655,6 +662,12 @@ impl Holdings for CatalogHoldings<'_> {
         for (key, size) in objects {
             batch.hold(key, *size)?;
         }
+        batch.commit()
+    }
+
+    fn release(&self, key: &Key) -> io::Result<()> {
+        let mut batch = self.catalog.write()?;
+        batch.release(key)?;
         batch.commit()
     }
 }

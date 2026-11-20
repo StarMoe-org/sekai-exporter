@@ -581,8 +581,8 @@ pub(crate) struct Ran {
 /// An asset of a run.
 pub(crate) struct Produced {
     pub(crate) output: Output,
-    /// The document of the asset, when its derivation ran in this run.
-    pub(crate) document: Option<AssetDocument>,
+    /// The document of the asset.
+    pub(crate) document: AssetDocument,
 }
 
 /// Where the derivations of a run go: the store and the records they are written to, where they
@@ -630,8 +630,7 @@ impl<'a> Runner<'a> {
         let mut pending = Vec::new();
         for (i, recorded) in self.recorded(plans, version).into_iter().enumerate() {
             outputs.push(match recorded? {
-                Ok(Derived::Document(key)) => Some(produced(&plans[i], version, key, None)),
-                Ok(Derived::Nothing) => None,
+                Ok(produced) => produced,
                 Err(cost) => {
                     pending.push((i, cost));
                     None
@@ -640,8 +639,8 @@ impl<'a> Runner<'a> {
         }
         for derived in self.derive(plans, &pending, version) {
             let (i, stored) = derived?;
-            outputs[i] = stored
-                .map(|stored| produced(&plans[i], version, stored.key, Some(stored.document)));
+            outputs[i] =
+                stored.map(|stored| produced(&plans[i], version, stored.key, stored.document));
         }
         if !self.plain {
             self.derivations.flush()?;
@@ -653,13 +652,14 @@ impl<'a> Runner<'a> {
         })
     }
 
-    /// The recorded output of each of `plans`, or the cost of deriving it. Plain mode records
-    /// nothing, so every plan is derived.
+    /// The asset that the records give each of `plans`, `None` for a recorded output without an
+    /// asset, or else the cost of deriving it. Plain mode records nothing, so every plan is
+    /// derived, and so is a plan whose recorded document the store does not have.
     fn recorded(
         &self,
         plans: &[Planned<'_>],
         version: &Version<'_>,
-    ) -> Vec<io::Result<Result<Derived, Cost>>> {
+    ) -> Vec<io::Result<Result<Option<Produced>, Cost>>> {
         self.scheduler
             .run(&vec![Need::default(); plans.len()], |i, slots| {
                 slots.cpu(1, || {
@@ -669,9 +669,27 @@ impl<'a> Runner<'a> {
                     } else {
                         self.derivations.get(&plan.fingerprint)?
                     };
-                    Ok(recorded.ok_or_else(|| plan.cost(version)))
+                    let taken = match recorded {
+                        Some(Derived::Document(key)) => self
+                            .read_document(&key)?
+                            .map(|document| Some(produced(plan, version, key, document))),
+                        Some(Derived::Nothing) => Some(None),
+                        None => None,
+                    };
+                    Ok(taken.ok_or_else(|| plan.cost(version)))
                 })
             })
+    }
+
+    /// The asset document `key`, or `None` when the store does not have it.
+    fn read_document(&self, key: &Key) -> io::Result<Option<AssetDocument>> {
+        let bytes = match self.store.read(key) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            read => read?,
+        };
+        AssetDocument::from_bytes(&bytes)
+            .map(Some)
+            .map_err(io::Error::other)
     }
 
     /// Derives the `pending` plans, each `(plan, cost)`, grouped by the bundles they read, and
@@ -709,13 +727,12 @@ impl<'a> Runner<'a> {
     }
 }
 
-/// The asset of the derivation of `plan`: its document is the one stored now, or none for an
-/// output that an earlier run recorded.
+/// The asset of the derivation of `plan`, with its document.
 fn produced(
     plan: &Planned<'_>,
     version: &Version<'_>,
     document: Key,
-    stored: Option<AssetDocument>,
+    stored: AssetDocument,
 ) -> Produced {
     let bundle = &version.index().bundles()[plan.subject.bundle()];
     Produced {
@@ -724,9 +741,7 @@ fn produced(
             bundle: bundle.name.clone(),
             form: plan.converter.name(),
             document,
-            error: stored
-                .as_ref()
-                .and_then(|stored| Some(stored.error.as_ref()?.code.clone())),
+            error: stored.error.as_ref().map(|error| error.code.clone()),
         },
         document: stored,
     }

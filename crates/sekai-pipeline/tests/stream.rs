@@ -339,6 +339,28 @@ fn reusable(results: &[UnitResult]) -> Vec<([u8; 32], Vec<u8>)> {
     reusable.collect()
 }
 
+#[test]
+fn a_recorded_derivation_whose_document_is_gone_is_derived_again() {
+    let root = scratch("gone");
+    let run = Run::default();
+    let store = LocalStore::open(&root).unwrap();
+    let converters = converters();
+    let derivations = MemoryDerivations::default();
+    let stream = stream_of(&run, &store, &converters, &derivations);
+    let evaluate = || {
+        stream::evaluate_in_segments(&run.manifest, run.inputs, &stream, &mut || Ok(())).unwrap()
+    };
+    let first = evaluate();
+    let stored = files(&root);
+    for path in stored.keys() {
+        std::fs::remove_file(root.join(path)).unwrap();
+    }
+    let again = evaluate();
+    assert_eq!(content(&again), content(&first));
+    assert_eq!(again.evaluation.reused, 0);
+    assert_eq!(files(&root), stored);
+}
+
 /// `streamed` without the counts of derivations, which follow from what earlier runs recorded.
 fn content(streamed: &Streamed) -> Streamed {
     let mut content = streamed.clone();

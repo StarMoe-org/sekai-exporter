@@ -19,6 +19,8 @@ pub trait Holdings: Sync {
     fn sizes(&self, prefix: u8) -> io::Result<HashMap<Key, u64>>;
     /// Records that the destination holds `objects`.
     fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()>;
+    /// Records that the destination does not hold `key`, as when reading it back finds nothing.
+    fn release(&self, key: &Key) -> io::Result<()>;
 
     /// Whether the destination holds nothing but these objects, as after a listing of it, so
     /// that an object they lack is known to be missing there.
@@ -42,6 +44,10 @@ impl Holdings for NoHoldings {
 
     fn hold(&self, _objects: &[(Key, u64)]) -> io::Result<()> {
         Err(io::Error::other("there is no destination to hold objects"))
+    }
+
+    fn release(&self, _key: &Key) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -88,6 +94,11 @@ impl Holdings for MemoryHoldings {
 
     fn hold(&self, objects: &[(Key, u64)]) -> io::Result<()> {
         self.objects().extend(objects.iter().cloned());
+        Ok(())
+    }
+
+    fn release(&self, key: &Key) -> io::Result<()> {
+        self.objects().remove(key);
         Ok(())
     }
 
@@ -176,9 +187,17 @@ impl Store for Objects<'_> {
         self.local.put(bytes, extension)
     }
 
+    /// The bytes of `key`, from the local store or else from the destination. An object that
+    /// neither has is no longer recorded as held, so that a run puts it at the destination again.
     fn read(&self, key: &Key) -> io::Result<Vec<u8>> {
         match self.local.read(key) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => self.read_back(key)?.ok_or(e),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match self.read_back(key)? {
+                Some(bytes) => Ok(bytes),
+                None => {
+                    self.held.release(key)?;
+                    Err(e)
+                }
+            },
             read => read,
         }
     }
@@ -220,6 +239,27 @@ mod tests {
         assert_eq!(sizes.get(&evicted), Some(&7));
         assert_eq!(objects.read(&evicted).unwrap(), b"evicted");
         assert!(local.contains(&evicted));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn an_object_that_neither_the_output_nor_the_destination_has_is_no_longer_held() {
+        let root = std::env::temp_dir().join(format!("sekai-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let local = LocalStore::open(&root).unwrap();
+        let gone = Key::of(b"gone", "json");
+        let held = MemoryHoldings::default();
+        held.hold(&[(gone.clone(), 4)]).unwrap();
+        let remote = MemoryStore::default();
+        let objects = Objects {
+            local: &local,
+            held: &held,
+            remote: &remote,
+        };
+
+        let error = objects.read(&gone).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        assert_eq!(held.size(&gone).unwrap(), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

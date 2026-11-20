@@ -1,6 +1,6 @@
 # Storage view
 
-The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update` publishes it with a path index at `<region>/storage`. View version: 2.
+The `storage` view writes the assets of a version as the path tree served by the asset storage. Module: `storage_view` in `sekai-moesekai` (feature `storage-view`). `sekai-exporter update` publishes it with a path index at `<region>/storage`. View version: 3.
 
 ## 1. Runtime
 
@@ -13,7 +13,7 @@ Sites and players that read files of the asset storage by path.
 | `texture`, `sprite` | `<file>.png` and `<file>.webp` of the image |
 | `audio` | `<cue>.mp3` for each cue; the waveforms of a cue with several are `<cue>_2.mp3` and so on |
 | `video` | `<base>.mp4` |
-| `scenario` | `<file>.json` |
+| `scenario`, `virtual-live-script`, `virtual-live-timeline` | `<file>.json` |
 | `text` | see below |
 | `font` | `<file>.<extension>` |
 
@@ -37,7 +37,7 @@ Assets that share a name follow the naming rule in [architecture](../architectur
 | MP4 | The canonical member, unchanged; see [video](video.md) |
 | JSON and text | The canonical member, unchanged |
 
-A transform is a derivation: its fingerprint is made from the view version, the transform, its encoder version and the hash of the member. A second run reuses every result.
+A transform is a derivation: its fingerprint is made from the version of the transforms, 2, the transform, its encoder version and the hash of the member. A second run reuses every result.
 
 A [resolver](../serving.md) switches every path of the view to a new version at once.
 
@@ -51,3 +51,4 @@ A view is compared with a reference tree made from the same input: documents by 
 |---|---|
 | 1 | First version |
 | 2 | Images are the canonical PNG and a WebP made from it; sounds are the canonical MP3 |
+| 3 | The scripts and timelines of virtual lives are their documents; the version of the transforms stays 2 |

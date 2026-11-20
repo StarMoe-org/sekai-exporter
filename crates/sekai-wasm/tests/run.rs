@@ -187,6 +187,7 @@ fn converters_cover_every_default_form_and_absent_rule() {
             "site-model",
             "scenario",
             "virtual-live-script",
+            "virtual-live-timeline",
             "action-set",
             "scenario-background",
             "costume-model",

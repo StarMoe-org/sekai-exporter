@@ -21,17 +21,17 @@ base64 = { version = "0.23.1", optional = true }
 
 [features]
 scenario = []
+graph = ["dep:sha2", "dep:base64"]
 episode = [
     "scenario",
+    "graph",
     "sekai-convert/image",
     "sekai-convert/animation",
     "dep:sekai-format",
     "dep:serde",
     "dep:serde_json",
-    "dep:sha2",
-    "dep:base64",
 ]
-virtual-live = ["scenario"]
+virtual-live = ["scenario", "graph"]
 costume = [
     "sekai-convert/model",
     "sekai-convert/animation",

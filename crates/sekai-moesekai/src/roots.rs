@@ -10,6 +10,11 @@ const MONO_BEHAVIOUR: i32 = 114;
 const SCENE_DATA: &str = "Assembly-CSharp/Sekai.ScenarioSceneData";
 /// The script of the master of ceremonies of a virtual live.
 const MASTER_OF_CEREMONY_DATA: &str = "Assembly-CSharp/Sekai.Core.VirtualLive.MasterOfCeremonyData";
+/// The script of a timeline.
+const TIMELINE_ASSET: &str = "Unity.Timeline/UnityEngine.Timeline.TimelineAsset";
+/// The directory of the timelines of the masters of ceremonies of virtual lives, in container
+/// paths.
+const VIRTUAL_LIVE_TIMELINES: &str = "/virtual_live/mc/timeline/";
 /// The script of the data of an action set.
 const ACTION_SET_DATA: &str = "Assembly-CSharp/Sekai.ActionSetData";
 /// The script of the build data of a scenario background.
@@ -23,6 +28,16 @@ pub fn scenario(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -
 /// The roots of the `virtual-live-script` form.
 pub fn virtual_live_script(object: &ObjectIndex, script: Option<&str>, _paths: &[String]) -> bool {
     object.class_id == MONO_BEHAVIOUR && script == Some(MASTER_OF_CEREMONY_DATA)
+}
+
+/// The roots of the `virtual-live-timeline` form: the timelines that the container lists in the
+/// directory of the timelines of virtual lives.
+pub fn virtual_live_timeline(object: &ObjectIndex, script: Option<&str>, paths: &[String]) -> bool {
+    object.class_id == MONO_BEHAVIOUR
+        && script == Some(TIMELINE_ASSET)
+        && paths
+            .iter()
+            .any(|path| path.to_ascii_lowercase().contains(VIRTUAL_LIVE_TIMELINES))
 }
 
 /// The roots of the `action-set` form.

@@ -4,6 +4,8 @@
 pub mod costume;
 #[cfg(feature = "episode")]
 pub mod episode;
+#[cfg(feature = "graph")]
+mod graph;
 pub mod roots;
 #[cfg(feature = "scenario")]
 pub mod scenario;

@@ -6,7 +6,7 @@ The `virtual-live-script` form is what happens in one part of a virtual live —
 
 ## 1. Runtime
 
-Readers that show or search what is said and done in a virtual live, and players that replay it. The form gives the script as the game stores it; it does not resolve the names it holds into files or join it with the game data tables that list the virtual lives.
+Readers that show or search what is said and done in a virtual live, and players that replay it. Parts that the game stores as timelines are the [`virtual-live-timeline`](virtual-live-timeline.md) form. The form gives the script as the game stores it; it does not resolve the names it holds into files or join it with the game data tables that list the virtual lives.
 
 ## 2. Contents
 

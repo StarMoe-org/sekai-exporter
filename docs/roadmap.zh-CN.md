@@ -83,6 +83,7 @@
 | `action-set` | 已完成 | [动作集](spec/action-set.zh-CN.md) |
 | `episode` | 已完成 | [话](spec/episode.zh-CN.md) |
 | `virtual-live-script` | 已完成 | [虚拟演唱会剧本](spec/virtual-live-script.zh-CN.md) |
+| `virtual-live-timeline` | 已完成 | [虚拟演唱会时间轴](spec/virtual-live-timeline.zh-CN.md) |
 
 ## 服装
 

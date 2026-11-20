@@ -2,7 +2,7 @@
 
 [中文](sprite.zh-CN.md)
 
-The `sprite` form is the region of a texture a `Sprite` shows, with the layout that places it. Converter: `sprite` in `sekai-convert` (feature `image`). Form version: 2.
+The `sprite` form is the region of a texture a `Sprite` shows, with the layout that places it. Converter: `sprite` in `sekai-convert` (feature `image`). Form version: 3.
 
 ## 1. Runtime
 
@@ -27,6 +27,7 @@ The `sprite` document is one object with these keys, in this order, with every n
 | `pivot` | `{"x", "y"}`: `m_Pivot`, as a fraction of `rect` |
 | `pixels_per_unit` | `m_PixelsToUnits` |
 | `border` | `{"left", "bottom", "right", "top"}`: `m_Border` (`x`, `y`, `z`, `w`), the nine-slice borders in pixels |
+| `atlas` | `m_Name` of the sprite atlas `m_SpriteAtlas`; absent for a sprite of no atlas. Sprites of the same name in several atlases differ by it |
 
 The document has no whitespace.
 
@@ -34,7 +35,7 @@ The document has no whitespace.
 
 **Root objects:** every `Sprite` (class 213). The form does not read game data tables.
 
-**Fields read:** `m_Rect`, `m_Pivot`, `m_PixelsToUnits`, `m_Border`, `m_SpriteAtlas`, `m_RenderDataKey`, and from the render data (`m_RD`, or the entry of the atlas under `m_RenderDataKey` when the atlas lists one): `texture`, `alphaTexture`, `textureRect`, `textureRectOffset`, `settingsRaw`; for a sprite of an atlas that packs tight outlines, also `m_VertexData` and `m_IndexBuffer` of `m_RD`. From the sprite atlas: `m_RenderDataMap`. From the texture: the fields the `texture` form reads.
+**Fields read:** `m_Rect`, `m_Pivot`, `m_PixelsToUnits`, `m_Border`, `m_SpriteAtlas`, `m_RenderDataKey`, and from the render data (`m_RD`, or the entry of the atlas under `m_RenderDataKey` when the atlas lists one): `texture`, `alphaTexture`, `textureRect`, `textureRectOffset`, `settingsRaw`; for a sprite of an atlas that packs tight outlines, also `m_VertexData` and `m_IndexBuffer` of `m_RD`. From the sprite atlas: `m_Name` and `m_RenderDataMap`. From the texture: the fields the `texture` form reads.
 
 **Image.** The `texture` of the render data is decoded as the `texture` form decodes a `Texture2D`. Each edge of `m_Rect`, or of `textureRect` when the render data comes from the atlas, is rounded to the nearest whole pixel, ties to even: the left edge is `x`, the right edge `x + width`, the bottom edge `y` and the top edge `y + height`, the sums taken in double precision. The image is the pixels between those edges, with `y` counted from the bottom row of the texture.
 
@@ -75,3 +76,4 @@ The crop and the layout are checked on real bundles against UnityPy: the image a
 |---|---|
 | 1 | First version |
 | 2 | The image is the rectangle `m_Rect`. Revision 1 converts sprites that an atlas trimmed or mirrored, which version 2 refused |
+| 3 | The layout names the atlas of the sprite |

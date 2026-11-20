@@ -2,7 +2,7 @@
 
 [English](sprite.md)
 
-`sprite` 形式是 `Sprite` 所显示的贴图区域，以及放置它的布局。转换器：`sekai-convert` 中的 `sprite`（feature `image`）。形式版本：2。
+`sprite` 形式是 `Sprite` 所显示的贴图区域，以及放置它的布局。转换器：`sekai-convert` 中的 `sprite`（feature `image`）。形式版本：3。
 
 ## 1. 运行时
 
@@ -27,6 +27,7 @@
 | `pivot` | `{"x", "y"}`：`m_Pivot`，以 `rect` 的分数表示 |
 | `pixels_per_unit` | `m_PixelsToUnits` |
 | `border` | `{"left", "bottom", "right", "top"}`：`m_Border`（`x`、`y`、`z`、`w`），九宫格边框，以像素计 |
+| `atlas` | 精灵图集 `m_SpriteAtlas` 的 `m_Name`；不属于图集的精灵没有这个键。几张图集里同名的精灵靠它区分 |
 
 文档没有空白。
 
@@ -34,7 +35,7 @@
 
 **根对象：** 每个 `Sprite`（类 213）。形式不读取游戏数据表。
 
-**读取的字段：** `m_Rect`、`m_Pivot`、`m_PixelsToUnits`、`m_Border`、`m_SpriteAtlas`、`m_RenderDataKey`，以及渲染数据（`m_RD`，或图集按 `m_RenderDataKey` 列出的那一项，前提是图集列出了它）中的：`texture`、`alphaTexture`、`textureRect`、`textureRectOffset`、`settingsRaw`；紧凑轮廓图集中的精灵还读取 `m_RD` 的 `m_VertexData` 与 `m_IndexBuffer`。从精灵图集取 `m_RenderDataMap`。从贴图取 `texture` 形式所读取的字段。
+**读取的字段：** `m_Rect`、`m_Pivot`、`m_PixelsToUnits`、`m_Border`、`m_SpriteAtlas`、`m_RenderDataKey`，以及渲染数据（`m_RD`，或图集按 `m_RenderDataKey` 列出的那一项，前提是图集列出了它）中的：`texture`、`alphaTexture`、`textureRect`、`textureRectOffset`、`settingsRaw`；紧凑轮廓图集中的精灵还读取 `m_RD` 的 `m_VertexData` 与 `m_IndexBuffer`。从精灵图集取 `m_Name` 与 `m_RenderDataMap`。从贴图取 `texture` 形式所读取的字段。
 
 **图像。** 渲染数据的 `texture` 按 `texture` 形式解码 `Texture2D` 的方式解码。`m_Rect` 的每条边（渲染数据来自图集时为 `textureRect` 的边）舍入到最近的整像素，相同时取偶数：左边缘为 `x`，右边缘为 `x + width`，下边缘为 `y`，上边缘为 `y + height`，求和以双精度进行。图像为这些边缘之间的像素，`y` 从贴图的最下一行计数。
 
@@ -75,3 +76,4 @@
 |---|---|
 | 1 | 第一版 |
 | 2 | 图像为矩形 `m_Rect`。修订 1 转换图集裁过边或镜像过的精灵，版本 2 曾拒绝它们 |
+| 3 | 布局写明精灵所在的图集 |

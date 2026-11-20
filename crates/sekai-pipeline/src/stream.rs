@@ -36,7 +36,7 @@ use crate::eval::{
     self, Evaluation, FileRoot, Fusion, Options, Output, Planned, Produced, RootKey, Runner,
     Subject,
 };
-use crate::ledger::{BundleLedger, Tally};
+use crate::ledger::{BundleLedger, ObjectName, Tally};
 use crate::metrics::Recorder;
 use crate::naming::{Candidate, Origin, assign, logical_path, loose_path, path_in_bundle};
 use crate::sched::Scheduler;
@@ -438,6 +438,8 @@ pub(crate) struct Root<'a> {
     pub(crate) planned: Planned<'a>,
     /// The logical path of the root.
     pub(crate) logical: String,
+    /// Where the asset starts in its bundle.
+    pub(crate) key: RootKey,
     /// The first reference that leaves the window, and how many do.
     outside: Option<(Outside, usize)>,
 }
@@ -832,11 +834,11 @@ fn run_segment(
                         document: stored.key,
                     },
                     root.logical,
-                    root.planned.subject.key(),
+                    root.key,
                 ));
             }
             None => {
-                kept_roots.push((root.logical, root.planned.subject.key()));
+                kept_roots.push((root.logical, root.key));
                 runnable.push(root.planned);
             }
         }
@@ -894,7 +896,8 @@ fn stored_documents(
 fn count_reads(tallies: &mut BTreeMap<usize, Tally>, units: &Units<'_>, document: &AssetDocument) {
     for source in &document.sources {
         if let Some(&entry) = units.positions.get(source.bundle.as_str()) {
-            tallies.entry(entry).or_default().read(source.path_id);
+            let object = ObjectName::new(source.file.as_deref(), source.path_id);
+            tallies.entry(entry).or_default().read(object);
         }
     }
     for resource in &document.resources {
@@ -975,8 +978,13 @@ struct Found<'a, 'i> {
 
 /// What a root of a unit is.
 enum FoundRoot<'a, 'i> {
-    /// An object, with its index.
-    Object(ObjectId, &'i ObjectIndex),
+    /// An object.
+    Object {
+        id: ObjectId,
+        /// Its serialized file, as [`eval::named_file`] names it.
+        file: Option<&'i str>,
+        object: &'i ObjectIndex,
+    },
     /// A file of the bundle of the unit, with the converter of the files of its form.
     File(&'a dyn FileConverter, &'i ResourceFile),
 }
@@ -984,9 +992,10 @@ enum FoundRoot<'a, 'i> {
 impl FoundRoot<'_, '_> {
     fn origin(&self) -> Origin<'_> {
         match self {
-            Self::Object(id, object) => Origin::Object {
+            Self::Object { id, file, object } => Origin::Object {
                 class_id: object.class_id,
                 class: &object.class,
+                file: *file,
                 path_id: id.path_id,
             },
             Self::File(..) => Origin::File,
@@ -995,7 +1004,10 @@ impl FoundRoot<'_, '_> {
 
     fn key(&self) -> RootKey {
         match self {
-            Self::Object(id, _) => RootKey::Object(id.path_id),
+            Self::Object { id, file, .. } => RootKey::Object {
+                file: file.map(str::to_owned),
+                path_id: id.path_id,
+            },
             Self::File(_, file) => RootKey::File {
                 file: file.path.clone(),
             },
@@ -1024,6 +1036,7 @@ pub(crate) fn plan_unit<'a>(
     }
     let mut found = Vec::new();
     for (f, file) in index.bundles()[bundle].files.iter().enumerate() {
+        let named = eval::named_file(&index.bundles()[bundle], f);
         for (o, object) in file.objects.iter().enumerate() {
             let paths = index.container_paths(bundle, f, object.path_id);
             let logical = object_logical(unit, object, paths, stream.loose);
@@ -1051,14 +1064,19 @@ pub(crate) fn plan_unit<'a>(
                         };
                         found.push(Found {
                             converter: converter.as_ref(),
-                            root: FoundRoot::Object(id, object),
+                            root: FoundRoot::Object {
+                                id,
+                                file: named,
+                                object,
+                            },
                             logical: logical.clone(),
                         });
                     }
                 }
             }
             if let Some((tally, ignored)) = &mut tally {
-                tally.object(object.path_id, &object.class, script, root, ignored);
+                let id = ObjectName::new(named, object.path_id);
+                tally.object(id, &object.class, script, root, ignored);
             }
         }
     }
@@ -1079,7 +1097,6 @@ pub(crate) fn plan_unit<'a>(
             logical: found.logical.as_ref(),
             form: found.converter.name(),
             origin: found.root.origin(),
-            bundle: unit,
         })
         .collect();
     let names = stream.naming.names(&candidates);
@@ -1107,9 +1124,10 @@ fn plan_root<'a>(
 ) -> Root<'a> {
     let index = version.index();
     let unit = &index.bundles()[bundle].name;
+    let key = found.root.key();
     let mut leaving = BTreeSet::new();
     let subject = match found.root {
-        FoundRoot::Object(id, _) => {
+        FoundRoot::Object { id, .. } => {
             let declared = found.converter.inputs(id, version);
             Subject::Object(closure(index, unit, id, &declared, window, &mut leaving))
         }
@@ -1137,6 +1155,7 @@ fn plan_root<'a>(
             fingerprint,
         },
         logical: found.logical.into_owned(),
+        key,
         outside: first,
     }
 }

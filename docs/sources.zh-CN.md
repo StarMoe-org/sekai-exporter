@@ -11,7 +11,7 @@
 | `cp` | 日服与美服所用分发服务的版本、清单与资源包 | `jp`、`en` |
 | `nuverse` | 国服、台服与韩服所用分发服务的版本、清单与资源包 | `cn`、`tw`、`kr` |
 | `dir` | 本地目录中已有的资源包 | 离线运行与测试 |
-| `apk` | 客户端安装包中的 player data 与 streaming assets 的 cue sheet，配合引擎类布局的 TPK 文件读取：由 `export` 读取，或由 `update --client` 按区服的 `package` 项读取 | `client` feature |
+| `apk` | 客户端安装包中的 player data，以及 streaming assets 中的 cue sheet 与 Unity 资源包，配合引擎类布局的 TPK 文件读取：由 `export` 读取，或由 `update --client` 按区服的 `package` 项读取 | `client` feature |
 
 `dir` 区服从其目录取得资源包。`cp` 或 `nuverse` 区服下载清单与资源包，并记录在 `<输出目录>/inputs` 中，该目录存放游戏数据（参见[输入 store](#输入-store)）。
 
@@ -68,9 +68,9 @@
 }
 ```
 
-`path` 是 APK 或 XAPK，`class_table` 是引擎类布局的 TPK 文件，`script_table` 是 gzip 压缩的脚本布局 JSON lines 文件，可以省略。player data 成为一个资源包 `player`。streaming assets 中的 cue sheet，即 `assets/` 下扩展名为 `.acb` 的文件，成为第二个资源包 `streamingassets`，其条目以它们在 `assets/` 下的路径命名。只有它们会被某种形式读取：音频形式只用 cue sheet 自身的字节转换，因此 wave bank、工程文件和影片等其他 CRI 文件不读取。安装包的内容是对每个资源包按上述顺序各写一行 `<资源包> <资源包的 SHA-256>` 后取的 SHA-256。版本名为 `<应用版本>-<内容的前 12 位十六进制>`，因此应用版本相同而内容不同的两个安装包是两个版本。
+`path` 是 APK 或 XAPK，`class_table` 是引擎类布局的 TPK 文件，`script_table` 是 gzip 压缩的脚本布局 JSON lines 文件，可以省略。player data 成为一个资源包 `player`。streaming assets 中的 cue sheet，即 `assets/` 下扩展名为 `.acb` 的文件，成为第二个资源包 `streamingassets`，其条目以它们在 `assets/` 下的路径命名。CRI 文件中只有它们会被某种形式读取：音频形式只用 cue sheet 自身的字节转换，因此 wave bank、工程文件和影片等其他 CRI 文件不读取。客户端还会不经下载、从 streaming assets 加载 Unity 资源包：既有客户端自己的资源包，例如客户端的字体，也有随安装包预先附带的下载资源包，它们保留下载时的文件头。每个这样的资源包都是安装包的一个资源包，名称取其 `AssetBundle` 对象给出的名称，排在前两个之后，按名称排序。安装包的内容是对每个资源包按上述顺序各写一行 `<资源包> <资源包的 SHA-256>` 后取的 SHA-256。版本名为 `<应用版本>-<内容的前 12 位十六进制>`，因此应用版本相同而内容不同的两个安装包是两个版本。
 
-player data 中有许多客户端不按路径加载即显示的精灵，例如称号的默认边框。精灵是客户端安装包的散置类：没有容器路径的精灵同样成为资产，命名为 `player/loose/Sprite/<精灵名>`。同名的精灵无法区分，不予命名。
+player data 中有许多客户端不按路径加载即显示的精灵，例如称号的默认边框。精灵是客户端安装包的散置类：没有容器路径的精灵同样成为资产，命名为 `player/loose/Sprite/<精灵名>`。同名的精灵按[命名规则](architecture.zh-CN.md#身份)以 path ID 与序列化文件区分。
 
 ## 版本发现
 

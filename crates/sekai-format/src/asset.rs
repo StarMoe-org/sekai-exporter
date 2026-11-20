@@ -22,8 +22,8 @@ pub struct AssetDocument {
     pub form_version: u32,
     /// The fingerprint, as lowercase hexadecimal.
     pub fingerprint: String,
-    /// The root object first, then the other objects the conversion read, ordered by bundle and
-    /// path ID. An asset that starts from a file has none.
+    /// The root object first, then the other objects the conversion read, ordered by bundle,
+    /// serialized file and path ID. An asset that starts from a file has none.
     pub sources: Vec<SourceObject>,
     /// The resource files the conversion read, ordered by bundle and file. For an asset that
     /// starts from a file, the file alone.
@@ -63,6 +63,10 @@ impl AssetDocument {
 pub struct SourceObject {
     /// The bundle name.
     pub bundle: String,
+    /// The serialized file of the bundle that holds the object, when the bundle holds several:
+    /// path IDs tell apart only the objects of one file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
     /// The path ID.
     #[serde(with = "decimal")]
     pub path_id: i64,
@@ -132,6 +136,7 @@ mod tests {
             fingerprint: "ab".to_owned(),
             sources: vec![SourceObject {
                 bundle: "a".to_owned(),
+                file: None,
                 path_id: -5,
                 class: "Texture2D".to_owned(),
             }],

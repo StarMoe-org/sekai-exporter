@@ -6,7 +6,7 @@ Terms used throughout the documents and the code. The Chinese term is the one us
 
 | English | 中文 | Definition / 定义 |
 |---|---|---|
-| object | 对象 | One instance of a Unity class in a serialized file, identified by `(bundle, path ID)`. 序列化文件中某个 Unity 类的一个实例，以 `(资源包, path ID)` 标识。 |
+| object | 对象 | One instance of a Unity class in a serialized file, identified by `(bundle, serialized file, path ID)`. 序列化文件中某个 Unity 类的一个实例，以 `(资源包, 序列化文件, path ID)` 标识。 |
 | type tree | type tree | The field layout of a class as stored in a file. 文件中记录的类字段布局。 |
 | layout table | 布局表 | A field layout for classes stored without type trees, supplied separately. 为不带 type tree 的类单独提供的字段布局。 |
 | PPtr | PPtr | A reference from one object to another: `(file index, path ID)`. 对象之间的引用：`(文件序号, path ID)`。 |

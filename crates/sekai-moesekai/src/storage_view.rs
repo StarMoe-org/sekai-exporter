@@ -241,6 +241,7 @@ mod tests {
             fingerprint: String::new(),
             sources: vec![SourceObject {
                 bundle: bundle.to_owned(),
+                file: None,
                 path_id: 1,
                 class: "Object".to_owned(),
             }],

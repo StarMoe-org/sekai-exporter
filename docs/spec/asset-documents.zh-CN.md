@@ -37,7 +37,7 @@
 | `name` | 资产名称：逻辑路径加上[命名规则](../architecture.zh-CN.md)分配的后缀 |
 | `form`、`form_version` | 资产形式及其版本。每种形式在本目录下有一份规范 |
 | `fingerprint` | 资产的[指纹](../pipeline.zh-CN.md#不变式)，小写十六进制 |
-| `sources` | 转换实际读取的对象：根对象在前，其余对象按资源包与 path ID 排序。`path_id` 为十进制字符串，与[对象文档](object-documents.zh-CN.md)一致。根为资源包中文件的资产此项为空 |
+| `sources` | 转换实际读取的对象：根对象在前，其余对象按资源包、序列化文件与 path ID 排序。`path_id` 为十进制字符串，与[对象文档](object-documents.zh-CN.md)一致。`file` 是持有该对象的序列化文件，只在含多个序列化文件的资源包中出现，例如客户端安装包的 player data：path ID 只在同一文件内区分对象。根为资源包中文件的资产此项为空 |
 | `resources` | 仅当转换读取了资源文件时出现：`{ "bundle": "…", "file": "…" }`，按资源包与文件名排序。根为资源包中文件的资产只列出该文件 |
 | `members` | 资产的文件，顺序由形式定义。`role` 由形式定义，在资产内唯一。`sha256` 是文件在 store 中的名称。`size` 以字节为单位 |
 | `references` | 该资产引用的其他资产的名称，按升序排列 |

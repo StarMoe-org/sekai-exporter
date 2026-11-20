@@ -39,17 +39,33 @@ fn script_class(script: &str) -> &str {
     script.rsplit(['/', '.']).next().unwrap_or(script)
 }
 
+/// An object of a bundle as asset documents name it: by the serialized file that holds it when
+/// the bundle holds several, and by its path ID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct ObjectName {
+    file: Option<Box<str>>,
+    path_id: i64,
+}
+
+impl ObjectName {
+    pub(crate) fn new(file: Option<&str>, path_id: i64) -> Self {
+        Self {
+            file: file.map(Box::from),
+            path_id,
+        }
+    }
+}
+
 /// The account of one bundle, kept while units can still read from it.
 #[derive(Debug, Default)]
 pub(crate) struct Tally {
     /// The counts, once the objects of the bundle are counted. Read, ignored and unknown objects
     /// are counted when the account is settled.
     ledger: Option<BundleLedger>,
-    /// Each object that is not a root, as its path ID, its class and whether its class or script
-    /// is ignored.
-    rest: Vec<(i64, Box<str>, bool)>,
-    /// The path IDs of the objects a conversion read.
-    read: HashSet<i64>,
+    /// Each object that is not a root, with its class and whether its class or script is ignored.
+    rest: Vec<(ObjectName, Box<str>, bool)>,
+    /// The objects a conversion read.
+    read: HashSet<ObjectName>,
     /// The resource files a conversion read.
     resources_read: BTreeSet<String>,
 }
@@ -74,7 +90,7 @@ impl Tally {
     /// the classes and script classes that carry no asset content.
     pub(crate) fn object(
         &mut self,
-        path_id: i64,
+        object: ObjectName,
         class: &str,
         script: Option<&str>,
         root: bool,
@@ -89,13 +105,13 @@ impl Tally {
         } else {
             let skipped = ignored.contains(&class)
                 || script.is_some_and(|script| ignored.contains(&script_class(script)));
-            self.rest.push((path_id, class.into(), skipped));
+            self.rest.push((object, class.into(), skipped));
         }
     }
 
-    /// Notes that a conversion read the object `path_id` of the bundle.
-    pub(crate) fn read(&mut self, path_id: i64) {
-        self.read.insert(path_id);
+    /// Notes that a conversion read the object `object` of the bundle.
+    pub(crate) fn read(&mut self, object: ObjectName) {
+        self.read.insert(object);
     }
 
     /// Notes that a conversion read the resource file `file` of the bundle.
@@ -123,8 +139,8 @@ impl Tally {
     /// objects were never counted.
     pub(crate) fn settle(self) -> Option<BundleLedger> {
         let mut ledger = self.ledger?;
-        for (path_id, class, skipped) in self.rest {
-            if self.read.contains(&path_id) {
+        for (object, class, skipped) in self.rest {
+            if self.read.contains(&object) {
                 ledger.read += 1;
             } else if skipped {
                 ledger.ignored += 1;

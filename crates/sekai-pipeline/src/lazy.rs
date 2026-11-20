@@ -178,15 +178,12 @@ impl<'a> Lazy<'a> {
         Ok(None)
     }
 
-    /// The assets rooted at the object `path_id` of the bundle `bundle`, computed if they have
-    /// not been.
-    pub fn object(&self, bundle: &str, path_id: i64) -> io::Result<Vec<Output>> {
+    /// The assets that start at `root` of the bundle `bundle`, computed if they have not been.
+    pub fn rooted_at(&self, bundle: &str, root: &RootKey) -> io::Result<Vec<Output>> {
         let Some(opened) = self.bundle(bundle)? else {
             return Ok(Vec::new());
         };
-        let root = RootKey::Object(path_id);
-        let positions =
-            (0..opened.roots.len()).filter(|&i| opened.roots[i].planned.subject.key() == root);
+        let positions = (0..opened.roots.len()).filter(|&i| opened.roots[i].key == *root);
         positions
             .filter_map(|position| self.output(&opened, position).transpose())
             .collect()

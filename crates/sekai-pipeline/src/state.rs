@@ -606,7 +606,7 @@ mod tests {
             .map(|name| {
                 serde_json::json!({
                     "name": name, "form": "texture", "document": "", "error": null,
-                    "logical": "", "path_id": 0,
+                    "logical": "", "root": {"path_id": 0},
                 })
             })
             .collect();

@@ -74,7 +74,7 @@ impl Source for ClientSource {
 
     fn manifest(&self, _identity: &VersionIdentity) -> Result<Vec<BundleEntry>, SourceError> {
         let entry = |bundle: &Held| BundleEntry {
-            name: bundle.name.to_owned(),
+            name: bundle.name.clone(),
             declared: bundle.content(),
             download_path: None,
             size: bundle.bytes.len() as u64,

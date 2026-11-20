@@ -7,16 +7,27 @@
 //!
 //! The streaming assets lie directly under `assets/`. The cue sheets among them, which hold the
 //! sounds the client plays from the package, become a second container whose entries are named by
-//! their paths under `assets/`. They are the only streaming assets a form reads: a cue sheet is
-//! converted from its own bytes, so the other CRI files beside it are left out.
+//! their paths under `assets/`. They are the only CRI files a form reads: a cue sheet is converted
+//! from its own bytes, so the other CRI files beside it are left out.
+//!
+//! The client also loads Unity bundles from its streaming assets without downloading them: bundles
+//! of its own, such as the fonts of a client, and downloaded bundles shipped ahead in the package,
+//! which keep the header of a download (see [`crate::obfuscation`]). Each is a bundle of the
+//! package as it is, under the name its `AssetBundle` object gives it.
 
 use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read, Seek};
 use std::sync::Arc;
 
 use sekai_unity::bundle::is_unityfs;
-use sekai_unity::{Bundle, ByteSource, NoBlockCache, SerializedFile, StoredFile, store_files};
+use sekai_unity::index::OpenFile;
+use sekai_unity::{
+    Bundle, ByteSource, NoBlockCache, NoClasses, SerializedFile, StoredFile, Value, open_files,
+    store_files,
+};
 use zip::ZipArchive;
+
+use crate::obfuscation::deobfuscate;
 
 /// The name of the bundle that holds the player data.
 pub const PLAYER_BUNDLE: &str = "player";
@@ -27,6 +38,8 @@ const DATA_DIRECTORY: &str = "assets/bin/Data/";
 const STREAMING_ASSETS_DIRECTORY: &str = "assets/";
 /// The extension of a cue sheet.
 const CUE_SHEET_EXTENSION: &str = ".acb";
+/// The class ID of the `AssetBundle` object that names a bundle.
+const ASSET_BUNDLE: i32 = 142;
 const APK_EXTENSION: &str = ".apk";
 /// The marker of a part of a file, followed by the number of the part.
 const SPLIT_MARKER: &str = ".split";
@@ -43,10 +56,11 @@ type Parts = BTreeMap<String, BTreeMap<usize, Vec<u8>>>;
 /// A bundle of a client package: its name and the bytes of its UnityFS container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageBundle {
-    /// [`PLAYER_BUNDLE`] or [`STREAMING_ASSETS_BUNDLE`].
-    pub name: &'static str,
+    /// [`PLAYER_BUNDLE`], [`STREAMING_ASSETS_BUNDLE`], or the name that a Unity bundle of the
+    /// streaming assets gives itself.
+    pub name: String,
     /// The UnityFS container.
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 /// The files of a client package that become bundles.
@@ -56,10 +70,13 @@ struct Members {
     data: Parts,
     /// The cue sheets of the streaming assets, by their paths under the streaming assets.
     streaming: BTreeMap<String, Vec<u8>>,
+    /// The Unity bundles of the streaming assets as UnityFS containers, by their paths under the
+    /// streaming assets.
+    bundles: BTreeMap<String, Vec<u8>>,
 }
 
 /// The bundles of the client package `package`: the player data, then the cue sheets of the
-/// streaming assets when it has any.
+/// streaming assets when it has any, then the Unity bundles of the streaming assets in name order.
 pub fn bundles(package: &[u8]) -> io::Result<Vec<PackageBundle>> {
     bundles_from(Cursor::new(package))
 }
@@ -70,16 +87,61 @@ pub fn bundles_from<R: Read + Seek>(reader: R) -> io::Result<Vec<PackageBundle>>
     let mut remaining = MAX_UNPACKED_BYTES;
     add_package(reader, 0, &mut remaining, &mut members)?;
     let mut bundles = vec![PackageBundle {
-        name: PLAYER_BUNDLE,
-        bytes: player_data(members.data)?,
+        name: PLAYER_BUNDLE.to_owned(),
+        bytes: Arc::new(player_data(members.data)?),
     }];
     if !members.streaming.is_empty() {
         bundles.push(PackageBundle {
-            name: STREAMING_ASSETS_BUNDLE,
-            bytes: streaming_assets(members.streaming)?,
+            name: STREAMING_ASSETS_BUNDLE.to_owned(),
+            bytes: Arc::new(streaming_assets(members.streaming)?),
         });
     }
+    bundles.extend(named_bundles(members.bundles)?);
     Ok(bundles)
+}
+
+/// The Unity bundles of the streaming assets, `files` by their paths, under the names they give
+/// themselves, in name order. No two bundles of a package share a name.
+fn named_bundles(files: BTreeMap<String, Vec<u8>>) -> io::Result<Vec<PackageBundle>> {
+    let mut named = BTreeMap::new();
+    for (path, bytes) in files {
+        let bytes = Arc::new(bytes);
+        let name = asset_bundle_name(&bytes).map_err(|e| in_file(&path, e))?;
+        let taken = [PLAYER_BUNDLE, STREAMING_ASSETS_BUNDLE].contains(&name.as_str());
+        if taken || named.contains_key(&name) {
+            let message = format!("another bundle of the package is named {name}");
+            return Err(in_file(&path, message));
+        }
+        named.insert(name, bytes);
+    }
+    let bundle = |(name, bytes)| PackageBundle { name, bytes };
+    Ok(named.into_iter().map(bundle).collect())
+}
+
+/// The name that the `AssetBundle` object of the UnityFS container `bytes` gives its bundle.
+fn asset_bundle_name(bytes: &Arc<Vec<u8>>) -> Result<String, String> {
+    let bundle = Bundle::open(bytes.clone(), [0; 32]).map_err(|e| e.to_string())?;
+    let files = open_files(&bundle, &NoBlockCache, &NoClasses).map_err(|e| e.to_string())?;
+    for (entry, file, layouts) in &files {
+        let open = OpenFile {
+            path: &bundle.entries()[*entry].path,
+            file,
+            source: &bundle.entry(*entry, &NoBlockCache),
+            layouts,
+        };
+        let objects = file.objects.iter().enumerate();
+        for (index, _) in objects.filter(|(_, object)| object.class_id == ASSET_BUNDLE) {
+            let value = open.value(index).map_err(|e| e.to_string())?;
+            if let Some(name) = value.get("m_AssetBundleName").and_then(Value::as_str) {
+                return Ok(name.to_owned());
+            }
+        }
+    }
+    Err("no AssetBundle object names the bundle".to_owned())
+}
+
+fn in_file(path: &str, message: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("{path}: {message}"))
 }
 
 /// The player data as one UnityFS container.
@@ -144,11 +206,16 @@ fn add_package<R: Read + Seek>(
             if parts.insert(part, bytes).is_some() {
                 return Err(in_two_packages(path));
             }
-        } else if let Some(path) = name.strip_prefix(STREAMING_ASSETS_DIRECTORY)
-            && is_cue_sheet(path)
-        {
-            let bytes = contents(&mut member, remaining)?;
-            if members.streaming.insert(path.to_owned(), bytes).is_some() {
+        } else if let Some(path) = name.strip_prefix(STREAMING_ASSETS_DIRECTORY) {
+            let mut bytes = contents(&mut member, remaining)?;
+            let kept = if is_cue_sheet(path) {
+                &mut members.streaming
+            } else if deobfuscate(&mut bytes).is_ok() {
+                &mut members.bundles
+            } else {
+                continue;
+            };
+            if kept.insert(path.to_owned(), bytes).is_some() {
                 return Err(in_two_packages(path));
             }
         }

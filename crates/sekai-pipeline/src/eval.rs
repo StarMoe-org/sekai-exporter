@@ -12,7 +12,7 @@ use sekai_encode::{mp3, mp4};
 use sekai_format::asset::{FORMAT, VERSION};
 use sekai_format::{AssetDocument, AssetError, MemberFile, SourceObject, SourceResource};
 use sekai_unity::ClassLayouts;
-use sekai_unity::index::{ResourceFile, VersionIndex};
+use sekai_unity::index::{BundleIndex, ResourceFile, VersionIndex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -99,19 +99,34 @@ pub trait Fusion: Sync {
     fn extra(&self, asset: &Asset, document: &AssetDocument) -> io::Result<()>;
 }
 
-/// Where an asset starts in its bundle: an object, by its path ID, or a file, by its path.
+/// Where an asset starts in its bundle: an object, or a file that is not a serialized file.
 ///
-/// Stored, an object root is its path ID alone and a file root is `{"file": <path>}`.
+/// Stored, an object root is `{"path_id": <path ID>}`, with `"file": <serialized file>` before it
+/// when the bundle holds several serialized files ([`named_file`]), and a file root is
+/// `{"file": <path>}`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum RootKey {
-    /// An object, by its path ID.
-    Object(i64),
+    /// An object.
+    Object {
+        /// The serialized file that holds the object, when the bundle holds several.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
+        /// The path ID of the object.
+        path_id: i64,
+    },
     /// A file that is not a serialized file.
     File {
         /// The path of the file in its bundle.
         file: String,
     },
+}
+
+/// The serialized file `file` of `bundle` as documents, records and ledgers name an object of it:
+/// by its path when the bundle holds several serialized files, and not at all when it holds one,
+/// whose objects their path IDs alone tell apart.
+pub(crate) fn named_file(bundle: &BundleIndex, file: usize) -> Option<&str> {
+    (bundle.files.len() > 1).then(|| bundle.files[file].path.as_str())
 }
 
 /// A derivation to evaluate.
@@ -163,16 +178,6 @@ impl Subject<'_> {
         match self {
             Self::Object(closure) => closure[0].bundle,
             Self::File(root) => root.bundle,
-        }
-    }
-
-    /// The key of the root in its bundle.
-    pub(crate) fn key(&self) -> RootKey {
-        match self {
-            Self::Object(closure) => RootKey::Object(closure[0].path_id),
-            Self::File(root) => RootKey::File {
-                file: root.file.path.clone(),
-            },
         }
     }
 
@@ -514,6 +519,7 @@ fn build_document(
             let position = index.position(*id)?;
             Some(SourceObject {
                 bundle: bundle.name.clone(),
+                file: named_file(bundle, id.file).map(str::to_owned),
                 path_id: id.path_id,
                 class: bundle.files[id.file].objects[position].class.clone(),
             })

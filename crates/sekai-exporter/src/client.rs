@@ -28,7 +28,7 @@ struct Bundles(Vec<Held>);
 
 /// A bundle of a client package.
 struct Held {
-    name: &'static str,
+    name: String,
     bytes: Arc<Vec<u8>>,
     sha256: [u8; 32],
 }
@@ -36,9 +36,9 @@ struct Held {
 impl Held {
     fn new(bundle: PackageBundle) -> Self {
         Self {
+            sha256: Sha256::digest(bundle.bytes.as_slice()).into(),
             name: bundle.name,
-            sha256: Sha256::digest(&bundle.bytes).into(),
-            bytes: Arc::new(bundle.bytes),
+            bytes: bundle.bytes,
         }
     }
 }
@@ -52,7 +52,7 @@ impl Bundles {
     /// The manifest of the package: each of its bundles.
     fn manifest(&self) -> Vec<Entry> {
         let entry = |bundle: &Held| Entry {
-            name: bundle.name.to_owned(),
+            name: bundle.name.clone(),
             size: bundle.bytes.len() as u64,
             content: None,
             dependencies: Vec::new(),

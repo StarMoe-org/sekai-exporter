@@ -1001,20 +1001,30 @@ fn loose_objects_at_one_path_id_in_two_files_are_assets_of_their_own() {
 }
 
 #[test]
-fn loose_objects_that_share_a_name_are_left_unnamed() {
+fn objects_of_two_files_that_share_a_name_and_a_path_id_are_told_apart_by_their_file() {
     let root = scratch("loose-same");
     let inputs = Player(&[("CAB-a", "fixture_data"), ("CAB-b", "fixture_data")]);
     let converters: Vec<Box<dyn Converter>> = vec![Box::new(Named)];
     let records = MemoryUnitRecords::default();
     let (_, _, streamed) = streamed_reusing_with(&root, &loose_run(&inputs), &records, &converters);
-    assert!(streamed.evaluation.outputs.is_empty());
-    let unnamed: Vec<&str> = streamed
+    assert!(streamed.evaluation.unnamed.is_empty());
+    let store = LocalStore::open(&root).unwrap();
+    let named: Vec<(String, Option<String>)> = streamed
         .evaluation
-        .unnamed
+        .outputs
         .iter()
-        .map(|(l, _)| l.as_str())
+        .map(|output| {
+            let document = store.read(&output.document).unwrap();
+            let document = AssetDocument::from_bytes(&document).unwrap();
+            (output.name.clone(), document.sources[0].file.clone())
+        })
         .collect();
-    assert_eq!(unnamed, ["player/loose/AssetBundle/fixture_data"; 2]);
+    let name = "player/loose/AssetBundle/fixture_data";
+    let expected = [
+        (name.to_owned(), Some("CAB-a".to_owned())),
+        (format!("{name}@CAB-b:1"), Some("CAB-b".to_owned())),
+    ];
+    assert_eq!(named, expected);
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -16,14 +16,20 @@ const DATA: &str = "assets/bin/Data/";
 /// An entry of a container: its path, whether it is a serialized file, and its bytes.
 type Entry = (String, bool, Vec<u8>);
 
-fn fixture() -> Vec<u8> {
+/// The bytes of the fixture bundle `name`, whose `AssetBundle` object names it `name`.
+fn bundle_fixture(name: &str) -> Vec<u8> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sekai-unity/tests/fixtures/lz4/fixture_data");
+        .join("../sekai-unity/tests/fixtures/lz4")
+        .join(name);
     std::fs::read(path).unwrap()
 }
 
-fn entries(container: Vec<u8>) -> Vec<Entry> {
-    let source: Arc<dyn ByteSource> = Arc::new(container);
+fn fixture() -> Vec<u8> {
+    bundle_fixture("fixture_data")
+}
+
+fn entries(container: Arc<Vec<u8>>) -> Vec<Entry> {
+    let source: Arc<dyn ByteSource> = container;
     let bundle = Bundle::open(source, [0; 32]).unwrap();
     bundle
         .entries()
@@ -42,7 +48,7 @@ fn entries(container: Vec<u8>) -> Vec<Entry> {
 
 /// The bytes of a serialized file.
 fn serialized_file() -> Vec<u8> {
-    let (_, _, bytes) = entries(fixture())
+    let (_, _, bytes) = entries(Arc::new(fixture()))
         .into_iter()
         .find(|(_, serialized, _)| *serialized)
         .unwrap();
@@ -65,7 +71,7 @@ fn data(name: &str) -> String {
 }
 
 /// The player data of `package`, the first of its bundles.
-fn player(package: &[u8]) -> std::io::Result<Vec<u8>> {
+fn player(package: &[u8]) -> std::io::Result<Arc<Vec<u8>>> {
     let mut bundles = bundles(package)?;
     assert_eq!(bundles[0].name, PLAYER_BUNDLE);
     Ok(bundles.swap_remove(0).bytes)
@@ -74,7 +80,7 @@ fn player(package: &[u8]) -> std::io::Result<Vec<u8>> {
 #[test]
 fn a_container_gives_the_entries_of_the_player_bundle() {
     let apk = archive(&[(&data("data.unity3d"), &fixture())]);
-    assert_eq!(entries(player(&apk).unwrap()), entries(fixture()));
+    assert_eq!(entries(player(&apk).unwrap()), entries(Arc::new(fixture())));
 }
 
 #[test]
@@ -172,7 +178,7 @@ fn the_cue_sheets_of_the_streaming_assets_are_a_second_bundle() {
     let package = archive(&[("base.apk", &base), ("pack.apk", &pack)]);
 
     let mut bundles = bundles(&package).unwrap();
-    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name).collect();
+    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name.as_str()).collect();
     assert_eq!(names, [PLAYER_BUNDLE, STREAMING_ASSETS_BUNDLE]);
     let expected = [
         ("Menu.acb", b"cue sheet".as_slice()),
@@ -186,6 +192,54 @@ fn the_cue_sheets_of_the_streaming_assets_are_a_second_bundle() {
 fn a_package_without_cue_sheets_has_only_the_player_data() {
     let apk = archive(&[(&data("level0"), &serialized_file())]);
     let bundles = bundles(&apk).unwrap();
-    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name).collect();
+    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name.as_str()).collect();
     assert_eq!(names, [PLAYER_BUNDLE]);
+}
+
+/// `bundle` with the header of a downloaded bundle: a marker, then the first 128 bytes with five
+/// of every eight inverted.
+fn as_downloaded(bundle: &[u8]) -> Vec<u8> {
+    let inverted = bundle.iter().enumerate().map(|(i, &b)| {
+        let inverts = i < 128 && i % 8 < 5;
+        if inverts { !b } else { b }
+    });
+    [0x10, 0, 0, 0].into_iter().chain(inverted).collect()
+}
+
+#[test]
+fn the_unity_bundles_of_the_streaming_assets_are_bundles_under_their_own_names() {
+    let scene = bundle_fixture("fixture_scene");
+    let apk = archive(&[
+        (&data("level0"), &serialized_file()),
+        ("assets/Menu.acb", b"cue sheet"),
+        ("assets/data/9f/c3a1", &as_downloaded(&scene)),
+        ("assets/Font/font.ab", &fixture()),
+        ("assets/Font/readme.txt", b"text"),
+    ]);
+
+    let bundles = bundles(&apk).unwrap();
+    let names: Vec<_> = bundles.iter().map(|bundle| bundle.name.as_str()).collect();
+    let expected = [
+        PLAYER_BUNDLE,
+        STREAMING_ASSETS_BUNDLE,
+        "fixture_data",
+        "fixture_scene",
+    ];
+    assert_eq!(names, expected);
+    assert_eq!(
+        entries(bundles[2].bytes.clone()),
+        entries(Arc::new(fixture()))
+    );
+    assert_eq!(entries(bundles[3].bytes.clone()), entries(Arc::new(scene)));
+}
+
+#[test]
+fn two_bundles_of_one_name_are_an_error() {
+    let apk = archive(&[
+        (&data("level0"), &serialized_file()),
+        ("assets/Font/font.ab", &fixture()),
+        ("assets/Font/copy.ab", &as_downloaded(&fixture())),
+    ]);
+    let error = bundles(&apk).unwrap_err();
+    assert!(error.to_string().contains("fixture_data"), "{error}");
 }

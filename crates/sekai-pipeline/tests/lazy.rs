@@ -14,7 +14,9 @@ use sekai_convert::image::Texture;
 use sekai_format::AssetDocument;
 use sekai_pipeline::metrics::{NoRecorder, Recorder, Span};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
-use sekai_pipeline::{BundleInput, Lazy, MemoryDerivations, NoBundleIndexes, Options, Version};
+use sekai_pipeline::{
+    BundleInput, Lazy, MemoryDerivations, NoBundleIndexes, Options, RootKey, Version,
+};
 use sekai_unity::{ByteSource, Chunk, NoBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
 
@@ -191,9 +193,13 @@ fn an_object_is_requested_by_bundle_and_path_id() {
     let name = names(&lazy)[0].clone();
     let output = lazy.asset(&name).unwrap().unwrap();
     let document = AssetDocument::from_bytes(&memory.read(&output.document).unwrap()).unwrap();
-    let root = &document.sources[0];
-    assert_eq!(lazy.object(&root.bundle, root.path_id).unwrap(), [output]);
-    assert!(lazy.object("no bundle", 1).unwrap().is_empty());
+    let source = &document.sources[0];
+    let root = RootKey::Object {
+        file: source.file.clone(),
+        path_id: source.path_id,
+    };
+    assert_eq!(lazy.rooted_at(&source.bundle, &root).unwrap(), [output]);
+    assert!(lazy.rooted_at("no bundle", &root).unwrap().is_empty());
 }
 
 #[derive(Default)]

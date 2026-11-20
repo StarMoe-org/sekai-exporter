@@ -13,7 +13,7 @@ There is one **store**: a content-addressed place for bytes, either a local dire
 
 ## Semantics travel with the output
 
-- **Asset documents.** Each asset is published with a document, `<logical path>.asset.json`, which is itself an object in the store. It records the [asset form and its version](spec/asset-documents.md), the source objects as `(bundle, path ID, class)`, the member files and the role of each one (for example the base colour texture of a material, or the third cue of an audio object), and the other assets it refers to.
+- **Asset documents.** Each asset is published with a document, `<logical path>.asset.json`, which is itself an object in the store. It records the [asset form and its version](spec/asset-documents.md), the source objects as `(bundle, path ID, class)`, with the serialized file in a bundle that holds several, the member files and the role of each one (for example the base colour texture of a material, or the third cue of an audio object), and the other assets it refers to.
 - **Index entries carry semantics.** Each entry of an index shard gives the name, hash, size, media type, owning asset and role of a file, not only a name and a hash.
 - **Object documents** (`<bundle>/_objects.json`) give each object's class, fields and resolved references. The `objects` subcommand writes them, at `<output>/<bundle>/_objects.json` for each bundle file directly inside its input directory. `update` and `export` do not write them.
 
@@ -47,7 +47,7 @@ The consistency this gives is bounded as follows. Each file is replaced atomical
 
 ## The client view
 
-The `client` view holds the assets of a client package, which the client loads from the package instead of downloading them: from its player data, images, fonts and the prefabs of the interface it shows around the scenes of a story; from its streaming assets, cue sheets such as the sounds of its menus and the music of its title screen. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
+The `client` view holds the assets of a client package, which the client loads from the package instead of downloading them: from its player data, images, fonts and the prefabs of the interface it shows around the scenes of a story; from its streaming assets, cue sheets such as the sounds of its menus and the music of its title screen, and the Unity bundles it ships, such as fonts and the downloaded bundles it holds ahead of a download. `update --client` publishes it in the canonical layout with a pointer at `<region>/client`, under the version the [package](sources.md#region-configuration) names, and keeps its state under `<region>-client`, apart from that of the region's assets.
 
 ## The publication protocol
 
@@ -106,7 +106,7 @@ A run knows which objects the bucket holds from the records it reads and the upl
 
 A record pack is gzipped JSON lines: the header `{"format":"record-pack","version":1}`, then one record per line, `{"unit":"<key>","record":<unit record>}` or `{"derivation":"<fingerprint>","record":<derivation record>}`, with keys and fingerprints in lowercase hexadecimal. A derivation record is `{"document":{"key":"<sha256>.<extension>","size":<bytes>}}`, or `"nothing"` for a root that holds no asset of its form. The unit records come first, then the derivation records, each in the order of their keys, with one record of a subject; the lines after the header hold at most 8 MiB unless one record is larger. The same records give the same bytes, and a pack is never changed once written. When packs hold records of one subject, a run takes the one in the pack whose name comes first.
 
-A unit record lists each asset of the unit with the logical path of its root and `path_id`, which is the path ID of the root object, or `{"file": "<path>"}` for an asset whose root is a file of the bundle; each root left unnamed is a pair of its logical path and the same value.
+A unit record lists each asset of the unit with the logical path of its root and `root`, which is `{"path_id": <path ID>}` for an asset whose root is an object, with `"file": "<serialized file>"` before the path ID in a bundle that holds several serialized files, or `{"file": "<path>"}` for an asset whose root is a file of the bundle that is not a serialized file; each root left unnamed is a pair of its logical path and the same value.
 
 The state is split into content-addressed chunks, so a run writes only the chunks its changes fall in. While it evaluates, a run uploads the output of each asset, its asset document and the members it names, and records the derivation once they are at the site. It writes the records in a pack once they fill one or five minutes after its last pack, so a run that stops leaves the derivations of its packs to the next one. Then it writes the other new objects, such as those of the views, its last pack with the unit records, the state and then the pointers. A record is written only once the objects it names are at the site. When the revisions in the state are not those of the current pointers, the run publishes both views whole and keeps only the bundles of the state.
 

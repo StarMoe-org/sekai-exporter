@@ -50,7 +50,7 @@ use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Un
 /// The revision of how units are evaluated and recorded, which is part of every unit key. It also
 /// changes when a rule that picks the roots of a form picks other objects, since a version of a
 /// converter does not cover its rule.
-const REVISION: &str = "unit 3";
+const REVISION: &str = "unit 4";
 
 /// The key of a unit: the SHA-256 of what its result follows from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -565,7 +565,6 @@ struct RecordedAsset {
     document: String,
     error: Option<String>,
     logical: String,
-    #[serde(rename = "path_id")]
     root: RootKey,
 }
 
@@ -718,7 +717,8 @@ mod tests {
     /// A record of a unit whose roots are objects, as it is stored.
     const OBJECT_RECORD: &str = concat!(
         r#"{"scanned":["audio"],"forms":["audio 5"],"assets":[{"name":"a/b","form":"audio","#,
-        r#""document":"d","error":null,"logical":"a/b","path_id":-7}],"unnamed":[["a/c",9]],"#,
+        r#""document":"d","error":null,"logical":"a/b","root":{"path_id":-7}}],"#,
+        r#""unnamed":[["a/c",{"file":"level0","path_id":9}]],"#,
         r#""outside":[]}"#,
     );
 
@@ -756,8 +756,16 @@ mod tests {
     #[test]
     fn a_record_of_object_roots_reads_and_writes_as_it_is_stored() {
         let record = Record::read(OBJECT_RECORD.as_bytes()).unwrap();
-        assert_eq!(record.assets[0].root, RootKey::Object(-7));
-        assert_eq!(record.unnamed, [("a/c".to_owned(), RootKey::Object(9))]);
+        let alone = RootKey::Object {
+            file: None,
+            path_id: -7,
+        };
+        assert_eq!(record.assets[0].root, alone);
+        let in_file = RootKey::Object {
+            file: Some("level0".to_owned()),
+            path_id: 9,
+        };
+        assert_eq!(record.unnamed, [("a/c".to_owned(), in_file)]);
         assert_eq!(record.bytes().unwrap(), OBJECT_RECORD.as_bytes());
     }
 
@@ -780,7 +788,7 @@ mod tests {
         };
         let bytes = record.bytes().unwrap();
         let text = String::from_utf8(bytes.clone()).unwrap();
-        assert!(text.contains(r#""path_id":{"file":"x.acb"}"#), "{text}");
+        assert!(text.contains(r#""root":{"file":"x.acb"}"#), "{text}");
         assert!(text.contains(r#"["b/y.acb",{"file":"x.acb"}]"#), "{text}");
         assert_eq!(Record::read(&bytes), Some(record));
     }

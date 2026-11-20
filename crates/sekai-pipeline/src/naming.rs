@@ -2,24 +2,41 @@
 
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 
-const RESOURCES: &str = "assets/sekai/assetbundle/resources/";
+/// The resource directories of the game's downloaded bundles. Below each lies a directory of the
+/// download category, and below that the path an asset is loaded by.
+const BUNDLE_RESOURCES: [&str; 2] = [
+    "assets/sekai/assetbundle/resources/",
+    "assets/sekai/builtinassets/assetbundle/resources/",
+];
+/// The resource directory of the assets built into the client. As in a Unity `Resources` folder,
+/// the path below it is the path an asset is loaded by.
+const BUILT_IN_RESOURCES: &str = "assets/sekai/builtinassets/resources/";
 
 const SPRITE: i32 = 213;
 const TEXTURE_2D: i32 = 28;
 
-/// The logical path of a container path: without the resources directory and its category, and
-/// without the extension.
+/// The logical path of a container path: the path its asset is loaded by below its resource
+/// directory, without the extension.
 pub fn logical_path(container_path: &str) -> &str {
-    let path = container_path
-        .strip_prefix(RESOURCES)
-        .and_then(|rest| rest.split_once('/'))
-        .map_or(container_path, |(_, rest)| rest);
+    let path = load_path(container_path);
     match path.rfind('.') {
         Some(dot) if !path[dot..].contains('/') => &path[..dot],
         _ => path,
     }
+}
+
+/// The path below the resource directory of `container_path`, and below the category of a
+/// downloaded bundle's resources; the whole path when it lies in no resource directory.
+fn load_path(container_path: &str) -> &str {
+    let in_bundle = BUNDLE_RESOURCES
+        .iter()
+        .find_map(|directory| container_path.strip_prefix(directory))
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, path)| path);
+    in_bundle
+        .or_else(|| container_path.strip_prefix(BUILT_IN_RESOURCES))
+        .unwrap_or(container_path)
 }
 
 /// The path a root of `bundle` with the logical path `logical` is named by: the logical path when
@@ -41,7 +58,7 @@ pub fn loose_path(class: &str, name: Option<&str>, classes: &[&str]) -> Option<S
         .then(|| format!("loose/{class}/{name}"))
 }
 
-/// A root that needs a name.
+/// A root of a bundle that needs a name.
 #[derive(Debug, Clone, Copy)]
 pub struct Candidate<'a> {
     /// The logical path of the root.
@@ -50,8 +67,6 @@ pub struct Candidate<'a> {
     pub form: &'a str,
     /// What the root is in its bundle.
     pub origin: Origin<'a>,
-    /// The bundle name of the root.
-    pub bundle: &'a str,
 }
 
 /// What a root is in its bundle.
@@ -63,7 +78,9 @@ pub enum Origin<'a> {
         class_id: i32,
         /// The class name.
         class: &'a str,
-        /// The path ID.
+        /// The serialized file that holds the object, when the bundle holds several.
+        file: Option<&'a str>,
+        /// The path ID of the object in its file.
         path_id: i64,
     },
     /// A file that is not a serialized file, which its logical path names.
@@ -94,78 +111,84 @@ impl Origin<'_> {
         }
     }
 
-    /// The path ID of an object. A file has none: in a bundle, its logical path tells it apart.
-    fn path_id(&self) -> Option<i64> {
+    /// An object by its path ID and its file. A file has none: in a bundle, its logical path tells
+    /// it apart.
+    fn object(&self) -> Option<(i64, Option<&str>)> {
         match *self {
-            Self::Object { path_id, .. } => Some(path_id),
+            Self::Object { path_id, file, .. } => Some((path_id, file)),
             Self::File => None,
         }
     }
 }
 
-/// The path ID of an object, or `file`.
-impl fmt::Display for Origin<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.path_id() {
-            Some(path_id) => write!(f, "{path_id}"),
-            None => f.write_str(self.class()),
-        }
-    }
-}
-
-/// The name of each candidate, in the order of `candidates`. `None` marks a candidate that
-/// cannot be told apart from another one: same logical path, class, path ID and form, or the
-/// same file and form.
+/// The name of each root of one bundle, in the order of `candidates`. Roots that share a logical
+/// path are told apart by class, then by object, then by form. `None` marks a candidate whose name
+/// another candidate would receive as well.
 pub fn assign(candidates: &[Candidate<'_>]) -> Vec<Option<String>> {
     let mut groups: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for (i, candidate) in candidates.iter().enumerate() {
         groups.entry(candidate.logical).or_default().push(i);
     }
-    let mut names = vec![None; candidates.len()];
+    let mut names = vec![String::new(); candidates.len()];
     for (logical, mut members) in groups {
         members.sort_by_key(|&i| {
             let c = &candidates[i];
-            (c.origin.rank(), c.bundle, c.origin.path_id(), c.form)
+            (c.origin.rank(), c.origin.object(), c.form)
         });
         let rank = |i: usize| candidates[i].origin.rank();
-        let classes = members.chunk_by(|&a, &b| rank(a) == rank(b));
-        for (position, class) in classes.enumerate() {
-            let base = if position == 0 {
-                logical.to_owned()
-            } else {
-                format!("{logical}@{}", candidates[class[0]].origin.class())
+        for (position, class) in members.chunk_by(|&a, &b| rank(a) == rank(b)).enumerate() {
+            let base = match position {
+                0 => logical.to_owned(),
+                _ => format!("{logical}@{}", candidates[class[0]].origin.class()),
             };
-            let mut uses: HashMap<(Option<i64>, &str), u32> = HashMap::new();
-            for &i in class {
-                let key = (candidates[i].origin.path_id(), candidates[i].form);
-                *uses.entry(key).or_default() += 1;
-            }
-            let objects = class.chunk_by(|&a, &b| {
-                let (ca, cb) = (&candidates[a], &candidates[b]);
-                (ca.bundle, ca.origin.path_id()) == (cb.bundle, cb.origin.path_id())
-            });
-            for (order, object) in objects.enumerate() {
-                let origin = candidates[object[0]].origin;
-                let with_id = if order == 0 {
-                    base.clone()
-                } else {
-                    format!("{base}@{origin}")
-                };
-                for (form_order, &i) in object.iter().enumerate() {
-                    let form = candidates[i].form;
-                    if uses[&(origin.path_id(), form)] > 1 {
-                        continue;
-                    }
-                    names[i] = Some(if form_order == 0 {
-                        with_id.clone()
-                    } else {
-                        format!("{with_id}@{form}")
-                    });
-                }
-            }
+            name_class(candidates, class, &base, &mut names);
         }
     }
+    unique(names)
+}
+
+/// Names the roots `class` of `candidates`, which share a logical path and a class, after `base`:
+/// each object but the first takes `@<path ID>`, or `@<file>:<path ID>` when another object of the
+/// class has the same path ID, and each form of an object but the first in name order takes
+/// `@<form>`.
+fn name_class(candidates: &[Candidate<'_>], class: &[usize], base: &str, names: &mut [String]) {
+    let object = |i: usize| candidates[i].origin.object();
+    let objects: Vec<&[usize]> = class.chunk_by(|&a, &b| object(a) == object(b)).collect();
+    let mut objects_of: HashMap<i64, usize> = HashMap::new();
+    for (path_id, _) in objects.iter().filter_map(|roots| object(roots[0])) {
+        *objects_of.entry(path_id).or_default() += 1;
+    }
+    for (order, roots) in objects.iter().enumerate() {
+        let name = match object(roots[0]) {
+            Some((path_id, Some(file))) if order > 0 && objects_of[&path_id] > 1 => {
+                format!("{base}@{file}:{path_id}")
+            }
+            Some((path_id, _)) if order > 0 => format!("{base}@{path_id}"),
+            _ => base.to_owned(),
+        };
+        let first_form = candidates[roots[0]].form;
+        for &i in *roots {
+            names[i] = match candidates[i].form {
+                form if form == first_form => name.clone(),
+                form => format!("{name}@{form}"),
+            };
+        }
+    }
+}
+
+/// Each of `names` that only one candidate receives: a name that several would receive tells none
+/// of them apart.
+fn unique(names: Vec<String>) -> Vec<Option<String>> {
+    let mut uses: HashMap<&str, usize> = HashMap::new();
+    for name in &names {
+        *uses.entry(name).or_default() += 1;
+    }
+    let once: Vec<bool> = names.iter().map(|name| uses[name.as_str()] == 1).collect();
     names
+        .into_iter()
+        .zip(once)
+        .map(|(name, once)| once.then_some(name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -184,18 +207,17 @@ mod tests {
             origin: Origin::Object {
                 class_id,
                 class,
+                file: None,
                 path_id,
             },
-            bundle: "b",
         }
     }
 
-    fn file(logical: &'static str, bundle: &'static str) -> Candidate<'static> {
+    fn file(logical: &'static str) -> Candidate<'static> {
         Candidate {
             logical,
             form: "form",
             origin: Origin::File,
-            bundle,
         }
     }
 
@@ -214,6 +236,22 @@ mod tests {
         );
         assert_eq!(logical_path("other/a.b/c"), "other/a.b/c");
         assert_eq!(logical_path("a/b.acb.bytes"), "a/b.acb");
+    }
+
+    #[test]
+    fn the_resources_built_into_the_client_are_named_by_their_load_path() {
+        let dir = "assets/sekai/builtinassets/";
+        assert_eq!(
+            logical_path(&format!("{dir}resources/font/a.otf")),
+            "font/a"
+        );
+        let shader = format!("{dir}assetbundle/resources/ondemand/shader/live/b.shader");
+        assert_eq!(logical_path(&shader), "shader/live/b");
+        let uncategorised = "assets/sekai/assetbundle/resources/c.png";
+        assert_eq!(
+            logical_path(uncategorised),
+            "assets/sekai/assetbundle/resources/c"
+        );
     }
 
     #[test]
@@ -265,16 +303,22 @@ mod tests {
         );
     }
 
+    /// `candidate` in the serialized file `name` of a bundle that holds several.
+    fn in_file(mut candidate: Candidate<'static>, name: &'static str) -> Candidate<'static> {
+        if let Origin::Object { file, .. } = &mut candidate.origin {
+            *file = Some(name);
+        }
+        candidate
+    }
+
     #[test]
-    fn a_shared_path_id_has_no_name() {
-        let mut other = candidate("a", "Sprite", 3);
-        other.bundle = "c";
+    fn objects_of_two_files_with_one_path_id_take_their_file() {
         let c = [
-            candidate("a", "Sprite", 3),
-            other,
-            candidate("a", "Sprite", 8),
+            in_file(candidate("a", "Sprite", 3), "g"),
+            in_file(candidate("a", "Sprite", 8), "g"),
+            in_file(candidate("a", "Sprite", 3), "f"),
         ];
-        assert_eq!(names(&c), [None, None, Some("a@8")]);
+        assert_eq!(names(&c), [Some("a@g:3"), Some("a@8"), Some("a")]);
     }
 
     #[test]
@@ -287,18 +331,14 @@ mod tests {
 
     #[test]
     fn a_file_keeps_its_logical_path_and_comes_after_the_objects() {
-        let c = [
-            file("a", "b"),
-            candidate("a", "Mesh", 1),
-            file("x.acb", "b"),
-        ];
+        let c = [file("a"), candidate("a", "Mesh", 1), file("x.acb")];
         assert_eq!(names(&c), [Some("a@file"), Some("a"), Some("x.acb")]);
     }
 
     #[test]
-    fn files_of_two_bundles_under_one_logical_path_have_no_name() {
-        let c = [file("a", "c"), file("a", "b")];
-        assert_eq!(names(&c), [None, None]);
+    fn a_name_that_two_roots_would_receive_is_given_to_neither() {
+        let c = [file("a"), file("a"), candidate("a", "Mesh", 1)];
+        assert_eq!(names(&c), [None, None, Some("a")]);
     }
 
     #[test]

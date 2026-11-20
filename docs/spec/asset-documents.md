@@ -37,7 +37,7 @@ One document is written per asset, at `<name>.asset.json`, and is itself an obje
 | `name` | The name of the asset: its logical path and any suffix assigned by the [naming rules](../architecture.md#identity) |
 | `form`, `form_version` | The asset form and its version. Each form has a specification in this directory |
 | `fingerprint` | The [fingerprint](../pipeline.md#invariants) of the asset, as lowercase hexadecimal |
-| `sources` | The objects the conversion read: the root first, then the others ordered by bundle and path ID. `path_id` is a decimal string, as in [object documents](object-documents.md). Empty for an asset whose root is a file of a bundle |
+| `sources` | The objects the conversion read: the root first, then the others ordered by bundle, serialized file and path ID. `path_id` is a decimal string, as in [object documents](object-documents.md). `file`, the serialized file that holds the object, is present only in a bundle that holds several serialized files, such as the player data of a client package, where path IDs tell apart only the objects of one file. Empty for an asset whose root is a file of a bundle |
 | `resources` | Present only when the conversion read resource files: `{ "bundle": "…", "file": "…" }`, ordered by bundle and file. For an asset whose root is a file of a bundle, that file alone |
 | `members` | The files of the asset, in the order the form defines. `role` is defined by the form and is unique within the asset. `sha256` names the file in the store. `size` is in bytes |
 | `references` | The names of other assets this asset refers to, in ascending order |

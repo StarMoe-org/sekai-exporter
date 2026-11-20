@@ -1,7 +1,9 @@
 //! Watching a run: CPU and memory samples, and the spans of the evaluator.
 //!
-//! A sample counts the run's own process and, apart, the encoder programs it started. A run writes one JSON document per line to `metrics.jsonl` and shows a status line on standard
-//! error. Nothing here reaches the store or any published file.
+//! A sample counts the run's own process and, apart, the encoder programs it started. A run
+//! writes one JSON document per line to `metrics.jsonl` and shows a status line on standard
+//! error, with how many conversions, encodings, transforms and stores have ended so far. Nothing here
+//! reaches the store or any published file.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -146,7 +148,7 @@ impl Monitor {
             samples += 1;
             if samples.is_multiple_of(STATUS_EVERY) {
                 eprintln!(
-                    "[{:>6}s] cpu {:.1}+{:.1} cores (machine {:.0}%)  memory {:.2}+{:.2} GiB (machine {:.1}/{:.1} GiB)",
+                    "[{:>6}s] cpu {:.1}+{:.1} cores (machine {:.0}%)  memory {:.2}+{:.2} GiB (machine {:.1}/{:.1} GiB){}",
                     self.start.elapsed().as_secs(),
                     sample.cores,
                     sample.child_cores,
@@ -155,10 +157,26 @@ impl Monitor {
                     sample.child_rss as f64 / GIB,
                     sample.system_used as f64 / GIB,
                     sample.system_total as f64 / GIB,
+                    self.ended(),
                 );
             }
         }
         peak
+    }
+
+    /// How many spans of each stage of work on derivations have ended, such as
+    /// `  convert 120  encode 40`; nothing before the first.
+    fn ended(&self) -> String {
+        let mut ended: BTreeMap<&str, u64> = BTreeMap::new();
+        for ((stage, label), total) in self.totals.lock().unwrap().iter() {
+            if derivation_kind(stage, label).is_some() {
+                *ended.entry(stage).or_default() += total.count;
+            }
+        }
+        ended
+            .iter()
+            .map(|(stage, count)| format!("  {stage} {count}"))
+            .collect()
     }
 
     fn finish(&self, peak: &Peak) -> io::Result<()> {

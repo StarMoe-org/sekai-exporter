@@ -157,6 +157,24 @@ impl Bucket {
     pub(crate) fn delete(&self, name: &str) -> Result<(), String> {
         self.s3.delete(name).map_err(|e| e.to_string())
     }
+
+    /// Runs `work` while this run holds the lease of the bucket's site as one that does
+    /// `operation`, waiting while another run holds it.
+    pub(crate) fn while_held<T>(
+        &self,
+        operation: &str,
+        work: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        let mut waiting = |holder: &sekai_publish::lease::Holder| {
+            eprintln!(
+                "the site is held by {} on {} since {}; waiting",
+                holder.operation, holder.host, holder.since
+            );
+        };
+        self.s3
+            .while_held(operation, &mut waiting, work)
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// The state files of the bucket, under its `state/`.
@@ -235,6 +253,14 @@ impl Bucket {
     }
 
     pub(crate) fn delete(&self, _name: &str) -> Result<(), String> {
+        match *self {}
+    }
+
+    pub(crate) fn while_held<T>(
+        &self,
+        _operation: &str,
+        _work: impl FnOnce() -> T,
+    ) -> Result<T, String> {
         match *self {}
     }
 }

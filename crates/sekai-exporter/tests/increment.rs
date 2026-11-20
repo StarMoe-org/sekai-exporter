@@ -446,6 +446,8 @@ mod bucket {
     const STATE: &str = "out/state/";
     /// The record packs.
     const PACKS: &str = "out/state/records/packs/";
+    /// The lease of the site, which every update and gc holds while it runs.
+    const LEASE: &str = "out/state/lease.json";
     /// The pointers of the views.
     const POINTERS: &str = "out/published/";
 
@@ -483,10 +485,20 @@ mod bucket {
     }
 
     /// What `run` gave, and the requests `bucket` answered while it ran.
+    /// What `run` gave, and the requests it made of `bucket` between taking the lease of the
+    /// site, its first request, and giving it up, its last.
     fn answered<T>(bucket: &Server, run: impl FnOnce() -> T) -> (T, Vec<Logged>) {
         let before = bucket.requests().len();
         let given = run();
-        (given, bucket.requests().split_off(before))
+        let mut requests = bucket.requests().split_off(before);
+        let lease = |request: Option<&Logged>, operation| {
+            request.is_some_and(|r| r.operation == operation && r.name == LEASE && r.status < 300)
+        };
+        assert!(lease(requests.first(), Operation::Put), "{requests:?}");
+        assert!(lease(requests.last(), Operation::Delete), "{requests:?}");
+        requests.pop();
+        requests.remove(0);
+        (given, requests)
     }
 
     /// The names of the objects `bucket` holds under `prefix`.
@@ -645,7 +657,8 @@ mod bucket {
         assert_eq!(once.len(), accepted.len(), "uploaded twice: {accepted:?}");
 
         let bucket = Server::start();
-        bucket.refuse_after(Some(derived));
+        // The lease is the first upload the bucket accepts.
+        bucket.refuse_after(Some(derived + 1));
         let stopped = scratch.attempt(&["update", "r"], "stopped", Some(&bucket), &[]);
         assert!(!stopped.status.success());
         assert_eq!(pointer(&bucket, "canonical"), None);

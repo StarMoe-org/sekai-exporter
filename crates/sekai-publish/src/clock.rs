@@ -57,6 +57,34 @@ impl Utc {
         })
     }
 
+    /// The time that the HTTP date `text` names, `Fri, 20 Nov 2026 17:15:32 GMT`, as the `Date` and
+    /// `Last-Modified` headers give times. `None` for any other text, or a time before 1970.
+    #[cfg(feature = "s3")]
+    pub(crate) fn parse_http(text: &str) -> Option<Self> {
+        const MONTHS: [&str; 12] = [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ];
+        let (_weekday, rest) = text.split_once(", ")?;
+        let [day, month, year, time, zone] = rest.split(' ').collect::<Vec<_>>().try_into().ok()?;
+        let month = MONTHS.iter().position(|name| *name == month)? as u64 + 1;
+        let [hour, minute, second] = three(time, ':')?;
+        let (year, day): (u64, u64) = (year.parse().ok()?, day.parse().ok()?);
+        let valid = zone == "GMT"
+            && year >= 1970
+            && (1..=31).contains(&day)
+            && hour < 24
+            && minute < 60
+            && second < 60;
+        valid.then_some(Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        })
+    }
+
     /// The time as a system time.
     #[cfg(feature = "s3")]
     pub(crate) fn time(&self) -> SystemTime {
@@ -131,6 +159,22 @@ mod tests {
         assert_eq!(at(0), "1970-01-01T00:00:00Z");
         assert_eq!(at(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(at(1_735_689_599), "2024-12-31T23:59:59Z");
+    }
+
+    #[cfg(feature = "s3")]
+    #[test]
+    fn http_dates_are_read() {
+        let at = |text| Utc::parse_http(text).map(|time| time.rfc3339());
+        assert_eq!(
+            at("Fri, 20 Nov 2026 17:15:32 GMT").as_deref(),
+            Some("2026-11-20T17:15:32Z")
+        );
+        assert_eq!(
+            at("Thu, 01 Jan 1970 00:00:00 GMT").as_deref(),
+            Some("1970-01-01T00:00:00Z")
+        );
+        assert_eq!(at("Fri, 20 Nov 2026 17:15:32 UTC"), None);
+        assert_eq!(at("2026-11-20T17:15:32Z"), None);
     }
 
     #[cfg(feature = "s3")]

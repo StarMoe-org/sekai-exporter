@@ -551,13 +551,16 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
-    let held = holdings_before(options, &site, monitor)?;
-    let mut succeeded = true;
-    for run in options.runs() {
-        let region = region_of(&run, &config)?;
-        succeeded &= export_version(&run, region, &site, &held, monitor)?.succeeded();
-    }
-    Ok(succeeded)
+    let operation = format!("update {}", options.regions.join(" "));
+    site.while_held(&operation, || {
+        let held = holdings_before(options, &site, monitor)?;
+        let mut succeeded = true;
+        for run in options.runs() {
+            let region = region_of(&run, &config)?;
+            succeeded &= export_version(&run, region, &site, &held, monitor)?.succeeded();
+        }
+        Ok(succeeded)
+    })?
 }
 
 /// Exports the current version of `region` as `run` says, and publishes it at `site`, whose

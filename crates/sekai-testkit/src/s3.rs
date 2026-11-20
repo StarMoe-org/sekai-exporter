@@ -4,12 +4,15 @@
 //! The bucket is served at `http://<host>:<port>/bucket`, path-style, for the access key
 //! [`ACCESS_KEY`] with the secret [`SECRET_KEY`], signed for [`REGION`]. It knows `HEAD`, `GET`,
 //! `ListObjectsV2` in pages of two names, `PUT`, `DELETE` and multipart uploads. Listings give
-//! every object the time [`MODIFIED`], so every object is older than a day.
+//! every object the time [`MODIFIED`], so every object is older than a day. `PUT` and `DELETE`
+//! of an object follow `If-None-Match: *` and `If-Match`, with entity tags made from the bytes;
+//! `GET` and `HEAD` give the entity tag, `Last-Modified` and `Date`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
@@ -99,6 +102,8 @@ struct Upload {
 #[derive(Default)]
 struct State {
     objects: Mutex<BTreeMap<String, Vec<u8>>>,
+    /// When each object was written.
+    modified: Mutex<BTreeMap<String, SystemTime>>,
     cache_controls: Mutex<BTreeMap<String, String>>,
     /// The uploads and parts accepted.
     accepted: AtomicUsize,
@@ -171,14 +176,21 @@ impl Server {
         names.cloned().collect()
     }
 
-    /// Holds `bytes` as the object `name`, as if another client had uploaded them.
+    /// Holds `bytes` as the object `name`, as if another client had uploaded them now.
     pub fn insert(&self, name: &str, bytes: Vec<u8>) {
-        lock(&self.state.objects).insert(name.to_owned(), bytes);
+        self.state.keep(name.to_owned(), bytes, None);
     }
 
     /// Loses the object `name`.
     pub fn remove(&self, name: &str) {
-        lock(&self.state.objects).remove(name);
+        self.state.forget(name);
+    }
+
+    /// Moves the time the object `name` was written back by `by`.
+    pub fn backdate(&self, name: &str, by: Duration) {
+        if let Some(modified) = lock(&self.state.modified).get_mut(name) {
+            *modified -= by;
+        }
     }
 
     /// Refuses uploads of objects other than pointers once `uploads` have been accepted, or
@@ -260,11 +272,15 @@ impl State {
         if uploading && digest.is_none_or(|digest| *digest != sha256(&request.body)) {
             return Response::new(400, "");
         }
+        if matches!(operation, Operation::Put | Operation::Delete) && !self.allows(name, request) {
+            return Response::new(412, "");
+        }
         let id = request.query.get("uploadId").map(String::as_str);
         match (operation, id) {
             (Operation::Head | Operation::Get, _) => match lock(&self.objects).get(name) {
                 Some(bytes) => Response {
                     cut: operation == Operation::Get && self.cuts(),
+                    headers: self.described(name, bytes),
                     ..Response::new(200, bytes.clone())
                 },
                 None => Response::new(404, ""),
@@ -276,16 +292,19 @@ impl State {
             }
             (Operation::Put, _) => {
                 self.accepted.fetch_add(1, Ordering::SeqCst);
+                let tag = entity_tag(&request.body);
                 self.keep(
                     name.to_owned(),
                     request.body.clone(),
                     cache_control(request),
                 );
-                Response::new(200, "")
+                Response {
+                    headers: format!("etag: {tag}\r\n"),
+                    ..Response::new(200, "")
+                }
             }
             (Operation::Delete, _) => {
-                lock(&self.objects).remove(name);
-                lock(&self.cache_controls).remove(name);
+                self.forget(name);
                 Response::new(204, "")
             }
             (Operation::StartUpload, _) => Response::new(200, self.start_upload(name, request)),
@@ -331,7 +350,43 @@ impl State {
         if let Some(cache_control) = cache_control {
             lock(&self.cache_controls).insert(name.clone(), cache_control);
         }
+        lock(&self.modified).insert(name.clone(), SystemTime::now());
         lock(&self.objects).insert(name, bytes);
+    }
+
+    fn forget(&self, name: &str) {
+        lock(&self.objects).remove(name);
+        lock(&self.cache_controls).remove(name);
+        lock(&self.modified).remove(name);
+    }
+
+    /// Whether the conditions of `request` hold for the object `name`.
+    fn allows(&self, name: &str, request: &Request) -> bool {
+        let objects = lock(&self.objects);
+        let current = objects.get(name).map(|bytes| entity_tag(bytes));
+        let absent = request
+            .headers
+            .get("if-none-match")
+            .is_none_or(|_| current.is_none());
+        let matches = request
+            .headers
+            .get("if-match")
+            .is_none_or(|tag| current.as_ref() == Some(tag));
+        absent && matches
+    }
+
+    /// The headers that describe the object `name` with `bytes`.
+    fn described(&self, name: &str, bytes: &[u8]) -> String {
+        let modified = lock(&self.modified)
+            .get(name)
+            .copied()
+            .unwrap_or(UNIX_EPOCH);
+        format!(
+            "etag: {}\r\nlast-modified: {}\r\ndate: {}\r\n",
+            entity_tag(bytes),
+            http_date(modified),
+            http_date(SystemTime::now()),
+        )
     }
 
     /// A `ListObjectsV2` page of the names under `prefix` after the continuation token `after`.
@@ -416,6 +471,48 @@ impl State {
 
 fn cache_control(request: &Request) -> Option<String> {
     request.headers.get("cache-control").cloned()
+}
+
+/// The entity tag of an object with `bytes`.
+fn entity_tag(bytes: &[u8]) -> String {
+    format!("\"{}\"", &sha256(bytes)[..32])
+}
+
+/// `time` as an HTTP date, such as `Thu, 01 Jan 1970 00:00:00 GMT`.
+fn http_date(time: SystemTime) -> String {
+    const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let seconds = time.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let days = seconds / 86_400;
+    let (year, month, day) = civil(days);
+    let of_day = seconds % 86_400;
+    format!(
+        "{}, {day:02} {} {year} {:02}:{:02}:{:02} GMT",
+        DAYS[(days % 7) as usize],
+        MONTHS[(month - 1) as usize],
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60,
+    )
+}
+
+/// The date `days` days after 1970-01-01, as year, month and day.
+fn civil(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let (era, day_of_era) = (z / 146_097, z % 146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    (year_of_era + era * 400 + u64::from(month <= 2), month, day)
 }
 
 fn hex(bytes: &[u8]) -> String {

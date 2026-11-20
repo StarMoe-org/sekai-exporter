@@ -53,6 +53,20 @@ impl<'a> Site<'a> {
         }
     }
 
+    /// Runs `work` while this run holds the lease of the site as one that does `operation`, so
+    /// that one run at a time writes the state and pointers of a bucket. The output directory
+    /// belongs to the run that has it.
+    pub(crate) fn while_held<T>(
+        &self,
+        operation: &str,
+        work: impl FnOnce() -> T,
+    ) -> Result<T, String> {
+        match self {
+            Self::Local { .. } => Ok(work()),
+            Self::Bucket(bucket) => bucket.while_held(operation, work),
+        }
+    }
+
     /// The state files of the site.
     pub(crate) fn files(&self) -> &dyn StateFiles {
         match self {

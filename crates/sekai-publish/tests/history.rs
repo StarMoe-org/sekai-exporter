@@ -97,7 +97,7 @@ fn publish(
         layout: Layout::Paths,
         published_at: Some(time),
     };
-    let publication = patch::apply(store, store, &edition, previous, change, versions);
+    let publication = patch::apply(store, store, &edition, previous, change, versions, 4);
     publication.unwrap().pointer
 }
 

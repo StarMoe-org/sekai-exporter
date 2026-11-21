@@ -1164,6 +1164,7 @@ impl Context<'_> {
             previous,
             change,
             &versions,
+            self.requests(),
         );
         applied.map_err(|e| e.to_string())
     }

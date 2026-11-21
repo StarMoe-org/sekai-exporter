@@ -38,6 +38,8 @@ mod export;
 mod gc;
 mod monitor;
 mod objects;
+#[cfg(feature = "client")]
+mod script_table;
 #[cfg(feature = "serve")]
 mod serve;
 #[cfg(feature = "catalog-db")]
@@ -199,6 +201,17 @@ commands:
       <output>/<bundle>/_objects.json. Payloads larger than the inline limit are
       written to <output>/_payloads/<aa>/<sha256>.bin. The tables are the same
       as for export.
+  script-table <package> <output> --class-table <file>
+               [--script-table <file>]... [--bundles <dir>]... [--threads <n>]
+      Write a script table for the client package <package> to <output>, in
+      the form that --script-table takes. The layouts a script of the player
+      data may have are the rows of each --script-table and the type trees
+      that the bundle files under each --bundles directory store for its
+      MonoBehaviour objects. A script that the player data stores without a
+      type tree is kept with the one layout that reads every object of it to
+      its last byte. Each script is printed with what became of it: kept, with
+      where its layout was found, or left out because no layout was found,
+      none reads every object, with the first error of each, or several do.
   stats <output> [--top <n>]
       List the costliest kinds of derivation of the runs in <output> and the
       converters whose memory estimates are furthest from their decoded size.
@@ -234,6 +247,16 @@ fn stats(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt:
 #[cfg(not(feature = "catalog-db"))]
 fn stats(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     Err("this build has no catalog: enable the catalog-db feature".into())
+}
+
+#[cfg(feature = "client")]
+fn script_table(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    script_table::run(args)
+}
+
+#[cfg(not(feature = "client"))]
+fn script_table(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no client source: enable the client feature".into())
 }
 
 #[cfg(feature = "cdn")]
@@ -276,6 +299,7 @@ fn main() -> ExitCode {
     let result = match args.next().as_deref().and_then(|c| c.to_str()) {
         Some("export") => export::run(args),
         Some("objects") => objects::run(args),
+        Some("script-table") => script_table(args),
         Some("update") => update(args),
         Some("gc") => gc(args),
         Some("account") => account(args),

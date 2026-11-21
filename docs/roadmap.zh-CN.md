@@ -26,7 +26,7 @@
 |---|---|---|
 | Unity 资源包：解析出对象图，所有跨文件引用均已解析 | 已完成 | [对象文档](spec/object-documents.zh-CN.md) |
 | 客户端安装包（APK 与 XAPK），配合版本类表 | 已完成 | [来源](sources.zh-CN.md)；类表由使用者提供 |
-| 客户端安装包内 `MonoBehaviour` 的字段 | 已完成 | 通过使用者提供的脚本布局表读取；没有布局的对象报告为 `no_layout` |
+| 客户端安装包内 `MonoBehaviour` 的字段 | 已完成 | 通过脚本布局表读取，表由使用者提供，或由 `script-table` 从其他表和分发 bundle 的 type tree 构建，每个布局都对其脚本的全部对象校验；没有布局的对象报告为 `no_layout` |
 | 对象文档在原生与 WebAssembly 构建之间的逐字节比对 | 已完成 | |
 
 ## 解码与编码

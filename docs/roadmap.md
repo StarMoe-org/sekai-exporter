@@ -26,7 +26,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 |---|---|---|
 | Unity asset bundles: the object graph with every cross-file reference resolved | Done | [Object documents](spec/object-documents.md) |
 | The client package (APK and XAPK) with version class tables | Done | [Sources](sources.md); the class tables are supplied by the user |
-| `MonoBehaviour` fields inside the client package | Done | Read through a script layout table supplied by the user; objects without a layout are reported as `no_layout` |
+| `MonoBehaviour` fields inside the client package | Done | Read through a script layout table, supplied by the user or built by `script-table` from other tables and the type trees of distribution bundles, each layout checked against every object of its script; objects without a layout are reported as `no_layout` |
 | Byte-for-byte comparison of object documents between native and WebAssembly builds | Done | |
 
 ## Decoding and encoding

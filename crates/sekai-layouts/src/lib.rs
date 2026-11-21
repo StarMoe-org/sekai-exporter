@@ -12,5 +12,5 @@ mod table;
 mod tpk;
 
 pub use error::TableError;
-pub use script::{PlayerLayouts, ScriptTable};
+pub use script::{PlayerLayouts, ScriptFields, ScriptTable, write_script_table};
 pub use table::VersionTable;

@@ -76,7 +76,7 @@ impl Inputs for Bundles {
 }
 
 /// The table in the file at `path`.
-fn read_table<T>(
+pub(crate) fn read_table<T>(
     path: &Path,
     parse: impl FnOnce(&[u8]) -> Result<T, TableError>,
 ) -> Result<T, String> {

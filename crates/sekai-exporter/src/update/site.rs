@@ -185,6 +185,11 @@ impl<'a> Site<'a> {
             Self::Bucket(bucket) => bucket.delete(name),
         }
     }
+
+    /// Deletes the state file `name`. A file the site does not hold is deleted already.
+    pub(crate) fn delete_state(&self, name: &str) -> Result<(), String> {
+        self.delete(&format!("state/{name}"))
+    }
 }
 
 /// The directory of the views in the output directory `output`.

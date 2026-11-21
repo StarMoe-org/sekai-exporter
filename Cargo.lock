@@ -1273,7 +1273,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-catalog"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "redb",
  "sekai-format",
@@ -1282,14 +1282,14 @@ dependencies = [
 
 [[package]]
 name = "sekai-codec"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "sha2",
 ]
 
 [[package]]
 name = "sekai-convert"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "crc32fast",
  "sekai-codec",
@@ -1301,7 +1301,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-encode"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "exr",
  "png",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-exporter"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "cpu-time",
  "lexopt",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-format"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -1350,7 +1350,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-game"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes",
  "base64",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-layouts"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "lzma-rs",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-moesekai"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "png",
@@ -1397,7 +1397,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-mysekai"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "crc32fast",
  "sekai-convert",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-pipeline"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "sekai-catalog",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-publish"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "flate2",
  "sekai-catalog",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-serve"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "bytes",
  "futures-util",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-testkit"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1466,7 +1466,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-unity"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "lz4_flex",
  "lzma-rs",
@@ -1475,7 +1475,7 @@ dependencies = [
 
 [[package]]
 name = "sekai-wasm"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "js-sys",
  "sekai-catalog",

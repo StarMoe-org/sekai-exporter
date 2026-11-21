@@ -75,7 +75,7 @@ pub fn documents(
     };
     let change = Change::all(plan)?;
     let previous = Previous::default();
-    patch::apply(store, store, &edition, &previous, change, &NoVersions)
+    patch::apply(store, store, &edition, &previous, change, &NoVersions, 1)
 }
 
 /// Whether `version` can name its pointer file.

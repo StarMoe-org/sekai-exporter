@@ -368,7 +368,7 @@ fn apply(
         layout,
         published_at: None,
     };
-    patch::apply(store, store, &edition, previous, change, &NoVersions)
+    patch::apply(store, store, &edition, previous, change, &NoVersions, 4)
 }
 
 /// `pointer` without its version history and changes, which follow the publications before it:

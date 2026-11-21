@@ -30,6 +30,7 @@ use sha2::{Digest, Sha256};
 use crate::clock::Utc;
 use crate::history::{self, Last, Made, PathDiff, Versions};
 use crate::layout::{Layout, Object, Publication};
+use crate::parallel;
 use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path, hex};
 
 const JSON: &str = "application/json";
@@ -482,10 +483,10 @@ pub struct Edition<'a> {
 
 /// Applies `change` to `previous`, the publication of the view before it, as the publication
 /// `edition`. The documents of earlier publications are read from `store` as the change needs
-/// them, and their pointers from `versions`; the new documents are written to `local`. Returns
-/// the pointer and the objects the publication adds: the files the change adds, and the
-/// documents written. A version that changes none of the files, listings and failures of
-/// `previous` keeps that publication as it is.
+/// them, up to `threads` at once, and their pointers from `versions`; the new documents are
+/// written to `local`. Returns the pointer and the objects the publication adds: the files the
+/// change adds, and the documents written. A version that changes none of the files, listings
+/// and failures of `previous` keeps that publication as it is.
 pub fn apply(
     store: &dyn Store,
     local: &LocalStore,
@@ -493,6 +494,7 @@ pub fn apply(
     previous: &Previous,
     change: Change,
     versions: &dyn Versions,
+    threads: usize,
 ) -> Result<Publication, PublishError> {
     let Edition {
         view,
@@ -518,7 +520,7 @@ pub fn apply(
                 failures,
             };
             let previous = previous.index.as_ref();
-            Some(index_tables(store, &mut written, previous, edits)?)
+            Some(index_tables(store, &mut written, previous, edits, threads)?)
         }
     };
     let changes = PathChanges::new(store, previous.paths.as_ref(), &edits)?;
@@ -771,6 +773,7 @@ fn index_tables(
     written: &mut Written<'_>,
     previous: Option<&IndexRoot>,
     edits: TableEdits<'_>,
+    threads: usize,
 ) -> Result<IndexTables, PublishError> {
     let TableEdits {
         paths,
@@ -781,7 +784,7 @@ fn index_tables(
     let previous = previous.unwrap_or(&empty);
 
     let directories = index_table(store, &previous.directories);
-    let shards = shard_edits(store, written, &directories, paths)?;
+    let shards = shard_edits(store, written, &directories, paths, threads)?;
     let directories = write_table(written, &directories, &previous.directories, shards)?;
 
     // The chunks of each form's listing before the change, and the edits of it.
@@ -858,6 +861,21 @@ fn split(path: &str) -> (&str, &str) {
     path.rsplit_once('/').unwrap_or(("", path))
 }
 
+/// The entries of the shard of `directory` in the previous publication, whose directories are
+/// `directories`; none for a directory it does not have.
+fn previous_entries(
+    store: &dyn Store,
+    directories: &Table<'_, ShardReference>,
+    directory: &str,
+) -> Result<Vec<IndexEntry>, PublishError> {
+    let Some(reference) = directories.get(directory)? else {
+        return Ok(Vec::new());
+    };
+    let shard: IndexShard = serde_json::from_slice(&read_object(store, &reference.sha256, "json")?)
+        .map_err(|e| PublishError::new("previous", e))?;
+    Ok(shard.entries)
+}
+
 /// The edits of the directories that `edits` fall in: the new shard of each, which is written,
 /// or none for a directory left empty.
 fn shard_edits(
@@ -865,6 +883,7 @@ fn shard_edits(
     written: &mut Written<'_>,
     directories: &Table<'_, ShardReference>,
     edits: &BTreeMap<String, PathEdit>,
+    threads: usize,
 ) -> Result<BTreeMap<String, Option<ShardReference>>, PublishError> {
     let mut by_directory: BTreeMap<&str, Vec<(&str, &PathEdit)>> = BTreeMap::new();
     for (path, edit) in edits {
@@ -873,19 +892,16 @@ fn shard_edits(
             .or_default()
             .push((path, edit));
     }
+    // A change can touch most directories of a view, each with a shard of its own: they are read
+    // at once rather than one after another.
+    let touched: Vec<&str> = by_directory.keys().copied().collect();
+    let shards = parallel::map(&touched, threads, |directory| {
+        previous_entries(store, directories, directory)
+    });
     let mut edits = BTreeMap::new();
-    for (directory, changes) in by_directory {
-        let old = match directories.get(directory)? {
-            Some(reference) => {
-                let shard: IndexShard =
-                    serde_json::from_slice(&read_object(store, &reference.sha256, "json")?)
-                        .map_err(|e| PublishError::new("previous", e))?;
-                shard.entries
-            }
-            None => Vec::new(),
-        };
+    for ((directory, changes), old) in by_directory.into_iter().zip(shards) {
         let mut entries: BTreeMap<String, IndexEntry> =
-            old.into_iter().map(|e| (e.name.clone(), e)).collect();
+            old?.into_iter().map(|e| (e.name.clone(), e)).collect();
         for (path, edit) in changes {
             let name = split(path).1;
             match (entries.remove(name), &edit.removed) {

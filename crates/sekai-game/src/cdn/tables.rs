@@ -43,7 +43,11 @@ pub struct Tables {
 }
 
 enum Origin {
-    Http { http: Http, template: String },
+    /// The client, which holds its own runtime, is kept on the heap.
+    Http {
+        http: Box<Http>,
+        template: String,
+    },
     Dir(PathBuf),
 }
 
@@ -60,7 +64,7 @@ impl Tables {
                 let current = current_revision(&http, revision, revision_field)?;
                 Ok(Self {
                     origin: Origin::Http {
-                        http,
+                        http: Box::new(http),
                         template: table.clone(),
                     },
                     revision: current,

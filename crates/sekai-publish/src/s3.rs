@@ -23,7 +23,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use sekai_catalog::{Key, LocalStore, Objects, Remote, Store};
 use sekai_format::publication::Pointer;
@@ -39,9 +39,14 @@ use crate::plan::{Plan, PublishError, hex};
 
 /// The SHA-256 of no bytes.
 const EMPTY: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-/// How many times a request is sent before its failure is reported. Between attempts the client
-/// waits 1, 2, 4 and then 8 seconds, so that a busy service has time to recover.
-const ATTEMPTS: u32 = 5;
+/// How long a request that failed in a way that trying again can change is sent again before its
+/// failure is reported: as long as a lease lasts, so that a run outlives an outage of the bucket
+/// that its lease outlives.
+const RETRY_FOR: Duration = Duration::from_secs(600);
+/// The pause after the first failed attempt, which doubles with each attempt up to
+/// [`BACKOFF_MAX`].
+const BACKOFF: Duration = Duration::from_secs(1);
+const BACKOFF_MAX: Duration = Duration::from_secs(60);
 /// Cache policy for immutable content-addressed objects under `store/`.
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
 /// Cache policy for mutable target pointers (`published/<target>/current.json`).
@@ -340,9 +345,9 @@ impl S3 {
     }
 
     /// Sends a request for `name` with the canonical query string `query` until it gets a
-    /// response that trying again cannot change, and returns it with its body read. An attempt
-    /// fails when the connection fails before the last byte of the body, so a response cut off
-    /// midway is asked for again.
+    /// response that trying again cannot change, or for [`RETRY_FOR`], and returns it with its
+    /// body read. An attempt fails when the connection fails before the last byte of the body, so
+    /// a response cut off midway is asked for again.
     fn send(
         &self,
         method: &'static str,
@@ -361,24 +366,26 @@ impl S3 {
             "" => format!("{}{uri}", self.origin),
             query => format!("{}{uri}?{query}", self.origin),
         };
-        let mut attempt = 0;
+        let started = Instant::now();
+        let mut pause = BACKOFF;
         loop {
-            attempt += 1;
             let reply = self.exchange(|| request(&url, self.headers(method, &uri, query, payload)));
+            let given_up = started.elapsed() >= RETRY_FOR;
             let failure = match reply {
                 Ok(reply) => {
                     let status = reply.status().as_u16();
-                    if !transient(status) || attempt >= ATTEMPTS {
+                    if !transient(status) || given_up {
                         return Ok(reply);
                     }
                     format!("{method} {name}: HTTP {status}")
                 }
                 Err(e) => format!("{method} {name}: {e}"),
             };
-            if attempt >= ATTEMPTS {
+            if given_up {
                 return Err(failure);
             }
-            std::thread::sleep(Duration::from_millis(500 << attempt));
+            std::thread::sleep(pause);
+            pause = (pause * 2).min(BACKOFF_MAX);
         }
     }
 

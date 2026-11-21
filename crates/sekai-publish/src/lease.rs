@@ -107,7 +107,8 @@ impl S3 {
 
     /// Runs `work` while this client holds the lease of the site as a run that does `operation`.
     /// While another run holds it, the client tells `waiting` who does and looks again after
-    /// `periods.wait`. The lease is kept while `work` runs and given up after it.
+    /// `periods.wait`. The lease is kept while `work` runs and given up after it; when giving it
+    /// up fails, the lease is left to lapse and `work`'s result stands.
     pub fn while_held_for<T>(
         &self,
         periods: &Periods,
@@ -136,9 +137,10 @@ impl S3 {
             (result, keeping.join())
         });
         let kept = kept.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-        if let Some(entity_tag) = kept {
-            self.delete_state_if(LEASE_FILE, &entity_tag)
-                .map_err(lease)?;
+        if let Some(entity_tag) = kept
+            && let Err(e) = self.delete_state_if(LEASE_FILE, &entity_tag)
+        {
+            eprintln!("the lease of the site was not given up and lapses on its own: {e}");
         }
         Ok(result)
     }

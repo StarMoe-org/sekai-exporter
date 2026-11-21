@@ -4,8 +4,8 @@ use std::io::Write;
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use sekai_layouts::{PlayerLayouts, ScriptTable, VersionTable};
-use sekai_unity::{ClassLayouts, TypeTreeNode};
+use sekai_layouts::{PlayerLayouts, ScriptFields, ScriptTable, VersionTable, write_script_table};
+use sekai_unity::{ClassLayouts, TypeTree, TypeTreeNode};
 
 const VERSION: &str = "2022.3.62f2";
 const HEADER_NODES: usize = 2;
@@ -128,6 +128,49 @@ fn the_identity_follows_both_tables() {
         one.identity(),
         layouts(&script_line("Game.Dialog", "one")).identity()
     );
+}
+
+/// The full tree of `Game.Dialog` in a table with one field called `name`, and the engine header
+/// it starts with.
+fn dialog_tree(name: &str) -> (TypeTree, TypeTree) {
+    let layouts = layouts(&script_line("Game.Dialog", name));
+    let tree = layouts.script_tree("Assembly-CSharp/Game.Dialog", VERSION);
+    let header = classes().tree(114, VERSION).unwrap();
+    (tree.unwrap().as_ref().clone(), header.as_ref().clone())
+}
+
+#[test]
+fn the_fields_of_a_full_tree_are_the_nodes_after_the_engine_header() {
+    let (tree, header) = dialog_tree("buttons");
+    let fields = ScriptFields::of_tree(&tree, &header).unwrap();
+    assert_eq!(fields.tree(&header).unwrap(), tree);
+    assert_eq!(
+        ScriptFields::of_tree(&header, &header)
+            .unwrap()
+            .tree(&header)
+            .unwrap(),
+        header
+    );
+
+    let mut nodes = header.nodes().to_vec();
+    nodes[1].name = "m_Other".to_owned();
+    let other = TypeTree::from_nodes(nodes).unwrap();
+    assert_eq!(ScriptFields::of_tree(&tree, &other), None);
+}
+
+#[test]
+fn a_written_table_reads_back_the_same_fields() {
+    let (one, header) = dialog_tree("one");
+    let (two, _) = dialog_tree("two");
+    let one = ScriptFields::of_tree(&one, &header).unwrap();
+    let two = ScriptFields::of_tree(&two, &header).unwrap();
+    let scripts = [
+        ("Assembly-CSharp/Game.One", &one),
+        ("Assembly-CSharp/Game.Two", &two),
+    ];
+    let table = ScriptTable::from_jsonl_gz(&write_script_table(scripts).unwrap()).unwrap();
+    assert!(table.iter().eq(scripts));
+    assert!(write_script_table([("Game.One", &one)]).is_err());
 }
 
 #[test]

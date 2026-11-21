@@ -299,7 +299,8 @@ pub(crate) fn source<'a>(
     }
 }
 
-fn directory(root: &Path) -> Result<Source<'_>, lexopt::Error> {
+/// The bundles of the directory `root`, each named by its path under it.
+pub(crate) fn directory(root: &Path) -> Result<Source<'_>, lexopt::Error> {
     let mut manifest = Vec::new();
     walk(root, "", &mut manifest).map_err(|e| format!("{}: {e}", root.display()))?;
     Ok(Source {

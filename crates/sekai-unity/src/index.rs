@@ -59,8 +59,15 @@ impl ClassLayouts for NoClasses {
 /// The compiled layouts of one serialized file.
 #[derive(Debug)]
 pub struct FileLayouts {
-    types: Vec<Result<Layout>>,
+    types: Vec<TypeLayout>,
     referenced: Vec<(ReferencedName, Layout)>,
+}
+
+/// The layout of a type of a file, and the script of a `MonoBehaviour` type when it is known.
+#[derive(Debug)]
+struct TypeLayout {
+    layout: Result<Layout>,
+    script: Option<String>,
 }
 
 impl FileLayouts {
@@ -82,7 +89,7 @@ impl FileLayouts {
         .compile()
     }
 
-    fn from_types(file: &SerializedFile, types: Vec<Result<Layout>>) -> Self {
+    fn from_types(file: &SerializedFile, types: Vec<TypeLayout>) -> Self {
         let referenced = file
             .referenced_types
             .iter()
@@ -96,7 +103,14 @@ impl FileLayouts {
 
     /// The layout of the type at `type_index`.
     pub fn get(&self, type_index: usize) -> Result<&Layout> {
-        self.types[type_index].as_ref().map_err(Clone::clone)
+        self.types[type_index].layout.as_ref().map_err(Clone::clone)
+    }
+
+    /// The script of the `MonoBehaviour` type at `type_index`, as
+    /// `"<assembly>/<namespace>.<class>"`, when it is known. Scripts are known only to layouts
+    /// that [`open_files`] compiled with class layouts.
+    pub fn script(&self, type_index: usize) -> Option<&str> {
+        self.types[type_index].script.as_deref()
     }
 }
 
@@ -168,8 +182,19 @@ struct TypeLayouts<'a> {
 
 impl TypeLayouts<'_> {
     fn compile(&self) -> FileLayouts {
-        let types = self.file.types.iter().map(|t| self.layout(t)).collect();
-        FileLayouts::from_types(self.file, types)
+        let types = self.file.types.iter().map(|t| TypeLayout {
+            layout: self.layout(t),
+            script: self.script(t).map(str::to_owned),
+        });
+        FileLayouts::from_types(self.file, types.collect())
+    }
+
+    /// The script of a `MonoBehaviour` type, when it is known.
+    fn script(&self, serialized: &SerializedType) -> Option<&str> {
+        if serialized.class_id != MONO_BEHAVIOUR {
+            return None;
+        }
+        self.scripts.of(self.path, self.file, serialized)
     }
 
     /// Compiles the layout of a type: the tree the file stores, or else the tree of its class, or
@@ -181,8 +206,7 @@ impl TypeLayouts<'_> {
         let class_id = serialized.class_id;
         let unity_version = &self.file.unity_version;
         let tree = if class_id == MONO_BEHAVIOUR {
-            self.scripts
-                .of(self.path, self.file, serialized)
+            self.script(serialized)
                 .and_then(|script| self.classes.script_tree(script, unity_version))
         } else {
             self.classes.tree(class_id, unity_version)
@@ -241,9 +265,16 @@ pub struct OpenFile<'a> {
 impl OpenFile<'_> {
     /// Reads object `index` of the file into `visitor`.
     pub fn read(&self, index: usize, visitor: &mut dyn Visitor) -> Result<()> {
-        let object = &self.file.objects[index];
-        let layout = self.layouts.get(object.type_index)?;
-        let data = self.file.object_bytes(self.source, object)?;
+        let layout = self.layouts.get(self.file.objects[index].type_index)?;
+        self.read_as(index, layout, visitor)
+    }
+
+    /// Reads object `index` of the file into `visitor` with `layout` instead of the layout of
+    /// its type, to the last byte of the object.
+    pub fn read_as(&self, index: usize, layout: &Layout, visitor: &mut dyn Visitor) -> Result<()> {
+        let data = self
+            .file
+            .object_bytes(self.source, &self.file.objects[index])?;
         read_object(
             layout,
             &data,
@@ -879,9 +910,9 @@ mod tests {
         }
     }
 
-    /// The layout of the `MonoBehaviour` type of a file whose script is object 7 of the file
-    /// `file_index` refers to, when `SCRIPT_FILE` names `path_id` as `SCRIPT`.
-    fn behaviour_layout(file_index: i32, path_id: i64) -> Result<String> {
+    /// The layouts of a file whose `MonoBehaviour` type has the script that is object 7 of the
+    /// file `file_index` refers to, when `SCRIPT_FILE` names `path_id` as `SCRIPT`.
+    fn behaviour_layouts(file_index: i32, path_id: i64) -> FileLayouts {
         let mut file = file("2022.3.62f2", false);
         file.types[1].script_type_index = 0;
         file.scripts = vec![ScriptRef {
@@ -900,14 +931,26 @@ mod tests {
         } else {
             "level0"
         };
-        let layouts = TypeLayouts {
+        TypeLayouts {
             path,
             file: &file,
             classes: &Scripted,
             scripts: &scripts,
         }
-        .compile();
+        .compile()
+    }
+
+    /// The root type of the layout of the `MonoBehaviour` type of [`behaviour_layouts`].
+    fn behaviour_layout(file_index: i32, path_id: i64) -> Result<String> {
+        let layouts = behaviour_layouts(file_index, path_id);
         layouts.get(1).map(|layout| layout.root_type().to_owned())
+    }
+
+    #[test]
+    fn the_layouts_of_a_file_name_the_script_of_a_mono_behaviour() {
+        let layouts = behaviour_layouts(1, 7);
+        assert_eq!((layouts.script(0), layouts.script(1)), (None, Some(SCRIPT)));
+        assert_eq!(behaviour_layouts(1, 8).script(1), None);
     }
 
     #[test]

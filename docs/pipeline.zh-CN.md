@@ -64,4 +64,6 @@
 
 不带 type tree 的对象，按其所在文件声明的 Unity 版本取所属类的布局读取。`MonoBehaviour` 还需要脚本的布局：`--script-table` 指定一个 gzip 压缩、每行一个 JSON 对象的文件，含 `assembly`、`class` 和 `nodes`；`nodes` 按前序列出脚本字段的 `type`、`name`、`level`、`byteSize`、`typeFlags`、`version` 和 `metaFlag`，顶层字段的 level 为 1。对象按其类的引擎头加上这些字段读取。没有该表，或表中没有该脚本时，记录为错误 `no_layout`。每个对象都必须恰好读到其末尾；未能恰好读完的对象记录具名错误。
 
+`script-table` 为客户端包构建这样的表。一个脚本可能的布局来自两处：用 `--script-table` 给出的其他表中的行，以及每个 `--bundles` 目录下的 bundle 为其 `MonoBehaviour` 对象存储的 type tree。存储的树以包内文件某个 Unity 版本下 `MonoBehaviour` 的引擎头开头时才取用，引擎头之后的节点即为字段。对包中不带 type tree 存储的每个脚本，每个布局都接在对象所在文件 Unity 版本的引擎头之后，用来读取该脚本的每个对象；恰好读完全部对象的布局只有一个时，保留该脚本及这一布局。找不到布局、没有布局能读完全部对象、或有多个布局都能读完的脚本不收入表中。命令逐个打印脚本、其对象数和结果：保留的给出布局所在的表或 bundle 文件，未收入的给出原因；对没有布局能读完的脚本，列出每个布局的第一个错误。
+
 `ResourceManager` 对象的容器与 `AssetBundle` 对象的容器一样为资产命名，用的是游戏使用的加载路径。这些表的哈希计入本次运行所有资产的指纹。

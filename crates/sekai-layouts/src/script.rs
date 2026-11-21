@@ -1,12 +1,14 @@
 //! The layouts of game scripts, and the layouts of the player data of a client package.
 
-use std::collections::HashMap;
-use std::io::Read;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
 use std::sync::Arc;
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use sekai_unity::{ClassLayouts, TypeTree, TypeTreeNode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::TableError;
@@ -16,16 +18,15 @@ const MONO_BEHAVIOUR: i32 = 114;
 
 /// One line of a table: a script with its fields, or without them when they could not be worked
 /// out.
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct ScriptRow {
     assembly: String,
     class: String,
-    nodes: Option<Vec<ScriptNode>>,
+    nodes: Option<ScriptFields>,
 }
 
-/// One node of the fields of a script. The fields follow the engine header of a `MonoBehaviour`,
-/// so the top ones have level 1.
-#[derive(Debug, Deserialize)]
+/// One node of the fields of a script.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ScriptNode {
     #[serde(rename = "type")]
@@ -39,6 +40,18 @@ struct ScriptNode {
 }
 
 impl ScriptNode {
+    fn of(node: &TypeTreeNode) -> Self {
+        Self {
+            type_name: node.type_name.clone(),
+            name: node.name.clone(),
+            level: node.level,
+            byte_size: node.byte_size,
+            type_flags: node.type_flags,
+            version: node.version,
+            meta_flag: node.meta_flags,
+        }
+    }
+
     fn tree_node(&self, index: i32) -> TypeTreeNode {
         TypeTreeNode {
             version: self.version,
@@ -54,10 +67,40 @@ impl ScriptNode {
     }
 }
 
+/// The fields of a script: the nodes of the type tree of its `MonoBehaviour` objects after the
+/// engine header, so the top ones have level 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ScriptFields(Vec<ScriptNode>);
+
+impl ScriptFields {
+    /// The fields of `tree`, the full type tree of a `MonoBehaviour`, whose engine header is
+    /// `header`. `None` when `tree` does not start with `header`, by type, name and level.
+    pub fn of_tree(tree: &TypeTree, header: &TypeTree) -> Option<Self> {
+        let (head, fields) = tree.nodes().split_at_checked(header.nodes().len())?;
+        let same = |(a, b): (&TypeTreeNode, &TypeTreeNode)| {
+            (a.level, &a.type_name, &a.name) == (b.level, &b.type_name, &b.name)
+        };
+        let headed = head.iter().zip(header.nodes()).all(same);
+        let top = fields.first().is_none_or(|field| field.level == 1);
+        (headed && top).then(|| Self(fields.iter().map(ScriptNode::of).collect()))
+    }
+
+    /// The full type tree of a `MonoBehaviour` with these fields: `header`, then the fields.
+    pub fn tree(&self, header: &TypeTree) -> Option<TypeTree> {
+        let mut nodes = header.nodes().to_vec();
+        for field in &self.0 {
+            let index = i32::try_from(nodes.len()).ok()?;
+            nodes.push(field.tree_node(index));
+        }
+        TypeTree::from_nodes(nodes).ok()
+    }
+}
+
 /// The fields of game scripts, by `"<assembly>/<namespace>.<class>"`.
 #[derive(Debug)]
 pub struct ScriptTable {
-    scripts: HashMap<String, Vec<ScriptNode>>,
+    scripts: BTreeMap<String, ScriptFields>,
     sha256: [u8; 32],
 }
 
@@ -71,7 +114,7 @@ impl ScriptTable {
         let rows = text.lines().map(|line| {
             serde_json::from_str::<ScriptRow>(line).map_err(|e| TableError::new(e.to_string()))
         });
-        let mut scripts = HashMap::new();
+        let mut scripts = BTreeMap::new();
         for row in rows {
             let row = row?;
             if let Some(nodes) = row.nodes {
@@ -83,6 +126,41 @@ impl ScriptTable {
             sha256: Sha256::digest(bytes).into(),
         })
     }
+
+    /// The fields of `script`, when the table has them.
+    pub fn get(&self, script: &str) -> Option<&ScriptFields> {
+        self.scripts.get(script)
+    }
+
+    /// Every script of the table with its fields, in name order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ScriptFields)> {
+        self.scripts
+            .iter()
+            .map(|(script, fields)| (script.as_str(), fields))
+    }
+}
+
+/// Writes the fields of `scripts`, each named `"<assembly>/<namespace>.<class>"`, as a table
+/// file that [`ScriptTable::from_jsonl_gz`] reads: gzipped JSON, one line per script.
+pub fn write_script_table<'a>(
+    scripts: impl IntoIterator<Item = (&'a str, &'a ScriptFields)>,
+) -> Result<Vec<u8>, TableError> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    for (script, fields) in scripts {
+        let (assembly, class) = script
+            .split_once('/')
+            .ok_or_else(|| TableError::new(format!("{script}: no assembly in the name")))?;
+        let row = ScriptRow {
+            assembly: assembly.to_owned(),
+            class: class.to_owned(),
+            nodes: Some(fields.clone()),
+        };
+        let line = serde_json::to_string(&row).map_err(|e| TableError::new(e.to_string()))?;
+        writeln!(encoder, "{line}").map_err(|e| TableError::new(format!("gzip: {e}")))?;
+    }
+    encoder
+        .finish()
+        .map_err(|e| TableError::new(format!("gzip: {e}")))
 }
 
 /// The layouts of the engine classes and the scripts of the player data of a client package.
@@ -106,14 +184,9 @@ impl ClassLayouts for PlayerLayouts {
 
     /// The engine header of a `MonoBehaviour`, then the fields of the script.
     fn script_tree(&self, script: &str, unity_version: &str) -> Option<Arc<TypeTree>> {
-        let fields = self.scripts.as_ref()?.scripts.get(script)?;
+        let fields = self.scripts.as_ref()?.get(script)?;
         let header = self.classes.tree(MONO_BEHAVIOUR, unity_version)?;
-        let mut nodes = header.nodes().to_vec();
-        for field in fields {
-            let index = i32::try_from(nodes.len()).ok()?;
-            nodes.push(field.tree_node(index));
-        }
-        TypeTree::from_nodes(nodes).ok().map(Arc::new)
+        fields.tree(&header).map(Arc::new)
     }
 
     fn identity(&self) -> Option<[u8; 32]> {

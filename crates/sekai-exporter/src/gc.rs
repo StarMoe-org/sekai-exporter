@@ -4,9 +4,10 @@
 //! What is kept: every pointer under `published/`, every object a pointer refers to, the state of
 //! each region with the documents of the assets it built from tables, and the records whose
 //! objects are all kept. Files written within the grace period are kept too, with the objects the
-//! records among them name. Everything else under `store/` and `state/` is garbage. In the output
-//! directory, the bundles of the input store that no region fetched last, and the partial writes
-//! that interrupted runs left in `incoming/`, are garbage too.
+//! records among them name. Everything else under `store/` and `state/` is garbage, the upload
+//! journals of interrupted runs among it. In the output directory, the bundles of the input store
+//! that no region fetched last, and the partial writes that interrupted runs left in `incoming/`,
+//! are garbage too.
 //!
 //! Records lie in packs that are never changed, as the pages of a flash drive are never written
 //! twice. A pack that holds a record no longer kept, or that holds few records, is rewritten: the
@@ -33,6 +34,7 @@ use sekai_publish::{Listed, referred};
 use crate::bucket::Bucket;
 use crate::budget;
 use crate::update::document_objects;
+use crate::update::journal::UPLOADS;
 use crate::update::site::Site;
 
 /// The grace period unless `--grace` gives one.
@@ -285,8 +287,8 @@ fn state_name(file: &Listed) -> &str {
 }
 
 impl Collector<'_> {
-    /// The garbage of the site, in the order it is deleted: the records, which name objects, before
-    /// the state chunks and the objects of the store.
+    /// The garbage of the site, in the order it is deleted: the upload journals and the records,
+    /// which name objects, before the state chunks and the objects of the store.
     fn garbage(&self) -> Result<Garbage, String> {
         let mut live = self.published()?;
         let chunks = self.states(&mut live)?;
@@ -301,8 +303,14 @@ impl Collector<'_> {
             let garbage = self.old(&file) && unreferred;
             (file, garbage)
         });
+        // The upload journals say that the store holds objects, so they go before any object.
+        let journals = self.site.list(&format!("state/{UPLOADS}"))?;
+        let journals = Kind::of(UPLOADS, journals.into_iter().map(|file| (file, true)));
         let others = [Kind::of(CHUNKS, state_chunks), Kind::of("store", objects)];
-        let kinds = records.into_iter().chain(others).collect();
+        let kinds = std::iter::once(journals)
+            .chain(records)
+            .chain(others)
+            .collect();
         Ok(Garbage { packs, kinds })
     }
 

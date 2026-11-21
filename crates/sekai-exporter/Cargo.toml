@@ -38,6 +38,7 @@ sekai-moesekai.workspace = true
 sekai-mysekai.workspace = true
 sekai-layouts = { workspace = true, optional = true }
 sha2 = "0.11.1"
+flate2 = { version = "1.1.11", default-features = false, features = ["rust_backend"] }
 lexopt = "0.3.2"
 serde_json = "1"
 sysinfo = { version = "0.40.1", default-features = false, features = ["system"] }

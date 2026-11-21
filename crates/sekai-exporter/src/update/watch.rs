@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use sekai_catalog::MemoryHoldings;
 
+use super::journal::journaled;
 use super::site::Site;
 use super::{Options, Run, configuration, export_version, look, region_of};
 use crate::bucket::Bucket;
@@ -67,14 +68,18 @@ fn keep(options: &Options, region: &str, config: &str, site: &Site<'_>) -> Resul
     let updated = site.while_held(&format!("watch {region}"), || {
         Monitor::watch(&metrics, |monitor| {
             let region = region_of(&run, config)?;
-            export_version(&run, region, site, &MemoryHoldings::default(), monitor)
+            let requests = site.requests(options.threads);
+            journaled(site, MemoryHoldings::default(), requests, |journal| {
+                export_version(&run, region, site, journal, monitor)
+                    .map(|outcome| outcome.succeeded())
+            })
         })
     });
     if scratch {
         std::fs::remove_dir_all(&work).map_err(|e| format!("{}: {e}", work.display()))?;
     }
     let updated = updated?.map_err(|e| format!("{}: {e}", metrics.display()))?;
-    Ok(updated.map_err(|e| e.to_string())?.succeeded())
+    updated.map_err(|e| e.to_string())
 }
 
 /// A region that `update --watch` keeps up to date, and when it is looked at next.

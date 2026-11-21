@@ -34,10 +34,12 @@ use crate::bucket::Bucket;
 use crate::budget;
 use crate::export::{BLOCK_CACHE_BYTES, IGNORED, converters, report, write_ledger};
 use crate::monitor::{self, Monitor};
+use journal::Journal;
 
 mod backed;
 mod fetch;
 mod files;
+pub(crate) mod journal;
 pub(crate) mod site;
 mod tables;
 mod uploads;
@@ -554,17 +556,20 @@ fn update(options: &Options, monitor: &Monitor) -> Result<bool, lexopt::Error> {
     let operation = format!("update {}", options.regions.join(" "));
     site.while_held(&operation, || {
         let held = holdings_before(options, &site, monitor)?;
-        let mut succeeded = true;
-        for run in options.runs() {
-            let region = region_of(&run, &config)?;
-            succeeded &= export_version(&run, region, &site, &held, monitor)?.succeeded();
-        }
-        Ok(succeeded)
+        let requests = site.requests(options.threads);
+        journal::journaled(&site, held, requests, |journal| {
+            let mut succeeded = true;
+            for run in options.runs() {
+                let region = region_of(&run, &config)?;
+                succeeded &= export_version(&run, region, &site, journal, monitor)?.succeeded();
+            }
+            Ok(succeeded)
+        })
     })?
 }
 
 /// Exports the current version of `region` as `run` says, and publishes it at `site`, whose
-/// store holds what `held` records.
+/// store holds what `journal` records.
 ///
 /// The run starts from the [`Baseline`] the site keeps, evaluates only the units that changed,
 /// patches the publications of both views and commits them as [`Context::commit`] says, so that
@@ -574,7 +579,7 @@ fn export_version(
     run: &Run<'_>,
     region: Region,
     site: &Site<'_>,
-    held: &MemoryHoldings,
+    journal: &Journal<'_>,
     monitor: &Monitor,
 ) -> Result<Outcome, lexopt::Error> {
     let options = run.options;
@@ -604,14 +609,17 @@ fn export_version(
         println!("{key} {} unchanged", recorded.identity.name());
         return Ok(Outcome::Unchanged(recorded.identity));
     }
+    journal
+        .read_earlier()
+        .map_err(|e| format!("journal: {e}"))?;
 
     let objects = Objects {
         local: &opened.store,
-        held,
+        held: journal,
         remote: site.remote(),
     };
     let requests = site.requests(options.threads);
-    let records = Records::new(files, held, requests);
+    let records = Records::new(files, journal.held(), requests);
     let baseline = {
         let _span = monitor.span("plan", "baseline", &key);
         Baseline::read(files, site, &key, &run.targets(), &objects, requests)?
@@ -648,6 +656,7 @@ fn export_version(
             files,
             store: &opened.store,
             objects: &objects,
+            journal,
             backed: &backed,
             monitor,
             published_at: SystemTime::now(),
@@ -1008,6 +1017,8 @@ struct Context<'a> {
     /// The local store, where new objects are put.
     store: &'a LocalStore,
     objects: &'a Objects<'a>,
+    /// What the site holds, with the uploads of the run.
+    journal: &'a Journal<'a>,
     backed: &'a Backed<'a>,
     monitor: &'a Monitor,
     /// When the run publishes its views, which their version histories record.
@@ -1171,7 +1182,8 @@ impl Context<'_> {
 
     /// Commits the version `identity` that `views` publish, in this order: waits until the
     /// uploads have recorded every output of the run, puts at the site every object of the views
-    /// and of the records of `results`, then writes the records of the files that put there and
+    /// and of the records of `results` and writes its uploads to the journal, then writes the
+    /// records of the files that put there and
     /// of the units, the state that `advanced` becomes with the views (the chunks that `root` does
     /// not name, and the root), the pointers of the views and `recorded`, as the last version.
     fn commit(
@@ -1196,6 +1208,7 @@ impl Context<'_> {
             // The publications come last, so the media types they give are the ones stored.
             referred.extend(views.objects());
             stored += self.site.store(self.objects, referred)?;
+            self.journal.keep().map_err(|e| format!("journal: {e}"))?;
         }
         let written = {
             let _span = self.monitor.span("commit", "records", "");

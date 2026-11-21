@@ -446,6 +446,8 @@ mod bucket {
     const STATE: &str = "out/state/";
     /// The record packs.
     const PACKS: &str = "out/state/records/packs/";
+    /// Where the journal of uploads lies.
+    const UPLOADS: &str = "out/state/uploads/";
     /// The lease of the site, which every update and gc holds while it runs.
     const LEASE: &str = "out/state/lease.json";
     /// The pointers of the views.
@@ -527,9 +529,11 @@ mod bucket {
         assert_eq!(scratch.downloaded("second"), 2);
         let asked = |operation| requests.iter().filter(move |r| r.operation == operation);
         assert_eq!(asked(Operation::Head).count(), 0, "{requests:?}");
-        // The records of earlier runs come from their packs, after one listing of them.
-        let listed: Vec<&str> = asked(Operation::List).map(|r| r.name.as_str()).collect();
-        assert_eq!(listed, [PACKS], "{requests:?}");
+        // The records of earlier runs come from their packs, after one listing of them and one
+        // of the journal of uploads.
+        let mut listed: Vec<&str> = asked(Operation::List).map(|r| r.name.as_str()).collect();
+        listed.sort_unstable();
+        assert_eq!(listed, [PACKS, UPLOADS], "{requests:?}");
         let records = format!("{STATE}records/");
         let read = asked(Operation::Get).filter(|r| r.name.starts_with(&records));
         let read: Vec<&Logged> = read.collect();
@@ -580,16 +584,20 @@ mod bucket {
             .filter(|name| !name.starts_with(STATE) && !name.starts_with(POINTERS))
             .collect();
         assert!(elsewhere.is_empty(), "{elsewhere:?}");
-        // Nothing is looked up or uploaded in parts, and only the record packs are listed.
+        // Nothing is looked up or uploaded in parts, only the record packs and the journal of
+        // uploads are listed, and only the journal files the run wrote are deleted, once it is
+        // done.
         let other_operations: Vec<&Logged> = requests
             .iter()
             .filter(|r| match r.operation {
                 Operation::Get | Operation::Put => false,
-                Operation::List => r.name != PACKS,
+                Operation::List => r.name != PACKS && r.name != UPLOADS,
+                Operation::Delete => !r.name.starts_with(UPLOADS),
                 _ => true,
             })
             .collect();
         assert!(other_operations.is_empty(), "{other_operations:?}");
+        assert!(held(&bucket, UPLOADS).is_empty());
     }
 
     #[test]
@@ -647,9 +655,14 @@ mod bucket {
         let (_, requests) = answered(&whole, || scratch.update("whole", Some(&whole)));
         let made = records(&whole);
         assert!(!made.is_empty());
-        // The objects and the record packs are uploaded before the state and the pointers.
+        // The objects, the journal of their uploads and the record packs are uploaded before the
+        // state and the pointers.
         let accepted = uploaded(&requests);
-        let derivation = |name: &str| name.starts_with(STORE) || name.starts_with(PACKS);
+        let derivation = |name: &str| {
+            [STORE, UPLOADS, PACKS]
+                .iter()
+                .any(|directory| name.starts_with(directory))
+        };
         let derived = accepted.iter().filter(|name| derivation(name)).count();
         let first = &accepted[..derived];
         assert!(first.iter().all(|name| derivation(name)), "{accepted:?}");
@@ -662,6 +675,7 @@ mod bucket {
         let stopped = scratch.attempt(&["update", "r"], "stopped", Some(&bucket), &[]);
         assert!(!stopped.status.success());
         assert_eq!(pointer(&bucket, "canonical"), None);
+        assert!(!held(&bucket, UPLOADS).is_empty(), "no journal");
         assert_eq!(records(&bucket), made);
         // A record names only objects that the bucket holds, and so does an asset document it
         // names.
@@ -680,9 +694,18 @@ mod bucket {
             }
         }
 
+        // The run after it on the same machine, whose output still has every object the stopped
+        // run made, uploads none of those it put at the site again.
         bucket.refuse_after(None);
-        let next = scratch.update("next", Some(&bucket));
+        let put = held(&bucket, STORE);
+        let (next, requests) = answered(&bucket, || scratch.update("stopped", Some(&bucket)));
         assert!(next.contains(" converted 0 "), "{next}");
+        let again: Vec<&str> = uploaded(&requests)
+            .into_iter()
+            .filter(|name| put.contains(*name))
+            .collect();
+        assert!(again.is_empty(), "uploaded again: {again:?}");
+        assert!(held(&bucket, UPLOADS).is_empty(), "journal left");
         for view in VIEWS {
             let (next, whole) = (pointer(&bucket, view), pointer(&whole, view));
             assert!(next.is_some(), "{view}");

@@ -257,7 +257,7 @@ pub fn region_capacity(header: &FrameHeader) -> usize {
 /// (bytes 2–3) followed by the whole side-information block, MSB-first, polynomial
 /// `0x8005`, initial value `0xFFFF`. Written big-endian between header and side info
 /// when `protection_bit` (our `crc_protected`) is set.
-fn crc16(header_tail: [u8; 2], side_info: &[u8]) -> u16 {
+pub(crate) fn crc16(header_tail: [u8; 2], side_info: &[u8]) -> u16 {
     let mut crc = 0xFFFFu16;
     for &byte in header_tail.iter().chain(side_info) {
         for i in (0..8).rev() {

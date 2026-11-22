@@ -198,6 +198,37 @@ fn a_stereo_mp3_is_joint_stereo_in_every_frame() {
 }
 
 #[test]
+fn joint_stereo_turns_stereo_frames_into_the_bytes_the_encoder_writes() {
+    // `audio(2, 9_001)` encoded with the frames coded as left and right in stereo mode.
+    let mut mixed = include_bytes!("fixtures/stereo-modes-mixed.mp3").to_vec();
+    assert_eq!(mp3::joint_stereo(&mut mixed), Ok(true));
+    assert_eq!(mixed, mp3::encode(&Sound::Pcm(audio(2, 9_001))).unwrap());
+}
+
+#[test]
+fn joint_stereo_leaves_a_stream_of_the_encoder_unchanged() {
+    for channels in [1, 2] {
+        let encoded = mp3::encode(&Sound::Pcm(audio(channels, 9_001))).unwrap();
+        let mut rewritten = encoded.clone();
+        assert_eq!(
+            mp3::joint_stereo(&mut rewritten),
+            Ok(false),
+            "{channels} channels"
+        );
+        assert_eq!(rewritten, encoded, "{channels} channels");
+    }
+}
+
+#[test]
+fn joint_stereo_rejects_a_stream_of_partial_frames_and_leaves_it_unchanged() {
+    let mut cut = include_bytes!("fixtures/stereo-modes-mixed.mp3").to_vec();
+    cut.pop();
+    let before = cut.clone();
+    assert!(mp3::joint_stereo(&mut cut).is_err());
+    assert_eq!(cut, before);
+}
+
+#[test]
 fn the_bitrate_follows_the_source() {
     // Twice the source, rounded up to a bitrate of the MPEG version.
     assert_eq!(mp3::bitrate(44_100, Some(117_600)), Ok(256));

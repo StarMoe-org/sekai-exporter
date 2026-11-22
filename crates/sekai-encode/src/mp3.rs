@@ -93,3 +93,13 @@ pub fn encode(sound: &Sound) -> Result<Vec<u8>, EncodeError> {
     }
     Ok(bytes)
 }
+
+/// Rewrites every frame of `mp3` in stereo mode as joint stereo, as [`encode`] writes a stereo
+/// sound, and returns whether one changed. Only the frame headers and the checksums of the
+/// Info frame change; the stream decodes to the same samples.
+///
+/// Fails when `mp3` is not a sequence of whole MPEG audio layer III frames, and then leaves it
+/// unchanged.
+pub fn joint_stereo(mp3: &mut [u8]) -> Result<bool, EncodeError> {
+    rusty_mp3::joint_stereo::rewrite(mp3).map_err(|e| failed(e.to_string()))
+}

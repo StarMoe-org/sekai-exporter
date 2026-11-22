@@ -33,6 +33,7 @@ pub mod encode;
 pub mod error;
 pub mod frame;
 pub mod header;
+pub mod joint_stereo;
 pub mod tables;
 
 pub use decode::Mp3Decode;

@@ -1320,6 +1320,7 @@ dependencies = [
  "cpu-time",
  "flate2",
  "lexopt",
+ "libc",
  "mimalloc",
  "sekai-catalog",
  "sekai-codec",

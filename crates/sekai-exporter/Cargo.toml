@@ -50,6 +50,9 @@ cpu-time = "1.0.0"
 mimalloc = { version = "0.1", default-features = false }
 sekai-serve = { workspace = true, optional = true }
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 sekai-testkit.workspace = true
 

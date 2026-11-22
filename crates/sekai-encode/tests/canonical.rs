@@ -1,6 +1,7 @@
 //! The canonical encoders write output that decodes to the input, losslessly for images and close
 //! to it for audio, the same bytes on every run, and fixed bytes for fixed input.
 
+use std::collections::BTreeSet;
 use std::io::Cursor;
 
 use sekai_codec::{Pcm, Sound, Surface};
@@ -130,6 +131,27 @@ fn tone(channels: u16, frames: usize, sample_rate: u32) -> Pcm {
     Pcm::new(sample_rate, channels, samples).unwrap()
 }
 
+/// The channel mode and the mode extension of each frame of `bytes`, an MPEG-1 Layer III stream
+/// at 44.1 kHz, after its first frame, the Info frame.
+fn stereo_modes(bytes: &[u8]) -> Vec<(u8, u8)> {
+    const KBPS: [usize; 15] = [
+        0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320,
+    ];
+    let mut modes = Vec::new();
+    let mut at = 0;
+    while let Some(header) = bytes.get(at..at + 4) {
+        let layer_three = header[0] == 0xFF && header[1] & 0xFE == 0xFA && header[2] >> 2 & 3 == 0;
+        assert!(
+            layer_three,
+            "an MPEG-1 Layer III frame at 44.1 kHz at byte {at}"
+        );
+        modes.push((header[3] >> 6, header[3] >> 4 & 3));
+        let padding = usize::from(header[2] >> 1 & 1);
+        at += 144_000 * KBPS[usize::from(header[2] >> 4)] / 44_100 + padding;
+    }
+    modes.split_off(1)
+}
+
 const SIZES: [(u32, u32); 4] = [(1, 1), (37, 23), (256, 3), (3, 300)];
 
 #[test]
@@ -159,6 +181,51 @@ fn mp3_decodes_to_the_samples_closely_and_to_their_length_exactly() {
         let snr = signal_to_noise(&pcm, &decoded);
         assert!(snr > 40.0, "{channels} channels at {rate} Hz: {snr:.1} dB");
     }
+}
+
+#[test]
+fn a_stereo_mp3_is_joint_stereo_in_every_frame() {
+    // Channels that are the same, coded as mid and side, then channels that differ, coded as
+    // left and right: the mode extension tells them apart, and the mode stays the same.
+    let (same, apart) = (tone(1, 1152 * 20, 44_100), tone(2, 1152 * 20, 44_100));
+    let doubled = same.samples().iter().flat_map(|&sample| [sample, sample]);
+    let samples = doubled.chain(apart.samples().iter().copied()).collect();
+    let pcm = Pcm::new(44_100, 2, samples).unwrap();
+    let modes = stereo_modes(&mp3::encode(&Sound::Pcm(pcm)).unwrap());
+    assert!(modes.iter().all(|&(mode, _)| mode == 1), "{modes:?}");
+    let extensions: BTreeSet<u8> = modes.iter().map(|&(_, extension)| extension).collect();
+    assert_eq!(extensions, BTreeSet::from([0, 2]));
+}
+
+#[test]
+fn joint_stereo_turns_stereo_frames_into_the_bytes_the_encoder_writes() {
+    // `audio(2, 9_001)` encoded with the frames coded as left and right in stereo mode.
+    let mut mixed = include_bytes!("fixtures/stereo-modes-mixed.mp3").to_vec();
+    assert_eq!(mp3::joint_stereo(&mut mixed), Ok(true));
+    assert_eq!(mixed, mp3::encode(&Sound::Pcm(audio(2, 9_001))).unwrap());
+}
+
+#[test]
+fn joint_stereo_leaves_a_stream_of_the_encoder_unchanged() {
+    for channels in [1, 2] {
+        let encoded = mp3::encode(&Sound::Pcm(audio(channels, 9_001))).unwrap();
+        let mut rewritten = encoded.clone();
+        assert_eq!(
+            mp3::joint_stereo(&mut rewritten),
+            Ok(false),
+            "{channels} channels"
+        );
+        assert_eq!(rewritten, encoded, "{channels} channels");
+    }
+}
+
+#[test]
+fn joint_stereo_rejects_a_stream_of_partial_frames_and_leaves_it_unchanged() {
+    let mut cut = include_bytes!("fixtures/stereo-modes-mixed.mp3").to_vec();
+    cut.pop();
+    let before = cut.clone();
+    assert!(mp3::joint_stereo(&mut cut).is_err());
+    assert_eq!(cut, before);
 }
 
 #[test]
@@ -192,7 +259,7 @@ fn output_is_fixed() {
         ),
         (
             "mp3",
-            "4fe480a1c7153b5980c362b2aebc0349194060d60df5abb609dee92bda421bc2",
+            "da453dc7d2b4bf740ef36dde295eff354f6645e73e484fecb2bad3e5f4efaf2a",
         ),
     ];
     for (((name, bytes), repeat), (_, hash)) in outputs.iter().zip(&again).zip(expected) {

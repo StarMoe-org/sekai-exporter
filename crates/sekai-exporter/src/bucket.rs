@@ -21,6 +21,19 @@ fn section(config: &str) -> Result<Option<serde_json::Value>, lexopt::Error> {
     Ok(config.get("publish").and_then(|p| p.get("s3")).cloned())
 }
 
+/// The bucket of the configuration file `config`, as [`Bucket::open`] reads it, or none without
+/// a configuration.
+pub(crate) fn configured(
+    config: Option<&Path>,
+    secrets: Option<&Path>,
+) -> Result<Option<Bucket>, lexopt::Error> {
+    let Some(path) = config else {
+        return Ok(None);
+    };
+    let config = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Bucket::open(&config, secrets)
+}
+
 /// A bucket to publish to, with the layout of the canonical view there.
 #[cfg(feature = "s3")]
 pub(crate) struct Bucket {

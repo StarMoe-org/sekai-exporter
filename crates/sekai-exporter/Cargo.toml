@@ -24,6 +24,10 @@ required-features = ["cdn"]
 name = "increment"
 required-features = ["cdn"]
 
+[[test]]
+name = "migrate"
+required-features = ["cdn"]
+
 [dependencies]
 sekai-unity.workspace = true
 sekai-format.workspace = true

@@ -72,6 +72,8 @@ struct Options {
     verify: bool,
     /// Whether every asset built from tables is built again, whatever the state keeps of it.
     rebuild_tables: bool,
+    /// Whether the views are published anew from the records, whatever the state keeps of them.
+    republish: bool,
     /// Whether the version of the source is only compared with the last one recorded.
     check: bool,
     /// Whether the run publishes the client package of the region instead of its assets.
@@ -134,6 +136,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     let mut force = false;
     let mut verify = false;
     let mut rebuild_tables = false;
+    let mut republish = false;
     let mut check = false;
     let mut client = false;
     let mut watch = None;
@@ -148,6 +151,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
             Long("force") => force = true,
             Long("verify") => verify = true,
             Long("rebuild-tables") => rebuild_tables = true,
+            Long("republish") => republish = true,
             Long("check") => check = true,
             Long("client") => client = true,
             Long("watch") => watch = Some(budget::parse_duration(&parser.value()?.string()?)?),
@@ -164,10 +168,14 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
     if verify && !only.is_empty() {
         return Err("--verify checks a bucket, and a selection is not sent to one".into());
     }
+    if republish && !only.is_empty() {
+        return Err("--republish publishes the views anew, and a selection has none yet".into());
+    }
     let acts = [
         ("--force", force),
         ("--verify", verify),
         ("--rebuild-tables", rebuild_tables),
+        ("--republish", republish),
         ("--only", !only.is_empty()),
     ];
     if let Some((flag, _)) = acts.into_iter().find(|(_, given)| check && *given) {
@@ -195,6 +203,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
         force,
         verify,
         rebuild_tables,
+        republish,
         check,
         client,
         watch,
@@ -603,7 +612,7 @@ fn export_version(
         )?,
         evaluation: opened.evaluation_identity(),
     };
-    if !(options.force || options.verify)
+    if !(options.force || options.verify || options.republish)
         && change(site, &run.targets(), previous.as_ref(), &recorded)?.is_none()
     {
         println!("{key} {} unchanged", recorded.identity.name());
@@ -622,7 +631,15 @@ fn export_version(
     let records = Records::new(files, journal.held(), requests);
     let baseline = {
         let _span = monitor.span("plan", "baseline", &key);
-        Baseline::read(files, site, &key, &run.targets(), &objects, requests)?
+        Baseline::read(
+            files,
+            site,
+            &key,
+            &run.targets(),
+            &objects,
+            requests,
+            options.republish,
+        )?
     };
     let Baseline {
         mut state,
@@ -895,8 +912,8 @@ fn holdings_before(
 
 /// What a run starts from: the state that the last run of the region left, and the previous
 /// publications of its views. When the state does not name the revisions those publications have,
-/// the run changes no publication and keeps only what the state knows of bundles; the version
-/// histories of the views go on from those publications.
+/// or the run publishes the views anew, the run changes no publication and keeps only what the
+/// state knows of bundles; the version histories of the views go on from those publications.
 struct Baseline {
     state: RegionState,
     /// The root of the state, whose chunks a write keeps.
@@ -926,7 +943,7 @@ impl Publications {
 impl Baseline {
     /// The baseline of the state `key` and of `targets`, from the state in `files` and the
     /// publications of `site`, whose documents are read from `store`, with up to `requests` reads
-    /// at once.
+    /// at once. With `anew`, the views are published anew whatever the state names.
     fn read(
         files: &dyn StateFiles,
         site: &Site<'_>,
@@ -934,6 +951,7 @@ impl Baseline {
         targets: &[String],
         store: &dyn Store,
         requests: usize,
+        anew: bool,
     ) -> Result<Self, String> {
         let read = RegionState::read(files, key, requests);
         let read = read.map_err(|e| format!("the state of {key}: {e}"))?;
@@ -945,17 +963,22 @@ impl Baseline {
         let agrees = pointers.iter().all(|(target, pointer)| {
             pointer.as_ref().map(|pointer| &pointer.revision) == state.published.get(*target)
         });
-        let state = if agrees {
+        if anew {
+            println!("{key}: the views are published anew");
+        } else if !agrees {
+            println!("{key}: the state names other publications, so the views are published anew");
+        }
+        let kept = agrees && !anew;
+        let state = if kept {
             state
         } else {
-            println!("{key}: the state names other publications, so the views are published anew");
             RegionState {
                 bundles: state.bundles,
                 ..RegionState::default()
             }
         };
         // A view published anew changes no publication, but its version history goes on.
-        let previous_of = if agrees {
+        let previous_of = if kept {
             Previous::read
         } else {
             Previous::after

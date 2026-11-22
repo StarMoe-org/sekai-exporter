@@ -83,7 +83,8 @@ impl fmt::Display for Key {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+/// `bytes` as lowercase hexadecimal, as [`parse_hex`] reads them.
+pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
@@ -187,6 +188,14 @@ impl LocalStore {
     /// Whether the store has an object named `key`.
     pub fn contains(&self, key: &Key) -> bool {
         self.path(key).is_file()
+    }
+
+    /// Removes the object `key`. An object the store does not have is removed already.
+    pub fn remove(&self, key: &Key) -> io::Result<()> {
+        match std::fs::remove_file(self.path(key)) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        }
     }
 
     /// Writes `bytes` and returns their key. Content that is already stored is not written

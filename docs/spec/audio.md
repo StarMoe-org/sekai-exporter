@@ -107,6 +107,8 @@ The converter gives each waveform as its HCA stream, which the evaluator encodes
 
 The file is MPEG audio layer III at a constant bitrate: MPEG-1 for 32, 44.1 and 48 kHz, MPEG-2 or MPEG-2.5 for lower rates. The bitrate is twice the bitrate of the HCA stream (its frame size × 8 × sample rate / 1024), rounded up to a bitrate of that MPEG version and at most its highest, 320 kb/s for MPEG-1 and 160 kb/s for MPEG-2 and MPEG-2.5. Samples without a lossy source take the highest.
 
+A stereo stream is joint stereo in every frame: a frame coded as mid and side has the mid/side bit of the mode extension, and a frame coded as left and right has mode extension 0, so the mode in the frame header is the same from frame to frame. Some decoders take a change of mode as the start of a new stream and drop the bit reservoir.
+
 The first frame is an Info frame with a tag in the LAME format that gives the frame count, the encoder delay (528 samples, plus the 529 of the decoder) and the padding at the end. Decoders that read the tag, such as ffmpeg and Symphonia, give exactly the samples of the waveform, so `frames` and `loop` in the cue table count the samples of the decoded file. Decoders apply the tag only when its encoder string starts with a name they know, so the string is `LAME` followed by zeros.
 
 The encoder is pure Rust (see [Third-party sources](../third-party.md)) and computes with functions whose results do not depend on the target, so a waveform encodes to the same bytes in native and WebAssembly builds.

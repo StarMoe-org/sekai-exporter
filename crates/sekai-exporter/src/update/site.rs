@@ -118,7 +118,7 @@ impl<'a> Site<'a> {
     /// Puts the objects of `referred` where the site serves them, and records in the holdings of
     /// `objects` that the site holds them. The output directory serves its local store, which
     /// holds them already.
-    pub(super) fn store(
+    pub(crate) fn store(
         &self,
         objects: &Objects<'_>,
         referred: Vec<Object>,

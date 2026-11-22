@@ -25,6 +25,18 @@ use crate::eval::parallel;
 use crate::reuse::{Found, Kept, Record, Recorded, UnitKey, UnitResult};
 use crate::state::{RegionState, StateFiles, UnitState};
 
+/// A document that replaces another, with its size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Replacement {
+    /// The document.
+    pub key: Key,
+    /// Its size in bytes.
+    pub size: u64,
+}
+
+/// The documents that replace others, by the document each replaces.
+pub type Replacements = HashMap<Key, Replacement>;
+
 /// How long after its last pack a run writes the records waiting, though they fill no pack.
 const PACK_INTERVAL: Duration = Duration::from_secs(300);
 

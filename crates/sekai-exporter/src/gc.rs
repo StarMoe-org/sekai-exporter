@@ -16,7 +16,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsString;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -31,8 +30,9 @@ use sekai_pipeline::state::{CHUNKS, ROOTS, RegionState, root_region};
 use sekai_publish::history::Versions;
 use sekai_publish::{Listed, referred};
 
-use crate::bucket::Bucket;
+use crate::bucket;
 use crate::budget;
+use crate::record_files::{RecordFile, RecordFiles, state_name};
 use crate::update::document_objects;
 use crate::update::journal::UPLOADS;
 use crate::update::site::Site;
@@ -81,14 +81,7 @@ fn parse(args: impl Iterator<Item = OsString>) -> Result<Options, lexopt::Error>
 
 pub(crate) fn run(args: impl Iterator<Item = OsString>) -> Result<bool, lexopt::Error> {
     let options = parse(args)?;
-    let bucket = match &options.config {
-        Some(path) => {
-            let config =
-                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-            Bucket::open(&config, options.secrets.as_deref())?
-        }
-        None => None,
-    };
+    let bucket = bucket::configured(options.config.as_deref(), options.secrets.as_deref())?;
     let site = bucket
         .as_ref()
         .map_or_else(|| Site::local(&options.output), Site::Bucket);
@@ -124,7 +117,7 @@ fn collect(options: &Options, site: &Site<'_>) -> Result<bool, lexopt::Error> {
     println!("{RECORD_PACKS}: new {} files, {bytes} bytes", packs.len());
     if options.delete {
         // The records kept are in their new packs before the packs they came from go.
-        collector.write(site, &packs)?;
+        collector.record_files().write(&packs)?;
         for kind in &kinds {
             collector.delete(site, kind)?;
         }
@@ -172,13 +165,6 @@ struct Collector<'a> {
     written_before: SystemTime,
     /// How many reads and deletions run at once.
     requests: usize,
-}
-
-/// A file of records: a pack, or a record kept in a file of its own.
-struct RecordFile {
-    file: Listed,
-    /// Its records, each with the objects it names.
-    records: Vec<(Entry, Vec<Key>)>,
 }
 
 impl RecordFile {
@@ -279,11 +265,6 @@ fn object_key(file: &Listed) -> Option<Key> {
         .next()?
         .parse()
         .ok()
-}
-
-/// The name of the state file `file` among the state files.
-fn state_name(file: &Listed) -> &str {
-    file.name.strip_prefix("state/").unwrap_or(&file.name)
 }
 
 impl Collector<'_> {
@@ -414,9 +395,10 @@ impl Collector<'_> {
     /// kept or when it is small, and so is every file of a single record written before it. A pack
     /// that the new packs give again as it is stays, and is not written again.
     fn records(&self, live: &mut HashSet<Key>) -> Result<(Vec<Pack>, [Kind; 3]), String> {
-        let packs = self.read_packs()?;
-        let units = self.read_singles(UNIT_RECORDS)?;
-        let derivations = self.read_singles(DERIVATION_RECORDS)?;
+        let files = self.record_files();
+        let packs = files.packs()?;
+        let units = files.units()?;
+        let derivations = files.derivations()?;
         let singles = || units.iter().chain(&derivations);
         for file in packs.iter().chain(singles()) {
             if !self.old(&file.file) {
@@ -456,59 +438,12 @@ impl Collector<'_> {
             .map(|file| (file.file.clone(), self.old(&file.file)))
     }
 
-    /// The record packs of the site, with their records.
-    fn read_packs(&self) -> Result<Vec<RecordFile>, String> {
-        let files = self.site.list(&format!("state/{RECORD_PACKS}"))?;
-        self.read_records(files, Pack::read)
-    }
-
-    /// The files of single records in the state directory `directory`, with their records; a
-    /// file that holds no record that can be read holds none.
-    fn read_singles(&self, directory: &str) -> Result<Vec<RecordFile>, String> {
-        let files = self.site.list_sharded(&format!("state/{directory}"))?;
-        self.read_records(files, |name, bytes| {
-            Ok(Entry::of_file(name, bytes).into_iter().collect())
-        })
-    }
-
-    /// The record files `files`, with the records that `read` finds in each and the objects each
-    /// names. A file gone since the listing holds none.
-    fn read_records(
-        &self,
-        files: Vec<Listed>,
-        read: impl Fn(&str, &[u8]) -> io::Result<Vec<Entry>> + Sync,
-    ) -> Result<Vec<RecordFile>, String> {
-        let records = parallel(files.len(), self.requests, |i| {
-            let name = state_name(&files[i]);
-            let named = || -> io::Result<Vec<(Entry, Vec<Key>)>> {
-                let Some(bytes) = self.site.files().read(name)? else {
-                    return Ok(Vec::new());
-                };
-                let entries = read(name, &bytes)?;
-                let objects = entries.iter().map(Entry::objects);
-                let objects = objects.collect::<io::Result<Vec<_>>>()?;
-                Ok(entries.into_iter().zip(objects).collect())
-            };
-            named().map_err(|e| format!("{name}: {e}"))
-        });
-        let files = files.into_iter().zip(records);
-        let files = files.map(|(file, records)| {
-            Ok(RecordFile {
-                file,
-                records: records?,
-            })
-        });
-        files.collect()
-    }
-
-    /// Writes `packs` at `site`.
-    fn write(&self, site: &Site<'_>, packs: &[Pack]) -> Result<(), String> {
-        let written = parallel(packs.len(), self.requests, |i| {
-            let pack = &packs[i];
-            let written = site.files().write(&pack.name, &pack.bytes);
-            written.map_err(|e| format!("{}: {e}", pack.name))
-        });
-        written.into_iter().collect()
+    /// The files of records at the site.
+    fn record_files(&self) -> RecordFiles<'_> {
+        RecordFiles {
+            site: self.site,
+            requests: self.requests,
+        }
     }
 
     /// Deletes the garbage of `kind`, which lies at `site`.

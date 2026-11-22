@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 
+use super::Replacements;
 use crate::eval::hex;
 use crate::reuse::{Record, UnitKey};
 
@@ -133,6 +134,28 @@ impl Entry {
             Subject::Derivation(_) => {
                 let document = self.derivation_record()?.document()?;
                 Ok(document.into_iter().map(|(key, _size)| key).collect())
+            }
+        }
+    }
+
+    /// The entry with the documents it names replaced as `replacements` says, or `None` when
+    /// it names none of them. A unit record that cannot be read names none.
+    pub fn replacing(&self, replacements: &Replacements) -> io::Result<Option<Self>> {
+        match self.subject {
+            Subject::Unit(key) => {
+                let record = Record::read(self.record.as_bytes());
+                let replaced = record.and_then(|record| record.replacing(replacements));
+                replaced.map(|record| Self::unit(key, &record)).transpose()
+            }
+            Subject::Derivation(fingerprint) => {
+                let document = self.derivation_record()?.document()?;
+                let replacement = document.and_then(|(key, _size)| replacements.get(&key));
+                let replaced = replacement.map(|document| DerivationRecord::Document {
+                    key: document.key.to_string(),
+                    size: document.size,
+                });
+                let entry = replaced.map(|record| Self::derivation(fingerprint, &record));
+                entry.transpose()
             }
         }
     }
@@ -258,6 +281,7 @@ pub fn is_pack(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::records::Replacement;
 
     fn derivation(byte: u8, size: u64) -> Entry {
         let key = Key::of(&[byte], "webp").to_string();
@@ -282,6 +306,26 @@ mod tests {
         let key = Key::of(&[7], "webp");
         assert_eq!(read[2].objects().unwrap(), [key]);
         assert!(read[1].objects().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_derivation_record_names_the_document_that_replaces_its_own() {
+        let new = Key::of(&[8], "json");
+        let replacement = Replacement {
+            key: new.clone(),
+            size: 9,
+        };
+        let replacements = Replacements::from([(Key::of(&[7], "webp"), replacement)]);
+        let replaced = derivation(7, 3).replacing(&replacements).unwrap().unwrap();
+        assert_eq!(replaced.subject, Subject::Derivation([7; 32]));
+        let record = DerivationRecord::Document {
+            key: new.to_string(),
+            size: 9,
+        };
+        assert_eq!(replaced.derivation_record().unwrap(), record);
+        assert_eq!(derivation(5, 1).replacing(&replacements).unwrap(), None);
+        let nothing = Entry::derivation([7; 32], &DerivationRecord::Nothing).unwrap();
+        assert_eq!(nothing.replacing(&replacements).unwrap(), None);
     }
 
     #[test]

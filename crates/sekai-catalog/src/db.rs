@@ -9,7 +9,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use redb::{
-    Database, DatabaseError, ReadableDatabase, StorageError, TableDefinition, WriteTransaction,
+    Database, DatabaseError, ReadableDatabase, ReadableTable, StorageError, TableDefinition,
+    WriteTransaction,
 };
 use sekai_format::AssetDocument;
 
@@ -219,6 +220,30 @@ impl Catalog {
         let table = tx.open_table(DERIVATIONS).map_err(other)?;
         let value = table.get(fingerprint).map_err(other)?;
         value.map(|v| decode(v.value())).transpose()
+    }
+
+    /// The output of every fingerprint, in fingerprint order.
+    pub fn derivations(&self) -> io::Result<Vec<([u8; 32], Derived)>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(DERIVATIONS).map_err(other)?;
+        let mut rows = Vec::new();
+        for entry in table.iter().map_err(other)? {
+            let (fingerprint, derived) = entry.map_err(other)?;
+            rows.push((*fingerprint.value(), decode(derived.value())?));
+        }
+        Ok(rows)
+    }
+
+    /// The result of every unit, by key in key order.
+    pub fn units(&self) -> io::Result<Vec<([u8; 32], Vec<u8>)>> {
+        let tx = self.db.begin_read().map_err(other)?;
+        let table = tx.open_table(UNITS).map_err(other)?;
+        let mut rows = Vec::new();
+        for entry in table.iter().map_err(other)? {
+            let (key, result) = entry.map_err(other)?;
+            rows.push((*key.value(), result.value().to_vec()));
+        }
+        Ok(rows)
     }
 
     /// The assets of a version, in name order.

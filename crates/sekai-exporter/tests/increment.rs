@@ -222,6 +222,26 @@ fn each_update_publishes_what_an_update_from_nothing_publishes() {
     }
 }
 
+#[test]
+fn a_republish_publishes_the_views_anew_from_the_records_without_converting() {
+    let scratch = Scratch::new("republish");
+    scratch.update("site", None);
+    let before = VIEWS.map(|view| scratch.files("site", view));
+    let unchanged = scratch.update("site", None);
+    assert!(unchanged.contains("unchanged"), "{unchanged}");
+
+    let republished = scratch.run(&["update", "r"], "site", None, &["--republish"]);
+    assert!(
+        republished.contains("r: the views are published anew"),
+        "{republished}"
+    );
+    assert!(republished.contains("units 3 reused 3"), "{republished}");
+    assert!(republished.contains(" converted 0 "), "{republished}");
+    for (view, before) in VIEWS.into_iter().zip(before) {
+        assert_eq!(scratch.files("site", view), before, "{view}");
+    }
+}
+
 /// Files that nothing a site keeps refers to, by their names under the site: an asset document and
 /// an audio file of the store, a record pack whose one record names the document, and a state chunk
 /// that no region names.

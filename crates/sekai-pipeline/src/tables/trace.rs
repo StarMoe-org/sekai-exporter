@@ -138,19 +138,18 @@ impl<'a> Values<'a> {
         }
     }
 
-    /// The digest of the form `form` of version `version` and of what `reads` give for an asset
-    /// of `plan`, or `None` when what one of them gives cannot be compared with what it gave.
-    /// A failure of the store is an error.
+    /// The digest of `converter`, the identity of the converter of an asset of `plan`, and of
+    /// what `reads` give for the asset, or `None` when what one of them gives cannot be compared
+    /// with what it gave. A failure of the store is an error.
     pub(super) fn digest(
         &self,
-        form: &str,
-        version: u32,
+        converter: &str,
         reads: &[Read],
         plan: &dyn TablePlan,
     ) -> io::Result<Option<String>> {
         let shared = plan.shared();
         let mut hasher = Sha256::new();
-        hasher.update(format!("table reads 1\nform {form} {version}\n"));
+        hasher.update(format!("table reads 1\nform {converter}\n"));
         for read in reads {
             let Some(value) = self.value(read, &shared)? else {
                 return Ok(None);

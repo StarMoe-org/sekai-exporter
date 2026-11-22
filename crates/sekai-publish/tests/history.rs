@@ -329,8 +329,42 @@ fn a_version_that_changes_no_file_keeps_the_publication() {
     assert_eq!(three, two);
 }
 
+/// The files of version 2 published anew: `b` as it was, `c` with other bytes and `z` new,
+/// without `d`.
+fn anew(store: &LocalStore) -> Change {
+    change(
+        &[],
+        &[
+            file(store, "b.png", b"b2"),
+            file(store, "c.png", b"c3"),
+            file(store, "z.png", b"z"),
+        ],
+    )
+}
+
+/// The changes since version 2 of the files of [`anew`], published as `to`.
+fn since_two(to: &str) -> VersionChanges {
+    let removed = RemovedFile {
+        path: "d.png".to_owned(),
+        size: 2,
+        cause: None,
+    };
+    let changed = ChangedFile {
+        path: "c.png".to_owned(),
+        size: 2,
+        previous_size: 1,
+        cause: None,
+    };
+    VersionChanges {
+        added: vec![added("z.png", 1)],
+        removed: vec![removed],
+        changed: vec![changed],
+        ..VersionChanges::new("storage", "2", to, [])
+    }
+}
+
 #[test]
-fn a_view_published_anew_goes_on_with_its_history() {
+fn a_view_published_anew_goes_on_with_its_history_and_the_changes_since_the_version_before() {
     let s = Scratch::new("anew");
     let store = s.store();
     let mut published = Published::default();
@@ -341,15 +375,48 @@ fn a_view_published_anew_goes_on_with_its_history() {
         "3",
         at(4 * 86_400),
         &previous,
-        change(&[], &[file(&store, "z.png", b"z")]),
+        anew(&store),
         &published,
     );
-    assert!(three.changes.is_none());
+    assert_eq!(changes(&store, &three), Some(since_two("3")));
     let entries = history(&store, &three);
-    assert_eq!(
-        entries[0],
-        entry(&three, Some("1970-01-05T00:00:00Z"), 1, None)
+    let time = Some("1970-01-05T00:00:00Z");
+    assert_eq!(entries[0], entry(&three, time, 3, Some([1, 1, 1])));
+    assert_eq!(entries[1..], history(&store, &two));
+}
+
+#[test]
+fn a_version_published_anew_again_tells_the_changes_its_publication_left_out() {
+    let s = Scratch::new("anew-again");
+    let store = s.store();
+    let mut published = Published::default();
+    let two = two_versions(&store, &mut published);
+    // Without the pointer of version 2, the changes of version 3 are not known.
+    let previous = Previous::after(&store, &two).unwrap();
+    let three = publish(
+        &store,
+        "3",
+        at(4 * 86_400),
+        &previous,
+        anew(&store),
+        &NoVersions,
     );
+    assert_eq!(changes(&store, &three), None);
+    // The same files published anew again, with that pointer, tell them.
+    let previous = Previous::after(&store, &three).unwrap();
+    let again = publish(
+        &store,
+        "3",
+        at(5 * 86_400),
+        &previous,
+        anew(&store),
+        &published,
+    );
+    assert_eq!(again.revision, three.revision);
+    assert_eq!(changes(&store, &again), Some(since_two("3")));
+    let entries = history(&store, &again);
+    let time = Some("1970-01-06T00:00:00Z");
+    assert_eq!(entries[0], entry(&again, time, 3, Some([1, 1, 1])));
     assert_eq!(entries[1..], history(&store, &two));
 }
 

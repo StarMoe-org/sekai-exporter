@@ -153,8 +153,16 @@ pub trait TableConverter: Send + Sync {
     /// The asset form.
     fn name(&self) -> &'static str;
 
-    /// The version of the form.
+    /// The version of the form. It is written into every asset document as `form_version`, and
+    /// readers rely on it: it changes with the format of the documents and members.
     fn version(&self) -> u32;
+
+    /// The revision of the converter. It changes when the converter builds an asset differently
+    /// while the form keeps its version, so that no asset of the previous run is kept and every
+    /// one is built again. It is not written into the documents.
+    fn revision(&self) -> u32 {
+        0
+    }
 
     /// Reads the tables and lists the assets. An error fails the run.
     fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError>;

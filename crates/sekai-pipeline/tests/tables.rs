@@ -12,11 +12,16 @@ use sekai_format::{AssetDocument, MemberFile};
 use sekai_pipeline::eval::{Evaluation, Output};
 use sekai_pipeline::metrics::NoRecorder;
 use sekai_pipeline::state::TableOutput;
-use sekai_pipeline::tables::{Built, TableStage, VersionAssets, build, evaluate};
+use sekai_pipeline::tables::{
+    Built, TableStage, VersionAssets, build, evaluate, evaluation_identity,
+};
 
 /// Builds one asset per line of the table `rows`. A line names a bundle, whose first asset and
 /// its member `m` the asset copies; a line `fail` is an asset error.
-struct Copies;
+#[derive(Default)]
+struct Copies {
+    revision: u32,
+}
 
 struct Plan {
     names: Vec<String>,
@@ -69,6 +74,10 @@ impl TableConverter for Copies {
 
     fn version(&self) -> u32 {
         3
+    }
+
+    fn revision(&self) -> u32 {
+        self.revision
     }
 
     fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
@@ -125,15 +134,15 @@ fn version(store: &MemoryStore, bundles: &[(&str, &[u8])]) -> Evaluation {
     }
 }
 
-/// A stage of the converter [`Copies`] whose table `rows` is `rows`, after a run that built
-/// `previous`.
+/// A stage of `copies` whose table `rows` is `rows`, after a run that built `previous`.
 fn with_stage<T>(
     store: &MemoryStore,
+    copies: Copies,
     rows: &'static str,
     previous: &[TableOutput],
     run: impl FnOnce(&TableStage<'_>) -> T,
 ) -> T {
-    let converters: Vec<Box<dyn TableConverter>> = vec![Box::new(Copies)];
+    let converters: Vec<Box<dyn TableConverter>> = vec![Box::new(copies)];
     let read = move |name: &str| match name {
         "rows" => Ok(rows.as_bytes().to_vec()),
         other => Err(io::Error::other(format!("no table {other}"))),
@@ -149,12 +158,26 @@ fn with_stage<T>(
 }
 
 fn run(store: &MemoryStore, evaluation: &mut Evaluation, rows: &'static str) -> io::Result<()> {
-    with_stage(store, rows, &[], |stage| evaluate(stage, evaluation))
+    with_stage(store, Copies::default(), rows, &[], |stage| {
+        evaluate(stage, evaluation)
+    })
 }
 
 /// The assets that a stage with the table `rows` builds from `evaluation`, after a run that
 /// built `previous`.
 fn built(
+    store: &MemoryStore,
+    evaluation: &Evaluation,
+    rows: &'static str,
+    previous: &[Built],
+) -> Vec<Built> {
+    built_by(Copies::default(), store, evaluation, rows, previous)
+}
+
+/// The assets that a stage of `copies` with the table `rows` builds from `evaluation`, after a
+/// run that built `previous`.
+fn built_by(
+    copies: Copies,
     store: &MemoryStore,
     evaluation: &Evaluation,
     rows: &'static str,
@@ -180,7 +203,10 @@ fn built(
         document: &document,
     };
     let previous: Vec<TableOutput> = previous.iter().map(TableOutput::of).collect();
-    with_stage(store, rows, &previous, |stage| build(stage, &version)).unwrap()
+    with_stage(store, copies, rows, &previous, |stage| {
+        build(stage, &version)
+    })
+    .unwrap()
 }
 
 fn read(store: &MemoryStore, key: &Key) -> AssetDocument {
@@ -303,4 +329,51 @@ fn only_the_assets_whose_reads_changed_are_built_again() {
     assert_eq!(kept(&third), ["z/copy0"]);
     let whole = built(&store, &after, "b\nb\n", &[]);
     assert_eq!(documents(&third), documents(&whole));
+}
+
+#[test]
+fn a_new_revision_builds_every_asset_again_in_the_same_form() {
+    let store = MemoryStore::default();
+    let evaluation = version(&store, &[("b", b"one"), ("c", b"two")]);
+    let first = built(
+        &store,
+        &evaluation,
+        "b
+c
+",
+        &[],
+    );
+    let revised = || Copies { revision: 1 };
+    let second = built_by(
+        revised(),
+        &store,
+        &evaluation,
+        "b
+c
+",
+        &first,
+    );
+    assert!(kept(&second).is_empty());
+    assert_eq!(documents(&second), documents(&first));
+    assert_eq!(read(&store, &second[0].output.document).form_version, 3);
+    let third = built_by(
+        revised(),
+        &store,
+        &evaluation,
+        "b
+c
+",
+        &second,
+    );
+    assert_eq!(kept(&third), ["z/copy0", "z/copy1"]);
+}
+
+#[test]
+fn the_identity_of_a_converter_names_its_revision_once_it_has_one() {
+    let identity = |copies: Copies| {
+        let converters: Vec<Box<dyn TableConverter>> = vec![Box::new(copies)];
+        evaluation_identity(&converters)["table copies"].clone()
+    };
+    assert_eq!(identity(Copies::default()), "copies 3");
+    assert_eq!(identity(Copies { revision: 2 }), "copies 3 revision 2");
 }

@@ -935,6 +935,7 @@ impl Publications {
             paths: None,
             tree: None,
             last: None,
+            anew: false,
         };
         self.0.get(target).unwrap_or(&NONE)
     }

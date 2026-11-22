@@ -28,7 +28,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use crate::clock::Utc;
-use crate::history::{self, Last, Made, PathDiff, Versions};
+use crate::history::{self, Changed, Last, Made, PathDiff, Versions};
 use crate::layout::{Layout, Object, Publication};
 use crate::parallel;
 use crate::plan::{Binding, Contribution, File, Plan, PublishError, document_path, hex};
@@ -181,6 +181,9 @@ pub struct Previous {
     pub tree: Option<ObjectReference>,
     /// The publication that the version history continues from.
     pub last: Option<Last>,
+    /// Whether the view is published anew after `last` instead of changed from it, so that the
+    /// change holds every file of the view.
+    pub anew: bool,
 }
 
 impl Previous {
@@ -203,6 +206,7 @@ impl Previous {
             paths,
             tree,
             last,
+            anew: false,
         })
     }
 
@@ -213,6 +217,7 @@ impl Previous {
         let paths = named_paths(store, pointer)?;
         Ok(Self {
             last: Some(Last::of(pointer, paths.as_ref())),
+            anew: true,
             ..Self::default()
         })
     }
@@ -279,6 +284,11 @@ impl<'a> Lookup<'a> {
     /// The file at `path`, if the publication has one.
     pub fn file(&self, path: &str) -> Result<Option<PathFile>, PublishError> {
         self.0.get(path)
+    }
+
+    /// Every file of the publication, in path order.
+    pub(crate) fn files(&self) -> Result<Vec<PathFile>, PublishError> {
+        self.0.all()
     }
 
     /// The asset document of the asset `name`, if the publication has the asset.
@@ -459,6 +469,15 @@ impl<'a, R: Row<Key = String> + Clone> Table<'a, R> {
         Ok(found.ok().map(|index| rows[index].clone()))
     }
 
+    /// Every row of the table, in key order, read without keeping the chunks.
+    fn all(&self) -> Result<Vec<R>, PublishError> {
+        let mut rows = Vec::new();
+        for (_, chunk) in &self.chunks {
+            rows.extend((self.read)(self.store, chunk)?);
+        }
+        Ok(rows)
+    }
+
     /// The chunks of the table after `edits`.
     fn patch(&self, edits: BTreeMap<String, Option<R>>) -> Result<Vec<Patched<R>>, PublishError> {
         let firsts: Vec<String> = self.chunks.iter().map(|(first, _)| first.clone()).collect();
@@ -525,9 +544,15 @@ pub fn apply(
     };
     let changes = PathChanges::new(store, previous.paths.as_ref(), &edits)?;
     let tree_files = changes.tree_files(previous.tree.as_ref())?;
-    // The paths tell what changed since the last publication only when the change applies to it.
-    let diffs = match (&previous.last, &previous.paths) {
-        (Some(_), Some(_)) => Some(changes.diffs(&edits)?),
+    // A change applied to the last publication tells what it did at each path; a view published
+    // anew is compared whole with the version before.
+    let changed = match (&previous.last, &previous.paths) {
+        (Some(last), _) if previous.anew => {
+            let files = changes.rows.values().flatten();
+            let since = history::since(store, view, version, last, files, versions)?;
+            Some(Changed::Whole(since))
+        }
+        (Some(_), Some(_)) => Some(Changed::Patched(changes.diffs(&edits)?)),
         _ => None,
     };
     let (paths, files) = changes.chunks(&mut written)?;
@@ -550,7 +575,7 @@ pub fn apply(
         published_at: published_at.map(|time| Utc::of(time).rfc3339()),
     };
     let last = previous.last.as_ref();
-    let recorded = history::record(store, &mut written, &made, last, diffs, versions)?;
+    let recorded = history::record(store, &mut written, &made, last, changed, versions)?;
 
     let paths = written.put_json(&PathIndex {
         format: "path-index".to_owned(),

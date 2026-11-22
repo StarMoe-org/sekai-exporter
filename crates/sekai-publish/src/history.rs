@@ -8,6 +8,10 @@
 //! version before it: the ones the previous publication recorded, with each path that the change
 //! touched looked up again in the version before. Each change says what it follows from, as the
 //! change applied at its path does; where both publications changed a path, it follows from both.
+//! A view published anew is compared whole with the version before, and what its changes follow
+//! from is not known.
+
+use std::cmp::Ordering;
 
 use sekai_catalog::Store;
 use sekai_format::paths::{PathFile, PathIndex};
@@ -92,30 +96,40 @@ pub(crate) struct Made<'a> {
     pub(crate) published_at: Option<String>,
 }
 
+/// What a publication knows of what its version changed.
+pub(crate) enum Changed {
+    /// What the change applied to the last publication did at its paths.
+    Patched(Vec<PathDiff>),
+    /// The changes since the version before, of a view published anew: none when the pointer or
+    /// the path index of that version is missing.
+    Whole(Option<VersionChanges>),
+}
+
 /// The documents a pointer names the history and the changes by.
 pub(crate) struct Recorded {
     pub(crate) history: ObjectReference,
     pub(crate) changes: Option<ObjectReference>,
 }
 
-/// Writes the history of `made` and the changes of its version, which follows `last`. `diffs`
-/// are what the change from `last` did at the paths of the view, when it was applied to that
-/// publication. The documents of earlier publications are read from `store`, and their pointers
-/// from `versions`.
+/// Writes the history of `made` and the changes of its version, which follows `last`. `changed`
+/// is what the version changed, when it is known. The documents of earlier publications are read
+/// from `store`, and their pointers from `versions`.
 pub(crate) fn record(
     store: &dyn Store,
     written: &mut Written<'_>,
     made: &Made<'_>,
     last: Option<&Last>,
-    diffs: Option<Vec<PathDiff>>,
+    changed: Option<Changed>,
     versions: &dyn Versions,
 ) -> Result<Recorded, PublishError> {
     let Some(last) = last else {
         return write(written, made, [], None);
     };
     let again = last.published_version == made.version;
+    let tells_missing = last.changes.is_none() && matches!(changed, Some(Changed::Whole(Some(_))));
     if again
         && last.revision == made.revision
+        && !tells_missing
         && let Some(history) = &last.history
     {
         // The same publication again: its history and changes stay as they were.
@@ -124,10 +138,13 @@ pub(crate) fn record(
             changes: last.changes.clone(),
         });
     }
-    let changes = match diffs {
+    let changes = match changed {
         None => None,
-        Some(diffs) if again => recompose(store, made.version, last, diffs, versions)?,
-        Some(diffs) => {
+        Some(Changed::Whole(changes)) => changes,
+        Some(Changed::Patched(diffs)) if again => {
+            recompose(store, made.version, last, diffs, versions)?
+        }
+        Some(Changed::Patched(diffs)) => {
             let changes = diffs
                 .iter()
                 .filter_map(|diff| diff.change_from(diff.before.as_ref()));
@@ -188,6 +205,56 @@ fn recompose(
         })
         .collect::<Result<Vec<_>, PublishError>>()?;
     Ok(Some(recorded.revise(version, revised)))
+}
+
+/// The changes of `version` of `view`, published anew after `last` with `files` in path order:
+/// those since the version before, which is the version of `last` or, when `last` is a
+/// publication of `version`, the one before it in its history. None when that version, its
+/// pointer or its path index is missing.
+pub(crate) fn since<'f>(
+    store: &dyn Store,
+    view: &str,
+    version: &str,
+    last: &Last,
+    files: impl Iterator<Item = &'f PathFile>,
+    versions: &dyn Versions,
+) -> Result<Option<VersionChanges>, PublishError> {
+    let from = if last.published_version == version {
+        let before = entries(store, last)?.into_iter().nth(1);
+        match before {
+            Some(entry) => entry.published_version,
+            None => return Ok(None),
+        }
+    } else {
+        last.published_version.clone()
+    };
+    let Some(paths) = versions.pointer(&from)?.and_then(|p| p.paths) else {
+        return Ok(None);
+    };
+    let index = read_path_index(store, &paths)?;
+    let before = Lookup::new(store, Some(&index)).files()?;
+    let changes = between(&before, files);
+    Ok(Some(VersionChanges::new(view, &from, version, changes)))
+}
+
+/// What became of each path from the files `before` to the files `after`, both in path order.
+fn between<'a>(before: &[PathFile], after: impl Iterator<Item = &'a PathFile>) -> Vec<FileChange> {
+    let (mut before, mut after) = (before.iter().peekable(), after.peekable());
+    let mut changes = Vec::new();
+    loop {
+        let order = match (before.peek(), after.peek()) {
+            (None, None) => return changes,
+            (Some(old), Some(new)) => old.path.cmp(&new.path),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+        };
+        let (old, new) = match order {
+            Ordering::Less => (before.next(), None),
+            Ordering::Greater => (None, after.next()),
+            Ordering::Equal => (before.next(), after.next()),
+        };
+        changes.extend(FileChange::between(old, new, None));
+    }
 }
 
 /// Writes `changes`, and the history of `made`: its entry, then `earlier`.

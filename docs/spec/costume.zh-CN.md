@@ -32,7 +32,7 @@ Moesekai 的 3D 服装查看器，以游戏服装界面的方式展示角色穿�
 | `MonoBehaviour` | `ThirdParty.SpringBone/UTJ.SpringCapsuleCollider` |
 | `AimConstraint`、`ParentConstraint`、`PositionConstraint`、`RotationConstraint` | — |
 
-部件的颜色变体贴图，其名称以 `_C`（颜色）、`_S`（阴影）与 `_H`（数值，按线性读取）结尾，是其自身资源包中[贴图形式](texture.zh-CN.md)的资产。它们替换部件材质中 `_MainTex`、`_ShadowTex` 与 `_ValueTex` 属性的贴图。
+部件的颜色变体贴图，其名称以 `_C`（颜色）、`_S`（阴影）与 `_H`（数值，按线性读取）结尾（不区分大小写：名称来自小写的容器路径，如 `tex_body_c`），是其自身资源包中[贴图形式](texture.zh-CN.md)的资产。它们替换部件材质中 `_MainTex`、`_ShadowTex` 与 `_ValueTex` 属性的贴图。
 
 ### costume-motion
 

@@ -32,7 +32,7 @@ The component document lists the components of these classes:
 | `MonoBehaviour` | `ThirdParty.SpringBone/UTJ.SpringCapsuleCollider` |
 | `AimConstraint`, `ParentConstraint`, `PositionConstraint`, `RotationConstraint` | — |
 
-The colour-variation textures of a part, whose names end in `_C` (colour), `_S` (shadow) and `_H` (value, read as linear), are assets of the [texture form](texture.md) in their own bundles. They replace the textures of the `_MainTex`, `_ShadowTex` and `_ValueTex` properties of the part's materials.
+The colour-variation textures of a part, whose names end in `_C` (colour), `_S` (shadow) and `_H` (value, read as linear), in any case (the names come from lower-case container paths: `tex_body_c`), are assets of the [texture form](texture.md) in their own bundles. They replace the textures of the `_MainTex`, `_ShadowTex` and `_ValueTex` properties of the part's materials.
 
 ### costume-motion
 

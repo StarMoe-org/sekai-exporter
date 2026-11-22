@@ -827,6 +827,61 @@ fn an_accessory_has_its_colour_and_the_part_it_hangs_from() {
 }
 
 #[test]
+fn colour_textures_match_their_suffix_in_any_case() {
+    // The game's colour bundles hold `tex_body_c`, `tex_body_s` and `tex_body_h`: asset names
+    // come from lower-case container paths.
+    let bundle = format!("{NEW}color_variation/body/99/0001/ladies_m/02");
+    let version = role_version()
+        .table(
+            "costume3ds",
+            json!([
+                part(1, 1, "body", 1, "casual"),
+                part(2, 1, "head", 1, "default hat"),
+                part(3, 1, "hair", 1, "default hair"),
+                part(1001, 1001, "body", 2, "school")
+            ]),
+        )
+        .table(
+            "costume3dModels",
+            json!([
+                model(1, Some("01/0001"), None),
+                model(2, Some("01/0100"), Some("head_only")),
+                model(3, Some("01/0000"), Some("head_and_hair")),
+                {"costume3dId": 1001, "unit": "light", "assetbundleName": "99/0001",
+                 "colorAssetbundleName": "02"}
+            ]),
+        )
+        .model("body/99/0001/ladies_m", "body")
+        .asset(&bundle, "tex_body_c", TEXTURE)
+        .asset(&bundle, "tex_body_h", TEXTURE)
+        .asset(&bundle, "tex_body_s", TEXTURE);
+    let light = role(&version);
+    let body = light
+        .parts
+        .iter()
+        .find(|part| part.costume3d_id == 1001)
+        .expect("the body of colour 2");
+    let colors = body
+        .model
+        .as_ref()
+        .and_then(|model| model.colors.as_ref())
+        .expect("the colour of the body");
+    assert_eq!(
+        colors.color.as_deref(),
+        Some(&format!("{bundle}/tex_body_c")[..])
+    );
+    assert_eq!(
+        colors.shadow.as_deref(),
+        Some(&format!("{bundle}/tex_body_s")[..])
+    );
+    assert_eq!(
+        colors.value.as_deref(),
+        Some(&format!("{bundle}/tex_body_h")[..])
+    );
+    assert!(body.missing.is_empty(), "{:?}", body.missing);
+}
+
+#[test]
 fn a_colour_bundle_needs_one_texture_for_each_suffix() {
     let version = role_version()
         .table(

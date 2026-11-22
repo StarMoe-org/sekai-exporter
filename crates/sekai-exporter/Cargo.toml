@@ -50,8 +50,11 @@ cpu-time = "1.0.0"
 mimalloc = { version = "0.1", default-features = false }
 sekai-serve = { workspace = true, optional = true }
 
-[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
-libc = "0.2"
+# On Linux, mimalloc also serves the allocations of the C libraries, such as libwebp. glibc would
+# keep the freed image buffers of each encoding in its heaps, and a run that encodes many images
+# would keep growing; mimalloc gives freed memory back to the system.
+[target.'cfg(target_os = "linux")'.dependencies]
+mimalloc = { version = "0.1", default-features = false, features = ["override"] }
 
 [dev-dependencies]
 sekai-testkit.workspace = true

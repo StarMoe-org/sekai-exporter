@@ -5,18 +5,6 @@
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// The C libraries, such as libwebp, allocate through the C allocator. glibc maps a large block on
-/// its own, but once it frees one it raises its mapping threshold to that block's size, and the
-/// blocks below the threshold stay in its heaps when freed. The image buffers of every encoding
-/// then stay in the process, and a run that encodes many images keeps growing. With a fixed
-/// threshold of 128 KiB, those buffers are mapped on their own and given back when freed.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn return_freed_c_blocks() {
-    // SAFETY: `mallopt` changes a setting of the C allocator and is called before any other
-    // thread starts.
-    unsafe { libc::mallopt(libc::M_MMAP_THRESHOLD, 128 << 10) };
-}
-
 #[cfg(feature = "cdn")]
 mod bucket;
 mod budget;
@@ -338,8 +326,6 @@ fn update(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexop
 }
 
 fn main() -> ExitCode {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    return_freed_c_blocks();
     let mut args = std::env::args_os().skip(1);
     let result = match args.next().as_deref().and_then(|c| c.to_str()) {
         Some("export") => export::run(args),

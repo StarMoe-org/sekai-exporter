@@ -266,8 +266,15 @@ pub fn encoder_header(sample_rate: u32, channels: u16, cbr_kbps: u32) -> Result<
             ))
         }
     };
+    // A stereo stream is joint stereo in every frame, as LAME writes it: a frame coded as left
+    // and right has mode extension 0, one coded as mid and side has the mid/side bit. Writing
+    // left/right frames as plain stereo would change the header's mode from frame to frame,
+    // which some decoders take as a new stream and so drop the bit reservoir.
     let channel_mode = if channels >= 2 {
-        frame::ChannelMode::Stereo
+        frame::ChannelMode::JointStereo {
+            ms_stereo: false,
+            intensity_stereo: false,
+        }
     } else {
         frame::ChannelMode::Mono
     };

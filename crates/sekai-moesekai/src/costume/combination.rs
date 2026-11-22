@@ -16,6 +16,9 @@ use sekai_format::costume::{
 use super::sources::{Sources, Version};
 use super::tables::{self, DefaultCostume, Figure, PartRow};
 
+/// The revision of both converters: it counts the changes to how they build their assets.
+const REVISION: u32 = 1;
+
 /// The head types whose face has a variant of its own.
 const FACE_VARIANTS: &[&str] = &["head_all", "head_front", "head_back"];
 /// The default face model and the model next to it.
@@ -37,6 +40,10 @@ impl TableConverter for CostumeRoles {
         VERSION
     }
 
+    fn revision(&self) -> u32 {
+        REVISION
+    }
+
     fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {
         let sources = Sources::read(cx)?;
         let roles = RoleSource::read_all(&sources);
@@ -56,6 +63,10 @@ impl TableConverter for Costumes {
 
     fn version(&self) -> u32 {
         VERSION
+    }
+
+    fn revision(&self) -> u32 {
+        REVISION
     }
 
     fn plan(&self, cx: &dyn TableContext) -> Result<Box<dyn TablePlan>, ConvertError> {

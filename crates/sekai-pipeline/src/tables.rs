@@ -43,18 +43,30 @@ pub struct TableStage<'a> {
     pub previous: &'a [TableOutput],
 }
 
-/// What the assets that `converters` build follow from besides their reads: the form and version
-/// of each converter, under `table <name>`. An asset is kept from the previous run only while
-/// these and its reads are the same.
+/// What the assets that `converters` build follow from besides their reads: the
+/// [identity](identity) of each converter, under `table <name>`. An asset is kept from the
+/// previous run only while these and its reads are the same.
 pub fn evaluation_identity(converters: &[Box<dyn TableConverter>]) -> BTreeMap<String, String> {
     converters
         .iter()
         .map(|converter| {
-            let name = converter.name();
-            let identity = format!("{name} {}", converter.version());
-            (format!("table {name}"), identity)
+            (
+                format!("table {}", converter.name()),
+                identity(converter.as_ref()),
+            )
         })
         .collect()
+}
+
+/// What the assets of `converter` follow from besides their reads: its form, the version of the
+/// form and its revision. A revision of 0 is left out: a converter without one is identified by
+/// its form and version alone.
+fn identity(converter: &dyn TableConverter) -> String {
+    let form = format!("{} {}", converter.name(), converter.version());
+    match converter.revision() {
+        0 => form,
+        revision => format!("{form} revision {revision}"),
+    }
 }
 
 /// An asset built from tables, or kept from the previous run.
@@ -384,10 +396,10 @@ struct Job<'p> {
 }
 
 impl Job<'_> {
-    /// The digest of the form of the asset and of what `reads` give for it.
+    /// The digest of the [identity](identity) of the converter of the asset and of what `reads`
+    /// give for it.
     fn digest(&self, values: &Values<'_>, reads: &[Read]) -> io::Result<Option<String>> {
-        let converter = self.converter;
-        values.digest(converter.name(), converter.version(), reads, self.plan)
+        values.digest(&identity(self.converter), reads, self.plan)
     }
 }
 

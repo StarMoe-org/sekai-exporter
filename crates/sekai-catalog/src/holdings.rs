@@ -159,6 +159,17 @@ impl<'a> Objects<'a> {
     /// holds it. An object named by a document or a record that is not local is there, also when
     /// it is not recorded as held. Bytes that do not match the key are refused.
     fn read_back(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
+        let Some(bytes) = self.fetch_remote(key)? else {
+            return Ok(None);
+        };
+        self.local.put(&bytes, &key.extension)?;
+        self.held.hold(&[(key.clone(), bytes.len() as u64)])?;
+        Ok(Some(bytes))
+    }
+
+    /// The bytes of `key` at the destination, or `None` when it does not have them. Bytes that
+    /// do not match the key are refused.
+    fn fetch_remote(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
         let Some(bytes) = self.remote.fetch(key)? else {
             return Ok(None);
         };
@@ -168,9 +179,17 @@ impl<'a> Objects<'a> {
                 format!("the destination holds other bytes under {key}"),
             ));
         }
-        self.local.put(&bytes, &key.extension)?;
-        self.held.hold(&[(key.clone(), bytes.len() as u64)])?;
         Ok(Some(bytes))
+    }
+
+    /// The bytes of `key`, from the local store or else from the destination, which are not
+    /// kept in the local store; `None` when neither has them. Bytes from the destination that do
+    /// not match the key are refused.
+    pub fn fetch(&self, key: &Key) -> io::Result<Option<Vec<u8>>> {
+        match self.local.read(key) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => self.fetch_remote(key),
+            read => read.map(Some),
+        }
     }
 
     /// The objects whose hashes start with the byte `prefix`, with their sizes: the files of the

@@ -45,6 +45,7 @@ use sha2::{Digest, Sha256};
 
 use crate::claims::Claimant;
 use crate::eval::{self, Evaluation, Output, RootKey};
+use crate::records::Replacements;
 use crate::stream::{self, Entry, Gathered, Inputs, Outside, Stream, Streamed, Units};
 
 /// The revision of how units are evaluated and recorded, which is part of every unit key. It also
@@ -614,6 +615,20 @@ impl Record {
         documents.collect()
     }
 
+    /// The record with the asset documents in `replacements` replaced, or `None` when it names
+    /// none of them.
+    pub fn replacing(mut self, replacements: &Replacements) -> Option<Self> {
+        let mut replaced = false;
+        for asset in &mut self.assets {
+            let replacement = asset.document().ok().and_then(|key| replacements.get(&key));
+            if let Some(document) = replacement {
+                asset.document = document.key.to_string();
+                replaced = true;
+            }
+        }
+        replaced.then_some(self)
+    }
+
     /// The asset document of the asset of the unit that claims `name`, when the unit has one.
     /// Fails when the record names no valid document for it.
     pub fn document(&self, name: &str) -> io::Result<Option<Key>> {
@@ -713,6 +728,7 @@ impl Record {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::records::Replacement;
 
     /// A record of a unit whose roots are objects, as it is stored.
     const OBJECT_RECORD: &str = concat!(
@@ -767,6 +783,21 @@ mod tests {
         };
         assert_eq!(record.unnamed, [("a/c".to_owned(), in_file)]);
         assert_eq!(record.bytes().unwrap(), OBJECT_RECORD.as_bytes());
+    }
+
+    #[test]
+    fn a_record_names_the_documents_that_replace_its_own() {
+        let (old, new) = (Key::of(b"old", "json"), Key::of(b"new", "json"));
+        let named = OBJECT_RECORD.replace(r#""document":"d""#, &format!(r#""document":"{old}""#));
+        let record = Record::read(named.as_bytes()).unwrap();
+        let replacement = Replacement {
+            key: new.clone(),
+            size: 3,
+        };
+        let replacements = Replacements::from([(old, replacement)]);
+        let replaced = record.clone().replacing(&replacements).unwrap();
+        assert_eq!(replaced.documents().unwrap(), [new]);
+        assert_eq!(record.replacing(&Replacements::new()), None);
     }
 
     #[test]

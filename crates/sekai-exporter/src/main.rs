@@ -36,8 +36,12 @@ mod client {
 mod export;
 #[cfg(feature = "cdn")]
 mod gc;
+#[cfg(feature = "cdn")]
+mod migrate;
 mod monitor;
 mod objects;
+#[cfg(feature = "cdn")]
+mod record_files;
 #[cfg(feature = "client")]
 mod script_table;
 #[cfg(feature = "serve")]
@@ -123,8 +127,8 @@ commands:
       <output>/published, and --tree also writes a path tree.
   update <region>... <output> --config <file> [--secrets <dir>]
          [--only <prefix>]... [--threads <n>] [--memory <bytes>] [--plain]
-         [--force] [--verify] [--rebuild-tables] [--check] [--client]
-         [--watch <interval>]
+         [--force] [--verify] [--rebuild-tables] [--republish] [--check]
+         [--client] [--watch <interval>]
       Bring the site of each region of the configuration up to its current
       version, one region after another. The site is the bucket of the
       configuration, or else <output>. The regions share the store of the site,
@@ -156,14 +160,18 @@ commands:
       object the version needs that it lacks, and stops when one is in neither
       the bucket nor <output>/store. An asset built from tables is kept when
       what it read gives what it gave in the last run; --rebuild-tables builds
-      every one again. --only selects bundles of one region by name prefix,
+      every one again. --republish publishes the views anew even when the
+      version is unchanged: units whose bundles hold the same content are taken
+      from their records, the assets built from tables are built again, and
+      the views are published whole. --only selects bundles of one region by name prefix,
       with their dependencies. A selection is neither recorded as a version
       nor sent to a bucket; it publishes under <output>/published and needs an
       <output> without a complete run. --check only looks up the current
       version and prints whether it or the evaluation differs from the last
       one the site recorded. It exits with 0 when every version is unchanged
       and 1 when one changed, downloads and writes nothing, and cannot be
-      combined with --force, --verify, --rebuild-tables or --only. --client
+      combined with --force, --verify, --rebuild-tables, --republish or --only.
+      --client
       publishes the client package that the region's package entry names
       instead of its assets: its player data and the cue sheets of its
       streaming assets are read as bundles, with the class and script tables
@@ -177,7 +185,8 @@ commands:
       removed after it, and its metrics go to <output>/<region>.metrics.jsonl.
       A region whose update fails is looked at again after twice the interval,
       twice that after another failure, and so on up to a day. --watch cannot
-      be combined with --check, --force, --verify, --rebuild-tables or --only.
+      be combined with --check, --force, --verify, --rebuild-tables,
+      --republish or --only.
   gc <output> [--config <file>] [--secrets <dir>] [--grace <duration>]
      [--threads <n>] [--delete]
       Find the files of a site that nothing it keeps refers to, and with
@@ -192,6 +201,18 @@ commands:
       deleted. Records go first, then state chunks and objects, so no record
       names a deleted object. With a bucket, gc holds the lease of the site as
       update does, so no update runs while it deletes.
+  migrate joint-stereo <output> [--config <file>] [--secrets <dir>]
+          [--threads <n>]
+      Rewrite the stereo MP3 files of a site so that every frame is in joint
+      stereo mode, as the encoder writes a stereo sound; they decode to the
+      same samples. The site is the bucket of the configuration, or else
+      <output>. Every asset document that a record names is read, a document
+      with a rewritten MP3 member is written again with it, and the records
+      and the catalog of <output> are rewritten to name the new documents. The
+      new files are at the site before any record names them. Afterwards,
+      update --republish publishes the views with the new documents, and gc
+      finds the files that nothing names any more. With a bucket, migrate
+      holds the lease of the site as update does.
   account <region> --config <file> --secrets <dir>
       Create the guest account of a region and store its credential in <dir>
       under the name of its secret. Run this once; later runs reuse the secret.
@@ -289,6 +310,16 @@ fn gc(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::E
     Err("this build has no sites to collect: enable the cdn feature".into())
 }
 
+#[cfg(feature = "cdn")]
+fn migrate(args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    migrate::run(args)
+}
+
+#[cfg(not(feature = "cdn"))]
+fn migrate(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
+    Err("this build has no sites to migrate: enable the cdn feature".into())
+}
+
 #[cfg(not(feature = "cdn"))]
 fn update(_args: impl Iterator<Item = std::ffi::OsString>) -> Result<bool, lexopt::Error> {
     Err("this build has no distribution sources: enable the cdn feature".into())
@@ -302,6 +333,7 @@ fn main() -> ExitCode {
         Some("script-table") => script_table(args),
         Some("update") => update(args),
         Some("gc") => gc(args),
+        Some("migrate") => migrate(args),
         Some("account") => account(args),
         Some("stats") => stats(args),
         Some("serve") => serve(args),

@@ -77,6 +77,12 @@ fn clip_of(asset: &str) -> String {
         .to_lowercase()
 }
 
+/// Whether `name` ends in `suffix`, ignoring ASCII case.
+fn ends_with_ignore_case(name: &str, suffix: &str) -> bool {
+    let (name, suffix) = (name.as_bytes(), suffix.as_bytes());
+    name.len() >= suffix.len() && name[name.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+}
+
 /// The motion bundle of a figure.
 fn figure_bundle(figure: &Figure) -> &'static str {
     if figure.figure == LADIES { LADIES } else { MEN }
@@ -126,12 +132,14 @@ impl Version {
         self.under_roots(bundle, |bundle| self.colors_of(bundle))
     }
 
-    /// The colour textures of `bundle`, when it holds one texture for each suffix.
+    /// The colour textures of `bundle`, when it holds one texture for each suffix. The suffix
+    /// matches in any case: asset names come from container paths, which are lower case
+    /// (`tex_body_c`), whatever the case of the texture's own name (`tex_body_C`).
     fn colors_of(&self, bundle: &str) -> Option<Colors> {
         let texture = |suffix: &str| {
             self.assets(bundle, TEXTURE)
                 .iter()
-                .find(|name| name.ends_with(suffix))
+                .find(|name| ends_with_ignore_case(name, suffix))
                 .cloned()
         };
         Some(Colors {

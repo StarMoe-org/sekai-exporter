@@ -5,8 +5,8 @@
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use aes::Aes128;
 use aes::cipher::block_padding::Pkcs7;
@@ -602,23 +602,35 @@ fn a_ref_advertisement_without_head_is_an_error() {
 }
 
 /// Answers every request with `body` on a local port, keeping each connection open, and returns
-/// `host:port` with the number of connections accepted so far.
-fn serve_kept_alive(body: &'static str) -> (String, Arc<AtomicUsize>) {
+/// `host:port` with the number of requests each accepted connection has answered so far.
+fn serve_kept_alive(body: &'static str) -> (String, Arc<Mutex<Vec<usize>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap().to_string();
-    let accepted = Arc::new(AtomicUsize::new(0));
-    let counter = accepted.clone();
+    let answered = Arc::new(Mutex::new(Vec::new()));
+    let tally = answered.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming().flatten() {
-            counter.fetch_add(1, Ordering::SeqCst);
-            std::thread::spawn(move || answer_each(stream, body));
+            let connection = {
+                let mut answered = tally.lock().unwrap();
+                answered.push(0);
+                answered.len() - 1
+            };
+            let tally = tally.clone();
+            std::thread::spawn(move || {
+                answer_each(stream, body, || tally.lock().unwrap()[connection] += 1)
+            });
         }
     });
-    (address, accepted)
+    (address, answered)
 }
 
-/// Answers the requests of `stream`, which carry no body, one after another until it closes.
-fn answer_each(mut stream: std::net::TcpStream, body: &str) -> io::Result<()> {
+/// Answers the requests of `stream`, which carry no body, one after another until it closes,
+/// calling `answered` before each response.
+fn answer_each(
+    mut stream: std::net::TcpStream,
+    body: &str,
+    mut answered: impl FnMut(),
+) -> io::Result<()> {
     loop {
         let mut head = Vec::new();
         let mut byte = [0];
@@ -626,6 +638,7 @@ fn answer_each(mut stream: std::net::TcpStream, body: &str) -> io::Result<()> {
             stream.read_exact(&mut byte)?;
             head.push(byte[0]);
         }
+        answered();
         let length = body.len();
         write!(
             stream,
@@ -634,22 +647,45 @@ fn answer_each(mut stream: std::net::TcpStream, body: &str) -> io::Result<()> {
     }
 }
 
+/// The number of requests each connection answered while `Tables` read its revision and five
+/// tables through `connections` pools, six requests in all.
+///
+/// A pool puts a connection back in a task of its own once the response is read, so a request
+/// that follows at once can find the pool empty and dial again. The number of connections is
+/// therefore not exact, and the tests look at the requests each connection answered.
+fn requests_per_connection(connections: usize) -> Vec<usize> {
+    let (base, answered) = serve_kept_alive(r#"{"sha": "abc123"}"#);
+    let source = TableSource::Git {
+        revision: format!("http://{base}/commits/HEAD"),
+        revision_field: "sha".to_owned(),
+        table: format!("http://{base}/{{name}}"),
+    };
+    let network: Network = serde_json::from_value(json!({"connections": connections})).unwrap();
+    let tables = Tables::open(&source, &network).unwrap();
+    for name in ["a", "b", "c", "d", "e"] {
+        tables.read(name).unwrap();
+    }
+    answered.lock().unwrap().clone()
+}
+
 #[test]
 fn requests_take_the_connection_pools_in_turn() {
-    for connections in [1, 3] {
-        let (base, accepted) = serve_kept_alive(r#"{"sha": "abc123"}"#);
-        let source = TableSource::Git {
-            revision: format!("http://{base}/commits/HEAD"),
-            revision_field: "sha".to_owned(),
-            table: format!("http://{base}/{{name}}"),
-        };
-        let network: Network = serde_json::from_value(json!({"connections": connections})).unwrap();
-        let tables = Tables::open(&source, &network).unwrap();
-        for name in ["a", "b", "c", "d", "e"] {
-            tables.read(name).unwrap();
-        }
-        assert_eq!(accepted.load(Ordering::SeqCst), connections);
-    }
+    // Each of three pools takes two of the six requests, so no connection answers more.
+    let answered = requests_per_connection(3);
+    assert_eq!(answered.iter().sum::<usize>(), 6);
+    assert!(
+        answered.iter().all(|&requests| requests <= 2),
+        "{answered:?}"
+    );
+}
+
+#[test]
+fn a_pool_keeps_its_connection_for_later_requests() {
+    let answered = requests_per_connection(1);
+    assert!(
+        answered.iter().any(|&requests| requests > 1),
+        "{answered:?}"
+    );
 }
 
 #[test]

@@ -8,12 +8,19 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
-use sekai_format::publication::Pointer;
+use sekai_format::publication::{
+    IndexChunk, IndexRoot, ListingEntry, ListingTable, Pointer, TableChunk,
+    VERSION as PUBLICATION_VERSION,
+};
 use sekai_serve::server::{Options, Server};
 use sekai_serve::{ObjectId, Routes};
 use sha2::{Digest, Sha256};
 
 const ROUTES: &str = r#"{ "routes": [
+    { "pattern": "/listings/{region}/{view}@{version}/{form}", "listings": true },
+    { "pattern": "/listings/{region}/{view}/{form}", "listings": true },
+    { "pattern": "/listings/{region}/{view}@{version}", "listings": true },
+    { "pattern": "/listings/{region}/{view}", "listings": true },
     { "pattern": "/{region}@{version}/{path}", "view": "storage" },
     { "pattern": "/{region}/{path}", "view": "storage" }
 ], "max_age": 0 }"#;
@@ -703,4 +710,113 @@ fn a_pointer_that_is_too_long_is_not_read() {
     // Nothing of the failure is remembered: the pointer answers once it is short.
     std::fs::write(view.join("current.json"), &pointer).unwrap();
     assert_eq!(server.get("/en/a.txt").body, b"first");
+}
+
+#[test]
+fn form_listings_are_served_concurrently_and_recover_from_damage() {
+    let output = Output::new("form-listings");
+    // Publish a storage view (no index root) and a canonical view (with multi-chunk form listing).
+    output.publish("jp", "1", &[("a.txt", b"first")]);
+
+    let entries: Vec<ListingEntry> = (0..6)
+        .map(|i| ListingEntry {
+            name: format!("live2d/model/m{i:02}/buildmodeldata"),
+            fingerprint: hex(&sha256(format!("fp-{i}").as_bytes())),
+            size: 1000 + i,
+        })
+        .collect();
+    let mut table_chunks = Vec::new();
+    let mut chunk_files = Vec::new();
+    for part in entries.chunks(2) {
+        let bytes = serde_json::to_vec(&IndexChunk {
+            format: "index-chunk".to_owned(),
+            version: PUBLICATION_VERSION,
+            rows: part.to_vec(),
+        })
+        .unwrap();
+        let hash = output.put(&bytes, "json");
+        chunk_files.push(output.object(hash, "json"));
+        table_chunks.push(TableChunk {
+            first: part[0].name.clone(),
+            sha256: hex(&hash),
+            rows: part.len() as u64,
+        });
+    }
+    let root = IndexRoot {
+        format: "index-root".to_owned(),
+        version: PUBLICATION_VERSION,
+        published_version: "7.1.0".to_owned(),
+        revision: "rev-1".to_owned(),
+        directories: Vec::new(),
+        listings: vec![ListingTable {
+            form: "live2d-model".to_owned(),
+            chunks: table_chunks,
+        }],
+        failures: Vec::new(),
+    };
+    let root_hash = output.put(&serde_json::to_vec(&root).unwrap(), "json");
+    let pointer = Pointer {
+        format: "pointer".to_owned(),
+        version: sekai_format::publication::POINTER_VERSION,
+        published_version: "7.1.0".to_owned(),
+        revision: "rev-1".to_owned(),
+        root: Some(hex(&root_hash)),
+        paths: None,
+        tree: None,
+        history: None,
+        changes: None,
+    };
+    let pointer_bytes = serde_json::to_vec(&pointer).unwrap();
+    let view = output.0.join("published/jp/canonical");
+    std::fs::create_dir_all(view.join("versions")).unwrap();
+    std::fs::write(view.join("versions/7.1.0.json"), &pointer_bytes).unwrap();
+    std::fs::write(view.join("current.json"), &pointer_bytes).unwrap();
+
+    let server = &Running::start(&output, options());
+
+    // Simultaneous requests on a cold cache all succeed with identical JSON.
+    std::thread::scope(|scope| {
+        for _ in 0..32 {
+            scope.spawn(move || {
+                let reply = server.get("/listings/jp/canonical/live2d-model");
+                assert_eq!(reply.status, 200);
+                let doc: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(doc["format"], "form-listing");
+                assert_eq!(doc["form"], "live2d-model");
+                assert_eq!(doc["assets"].as_array().unwrap().len(), 6);
+            });
+        }
+    });
+
+    // Version-pinned, form index, HEAD, If-None-Match -> 304, and 404s.
+    let forms = server.get("/listings/jp/canonical@7.1.0");
+    assert_eq!(forms.status, 200);
+    let forms_doc: serde_json::Value = serde_json::from_slice(&forms.body).unwrap();
+    assert_eq!(
+        forms_doc["forms"],
+        serde_json::json!([{ "form": "live2d-model", "assets": 6 }])
+    );
+    let etag = forms.header("etag").to_owned();
+    let not_mod = server.request(
+        "GET",
+        "/listings/jp/canonical@7.1.0",
+        &[("If-None-Match", &etag)],
+    );
+    assert_eq!((not_mod.status, not_mod.body.len()), (304, 0));
+    let head = server.request("HEAD", "/listings/jp/canonical/live2d-model", &[]);
+    assert_eq!((head.status, head.body.len()), (200, 0));
+    assert!(!head.header("content-length").is_empty());
+
+    assert_eq!(server.get("/listings/jp/storage").status, 404);
+    assert_eq!(server.get("/listings/jp/canonical/missing").status, 404);
+
+    // Damage a chunk on a fresh server -> 500; restore -> 200.
+    let fresh = Running::start(&output, options());
+    let mut damaged = std::fs::read(&chunk_files[1]).unwrap();
+    *damaged.last_mut().unwrap() ^= 1;
+    std::fs::write(&chunk_files[1], &damaged).unwrap();
+    assert_eq!(fresh.get("/listings/jp/canonical/live2d-model").status, 500);
+    *damaged.last_mut().unwrap() ^= 1;
+    std::fs::write(&chunk_files[1], &damaged).unwrap();
+    assert_eq!(fresh.get("/listings/jp/canonical/live2d-model").status, 200);
 }

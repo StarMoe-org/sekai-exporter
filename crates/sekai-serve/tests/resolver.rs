@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use sekai_format::paths::{Chunk, ChunkReference, PathFile, PathIndex};
-use sekai_format::publication::{ObjectReference, Pointer};
+use sekai_format::publication::{
+    IndexChunk, IndexRoot, ListingEntry, ListingTable, ObjectReference, Pointer, TableChunk,
+    VERSION as PUBLICATION_VERSION,
+};
 use sekai_serve::{
     Body, Fault, Fetched, Limits, Lookup, ObjectId, Pending, Read, Request, Resolver, Response,
     Routes, Slice,
@@ -125,9 +128,10 @@ impl Published {
         self.reads.borrow_mut().push(read.clone());
         let (name, stored) = match read {
             Read::Pointer(name) => (name.clone(), self.pointers.get(name)),
-            Read::Root(object) | Read::Chunk(object) => {
-                (object.path(), self.objects.get(&object.path()))
-            }
+            Read::Root(object)
+            | Read::Chunk(object)
+            | Read::IndexRoot(object)
+            | Read::ListingChunk(object) => (object.path(), self.objects.get(&object.path())),
         };
         match stored {
             _ if self.failing.contains(&name) => Fetched::Failed("the disk is on fire"),
@@ -142,6 +146,8 @@ impl Published {
             Read::Pointer(_) => "pointer",
             Read::Root(_) => "root",
             Read::Chunk(_) => "chunk",
+            Read::IndexRoot(_) => "index_root",
+            Read::ListingChunk(_) => "listing_chunk",
         };
         self.reads.take().into_iter().map(kind).collect()
     }
@@ -894,6 +900,8 @@ mod lookups {
                 Read::Pointer(_) => "pointer",
                 Read::Root(_) => "root",
                 Read::Chunk(_) => "chunk",
+                Read::IndexRoot(_) => "index_root",
+                Read::ListingChunk(_) => "listing_chunk",
             };
             assert_eq!(read, kind, "{fault}");
 
@@ -1306,5 +1314,1075 @@ mod documents {
         let (response, fault) = lookup(&resolver, &published, &get(TREE), 0);
         assert_eq!(response.status, 500);
         assert!(matches!(fault.unwrap().read, Read::Pointer(_)));
+    }
+}
+
+mod form_listings {
+    use super::*;
+    use serde_json::Value;
+
+    fn routes(settings: &str) -> Routes {
+        let json = format!(
+            r#"{{ "routes": [
+                {{ "pattern": "/listings/{{region}}/{{view}}@{{version}}/{{form}}", "listings": true }},
+                {{ "pattern": "/listings/{{region}}/{{view}}/{{form}}", "listings": true }},
+                {{ "pattern": "/listings/{{region}}/{{view}}@{{version}}", "listings": true }},
+                {{ "pattern": "/listings/{{region}}/{{view}}", "listings": true }},
+                {{ "pattern": "/live2d/{{region}}/models", "view": "canonical", "form": "live2d-model", "listings": true }},
+                {{ "pattern": "/{{region}}/{{view}}/{{path}}" }}
+            ]{settings} }}"#
+        );
+        Routes::from_json(json.as_bytes()).unwrap()
+    }
+
+    fn resolver(settings: &str) -> Resolver {
+        Resolver::new(routes(settings), Limits::default())
+    }
+
+    fn json(response: &Response) -> Value {
+        let Body::Bytes(bytes) = &response.body else {
+            panic!("a form listing is a document: {response:?}");
+        };
+        serde_json::from_slice(bytes).unwrap()
+    }
+
+    fn entry(name: &str, size: u64) -> ListingEntry {
+        ListingEntry {
+            name: name.to_owned(),
+            fingerprint: hex(&sha256(name.as_bytes())),
+            size,
+        }
+    }
+
+    /// Publishes an `index-root` with `forms` (each a form name and its sorted entries, split into
+    /// chunks of `per_chunk`) onto `target` at `version` / `revision`, returning the store paths of
+    /// the index root and each chunk.
+    fn publish_index(
+        published: &mut Published,
+        target: &str,
+        version: &str,
+        revision: &str,
+        forms: &[(&str, Vec<ListingEntry>)],
+        per_chunk: usize,
+    ) -> (String, Vec<String>) {
+        let mut tables = Vec::new();
+        let mut chunk_paths = Vec::new();
+        for (form, rows) in forms {
+            let mut chunks = Vec::new();
+            for part in rows.chunks(per_chunk) {
+                let bytes = serde_json::to_vec(&IndexChunk {
+                    format: "index-chunk".to_owned(),
+                    version: PUBLICATION_VERSION,
+                    rows: part.to_vec(),
+                })
+                .unwrap();
+                let hash = sha256(&bytes);
+                let path = object(hash, "json").path();
+                published.objects.insert(path.clone(), bytes);
+                chunk_paths.push(path);
+                chunks.push(TableChunk {
+                    first: part[0].name.clone(),
+                    sha256: hex(&hash),
+                    rows: part.len() as u64,
+                });
+            }
+            tables.push(ListingTable {
+                form: (*form).to_owned(),
+                chunks,
+            });
+        }
+        let index = IndexRoot {
+            format: "index-root".to_owned(),
+            version: PUBLICATION_VERSION,
+            published_version: version.to_owned(),
+            revision: revision.to_owned(),
+            directories: Vec::new(),
+            listings: tables,
+            failures: Vec::new(),
+        };
+        let bytes = serde_json::to_vec(&index).unwrap();
+        let root_hash = sha256(&bytes);
+        let root_path = object(root_hash, "json").path();
+        published.objects.insert(root_path.clone(), bytes);
+        let pointer = Pointer {
+            format: "pointer".to_owned(),
+            version: sekai_format::publication::POINTER_VERSION,
+            published_version: version.to_owned(),
+            revision: revision.to_owned(),
+            root: Some(hex(&root_hash)),
+            paths: None,
+            tree: None,
+            history: None,
+            changes: None,
+        };
+        published.make_current(target, &pointer);
+        (root_path, chunk_paths)
+    }
+
+    fn sample() -> (Published, String, Vec<String>) {
+        let mut published = Published::default();
+        let models = vec![
+            entry("live2d/model/01ichika/buildmodeldata", 100),
+            entry("live2d/model/02saki/buildmodeldata", 200),
+            entry("live2d/model/18mafuyu/buildmodeldata", 300),
+        ];
+        let motions = vec![entry("live2d/motion/01ichika_base/buildmotiondata", 50)];
+        let (root, chunks) = publish_index(
+            &mut published,
+            "jp/canonical",
+            "7.1.0",
+            "rev-1",
+            &[("live2d-model", models), ("live2d-motions", motions)],
+            2,
+        );
+        // Storage view has only a path index and no `index-root`.
+        published.publish("jp/storage", "7.1.0", &files(&["a.png"]), 8192);
+        (published, root, chunks)
+    }
+
+    #[test]
+    fn forms_and_form_assets_are_listed_with_headers_and_caching() {
+        let (published, _, _) = sample();
+        let resolver = resolver(r#", "max_age": 15, "cors": "*""#);
+
+        // Listing all forms reads only the pointer and the index root (no listing chunks).
+        let forms_res = answer(&resolver, &published, &get("/listings/jp/canonical"));
+        assert_eq!(forms_res.status, 200);
+        assert_eq!(header(&forms_res, "content-type"), Some("application/json"));
+        assert_eq!(
+            header(&forms_res, "cache-control"),
+            Some("public, max-age=15")
+        );
+        assert_eq!(
+            header(&forms_res, "x-content-type-options"),
+            Some("nosniff")
+        );
+        assert_eq!(header(&forms_res, "access-control-allow-origin"), Some("*"));
+        assert_eq!(published.reads(), ["pointer", "index_root"]);
+        assert_eq!(
+            json(&forms_res),
+            serde_json::json!({
+                "format": "form-listings",
+                "version": 1,
+                "view": "canonical",
+                "published_version": "7.1.0",
+                "revision": "rev-1",
+                "forms": [
+                    { "form": "live2d-model", "assets": 3 },
+                    { "form": "live2d-motions", "assets": 1 },
+                ],
+            })
+        );
+        // Repeat reads nothing.
+        assert_eq!(
+            answer(&resolver, &published, &get("/listings/jp/canonical")).status,
+            200
+        );
+        assert_eq!(published.reads(), [""; 0]);
+
+        // Listing a multi-chunk form reads its two chunks and concatenates them in order.
+        let models_res = answer(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical/live2d-model"),
+        );
+        assert_eq!(models_res.status, 200);
+        assert_eq!(published.reads(), ["listing_chunk", "listing_chunk"]);
+        let Body::Bytes(bytes) = &models_res.body else {
+            panic!("expected bytes");
+        };
+        let etag = format!("\"{}\"", hex(&sha256(bytes)));
+        assert_eq!(header(&models_res, "etag"), Some(etag.as_str()));
+        let len = bytes.len().to_string();
+        assert_eq!(header(&models_res, "content-length"), Some(len.as_str()));
+        assert_eq!(
+            json(&models_res),
+            serde_json::json!({
+                "format": "form-listing",
+                "version": 1,
+                "view": "canonical",
+                "published_version": "7.1.0",
+                "revision": "rev-1",
+                "form": "live2d-model",
+                "assets": [
+                    {
+                        "name": "live2d/model/01ichika/buildmodeldata",
+                        "fingerprint": hex(&sha256(b"live2d/model/01ichika/buildmodeldata")),
+                        "size": 100
+                    },
+                    {
+                        "name": "live2d/model/02saki/buildmodeldata",
+                        "fingerprint": hex(&sha256(b"live2d/model/02saki/buildmodeldata")),
+                        "size": 200
+                    },
+                    {
+                        "name": "live2d/model/18mafuyu/buildmodeldata",
+                        "fingerprint": hex(&sha256(b"live2d/model/18mafuyu/buildmodeldata")),
+                        "size": 300
+                    }
+                ]
+            })
+        );
+        // Repeat (including fixed-form route targeting the same form) reads nothing.
+        assert_eq!(
+            answer(&resolver, &published, &get("/live2d/jp/models")).status,
+            200
+        );
+        assert_eq!(published.reads(), [""; 0]);
+
+        // Conditional GET (exact, weak, comma-separated list, wildcard, mismatch), Range ignored,
+        // HEAD, OPTIONS, POST, and 414 URI too long.
+        let listed_tags = format!("\"00\", {etag}");
+        for (if_none_match, expected) in [
+            (etag.as_str(), 304),
+            (&format!("W/{etag}"), 304),
+            (listed_tags.as_str(), 304),
+            ("*", 304),
+            ("\"00\"", 200),
+        ] {
+            let req = Request {
+                if_none_match: Some(if_none_match),
+                ..get("/listings/jp/canonical/live2d-model")
+            };
+            let res = answer(&resolver, &published, &req);
+            assert_eq!(res.status, expected, "{if_none_match}");
+            if expected == 304 {
+                assert_eq!(res.body, Body::Empty);
+            }
+        }
+        let ranged = answer(
+            &resolver,
+            &published,
+            &Request {
+                range: Some("bytes=0-10"),
+                ..get("/listings/jp/canonical/live2d-model")
+            },
+        );
+        assert_eq!(ranged.status, 200);
+        assert_eq!(header(&ranged, "accept-ranges"), None);
+        assert_eq!(header(&ranged, "content-range"), None);
+        assert_eq!(header(&ranged, "content-length"), Some(len.as_str()));
+
+        let head = answer(
+            &resolver,
+            &published,
+            &Request {
+                method: "HEAD",
+                ..get("/listings/jp/canonical/live2d-model")
+            },
+        );
+        assert_eq!((head.status, &head.body), (200, &Body::Empty));
+        assert_eq!(header(&head, "content-length"), Some(len.as_str()));
+
+        let options = answer(
+            &resolver,
+            &published,
+            &Request {
+                method: "OPTIONS",
+                ..get("/listings/jp/canonical/live2d-model")
+            },
+        );
+        assert_eq!(options.status, 204);
+        let post = answer(
+            &resolver,
+            &published,
+            &Request {
+                method: "POST",
+                ..get("/listings/jp/canonical/live2d-model")
+            },
+        );
+        assert_eq!(post.status, 405);
+        let too_long = format!("/listings/jp/canonical/{}", "a".repeat(8 << 10));
+        assert_eq!(answer(&resolver, &published, &get(&too_long)).status, 414);
+    }
+
+    #[test]
+    fn redirect_delivery_still_serves_form_listings_as_json() {
+        let (published, _, _) = sample();
+        let settings = r#", "delivery": "redirect", "store_url": "https://cdn.example/store""#;
+        let res = answer(
+            &resolver(settings),
+            &published,
+            &get("/listings/jp/canonical/live2d-motions"),
+        );
+        assert_eq!(res.status, 200);
+        assert_eq!(header(&res, "content-type"), Some("application/json"));
+        assert_eq!(json(&res)["assets"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn version_pinned_and_absent_listings_behave_as_specified() {
+        let (mut published, _, _) = sample();
+        let resolver = resolver(r#", "max_age": 30"#);
+
+        // Version 7.1.0 is reachable by version pin and current.
+        let v1 = answer(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical@7.1.0/live2d-model"),
+        );
+        assert_eq!(v1.status, 200);
+        assert_eq!(json(&v1)["published_version"], "7.1.0");
+        assert_eq!(json(&v1)["assets"].as_array().unwrap().len(), 3);
+
+        // Publish version 7.2.0: after max_age, current reflects 7.2.0 while @7.1.0 stays pinned.
+        publish_index(
+            &mut published,
+            "jp/canonical",
+            "7.2.0",
+            "rev-2",
+            &[(
+                "live2d-model",
+                vec![entry("live2d/model/01ichika/buildmodeldata", 101)],
+            )],
+            2,
+        );
+        let (v2, fault) = lookup(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical/live2d-model"),
+            30,
+        );
+        assert_eq!(fault, None);
+        assert_eq!(json(&v2)["published_version"], "7.2.0");
+        assert_eq!(json(&v2)["assets"].as_array().unwrap().len(), 1);
+        let (still_v1, fault) = lookup(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical@7.1.0/live2d-model"),
+            30,
+        );
+        assert_eq!(fault, None);
+        assert_eq!(json(&still_v1)["published_version"], "7.1.0");
+        assert_eq!(json(&still_v1)["assets"].as_array().unwrap().len(), 3);
+
+        // Missing form, view without index root (storage), missing region/version -> 404.
+        for missing in [
+            "/listings/jp/canonical/no-such-form",
+            "/listings/jp/storage",
+            "/listings/jp/storage/live2d-model",
+            "/listings/en/canonical",
+            "/listings/jp/canonical@9.9.9/live2d-model",
+        ] {
+            let (res, fault) = lookup(&resolver, &published, &get(missing), 30);
+            assert_eq!((res.status, fault), (404, None), "{missing}");
+        }
+
+        // Empty index root (0 forms) lists empty forms array and 404s for any form.
+        publish_index(&mut published, "en/canonical", "1.0", "rev-empty", &[], 2);
+        let (empty, fault) = lookup(&resolver, &published, &get("/listings/en/canonical"), 100);
+        assert_eq!((empty.status, fault), (200, None));
+        assert_eq!(json(&empty)["forms"], serde_json::json!([]));
+        let (absent, fault) = lookup(
+            &resolver,
+            &published,
+            &get("/listings/en/canonical/live2d-model"),
+            100,
+        );
+        assert_eq!((absent.status, fault), (404, None));
+    }
+
+    #[test]
+    fn views_sharing_an_index_root_do_not_bleed_view_names_in_cache() {
+        let mut published = Published::default();
+        let forms = vec![("font", vec![entry("font/main", 12)])];
+        publish_index(&mut published, "jp/canonical", "1", "rev-1", &forms, 2);
+        publish_index(&mut published, "jp/client", "1", "rev-1", &forms, 2);
+
+        let resolver = resolver("");
+        let a_forms = json(&answer(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical"),
+        ));
+        let b_forms = json(&answer(&resolver, &published, &get("/listings/jp/client")));
+        assert_eq!(a_forms["view"], "canonical");
+        assert_eq!(b_forms["view"], "client");
+
+        let a_font = json(&answer(
+            &resolver,
+            &published,
+            &get("/listings/jp/canonical/font"),
+        ));
+        let b_font = json(&answer(
+            &resolver,
+            &published,
+            &get("/listings/jp/client/font"),
+        ));
+        assert_eq!(a_font["view"], "canonical");
+        assert_eq!(b_font["view"], "client");
+    }
+
+    #[test]
+    fn corrupt_pointer_index_root_or_listing_chunk_fails_and_recovers() {
+        let (mut published, root_path, chunk_paths) = sample();
+        let whole = published.objects.clone();
+
+        // Bad pointer.root hash -> 500 on pointer.
+        let mut bad_ptr: Pointer =
+            serde_json::from_slice(&published.pointers["jp/canonical/current.json"]).unwrap();
+        let good_ptr = bad_ptr.clone();
+        bad_ptr.root = Some("../escape".to_owned());
+        published.make_current("jp/canonical", &bad_ptr);
+        let (res, fault) = lookup(
+            &resolver(""),
+            &published,
+            &get("/listings/jp/canonical/live2d-model"),
+            0,
+        );
+        assert_eq!(res.status, 500);
+        assert_eq!(header(&res, "cache-control"), Some("no-store"));
+        assert!(matches!(fault.unwrap().read, Read::Pointer(_)));
+        published.make_current("jp/canonical", &good_ptr);
+
+        // Mutated, truncated, missing, or unreadable index root or chunk -> 500, not remembered.
+        for (expected_kind, path) in [
+            ("index_root", root_path.as_str()),
+            ("listing_chunk", chunk_paths[0].as_str()),
+            ("listing_chunk", chunk_paths[1].as_str()),
+        ] {
+            for mode in ["changed", "truncated", "missing", "unreadable"] {
+                match mode {
+                    "changed" => {
+                        *published.objects.get_mut(path).unwrap().last_mut().unwrap() ^= 1;
+                    }
+                    "truncated" => published.objects.get_mut(path).unwrap().truncate(8),
+                    "missing" => {
+                        published.objects.remove(path);
+                    }
+                    "unreadable" => published.failing.push(path.to_owned()),
+                    _ => unreachable!(),
+                }
+                let r = resolver("");
+                let (res, fault) = lookup(
+                    &r,
+                    &published,
+                    &get("/listings/jp/canonical/live2d-model"),
+                    0,
+                );
+                assert_eq!(res.status, 500, "{expected_kind} {mode}");
+                let fault = fault.unwrap();
+                let kind = match fault.read {
+                    Read::IndexRoot(_) => "index_root",
+                    Read::ListingChunk(_) => "listing_chunk",
+                    _ => "other",
+                };
+                assert_eq!(kind, expected_kind, "{fault}");
+
+                // Recovery once whole again on the SAME resolver (failure was not cached).
+                published.objects = whole.clone();
+                published.failing.clear();
+                let (ok, fault) = lookup(
+                    &r,
+                    &published,
+                    &get("/listings/jp/canonical/live2d-model"),
+                    0,
+                );
+                assert_eq!((ok.status, fault), (200, None), "{expected_kind} {mode}");
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_and_index_root_metadata_mismatch_fails_without_false_cache_hit() {
+        let (mut published, _, _) = sample();
+        let good_ptr: Pointer =
+            serde_json::from_slice(&published.pointers["jp/canonical/current.json"]).unwrap();
+        // A second view points to the SAME valid index root hash, but claims a different version.
+        let mismatched = Pointer {
+            published_version: "9.9.9".to_owned(),
+            ..good_ptr.clone()
+        };
+        published.make_current("en/canonical", &mismatched);
+
+        let resolver = resolver("");
+        // Populate the cache with the valid jp publication first.
+        assert_eq!(
+            answer(
+                &resolver,
+                &published,
+                &get("/listings/jp/canonical/live2d-model")
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            answer(&resolver, &published, &get("/listings/jp/canonical")).status,
+            200
+        );
+
+        // The mismatched pointer MUST NOT get a cache hit and MUST fail with 500.
+        for path in [
+            "/listings/en/canonical",
+            "/listings/en/canonical/live2d-model",
+        ] {
+            let (res, fault) = lookup(&resolver, &published, &get(path), 0);
+            assert_eq!(res.status, 500, "{path}");
+            assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)), "{path}");
+        }
+
+        // Revision mismatch also fails.
+        let rev_mismatch = Pointer {
+            revision: "wrong-rev".to_owned(),
+            ..good_ptr
+        };
+        published.make_current("tw/canonical", &rev_mismatch);
+        let (res, fault) = lookup(
+            &resolver,
+            &published,
+            &get("/listings/tw/canonical/live2d-model"),
+            0,
+        );
+        assert_eq!(res.status, 500);
+        assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)));
+
+        // On a fresh resolver, a metadata-mismatched IndexRoot is NOT remembered in state.index.
+        let fresh = super::form_listings::resolver("");
+        let (res, fault) = lookup(
+            &fresh,
+            &published,
+            &get("/listings/en/canonical/live2d-model"),
+            0,
+        );
+        assert_eq!(res.status, 500);
+        assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)));
+        assert_eq!(fresh.usage().index_bytes, 0);
+    }
+
+    #[test]
+    fn invalid_index_root_and_chunk_invariants_are_rejected() {
+        let store_obj = |published: &mut Published, bytes: Vec<u8>| -> String {
+            let hash = sha256(&bytes);
+            published.objects.insert(object(hash, "json").path(), bytes);
+            hex(&hash)
+        };
+        let point_root = |published: &mut Published, root_hex: String| {
+            published.make_current(
+                "jp/canonical",
+                &Pointer {
+                    format: "pointer".to_owned(),
+                    version: sekai_format::publication::POINTER_VERSION,
+                    published_version: "1".to_owned(),
+                    revision: "r1".to_owned(),
+                    root: Some(root_hex),
+                    paths: None,
+                    tree: None,
+                    history: None,
+                    changes: None,
+                },
+            );
+        };
+
+        let valid_chunk = |rows: Vec<ListingEntry>| {
+            serde_json::to_vec(&IndexChunk {
+                format: "index-chunk".to_owned(),
+                version: PUBLICATION_VERSION,
+                rows,
+            })
+            .unwrap()
+        };
+
+        // 1. Bad IndexRoot cases: wrong format, wrong version, unsorted/duplicate forms, empty
+        //    chunks, zero rows, unsorted/duplicate chunk firsts, non-hash chunk sha256, asset
+        //    count overflow.
+        let bad_roots = vec![
+            IndexRoot {
+                format: "not-index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION + 1,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![
+                    ListingTable {
+                        form: "b".to_owned(),
+                        chunks: vec![TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: 1,
+                        }],
+                    },
+                    ListingTable {
+                        form: "a".to_owned(),
+                        chunks: vec![TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: 1,
+                        }],
+                    },
+                ],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![
+                    ListingTable {
+                        form: "a".to_owned(),
+                        chunks: vec![TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: 1,
+                        }],
+                    },
+                    ListingTable {
+                        form: "a".to_owned(),
+                        chunks: vec![TableChunk {
+                            first: "b".to_owned(),
+                            sha256: "1".repeat(64),
+                            rows: 1,
+                        }],
+                    },
+                ],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: Vec::new(),
+                }],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: vec![TableChunk {
+                        first: "a".to_owned(),
+                        sha256: "0".repeat(64),
+                        rows: 0,
+                    }],
+                }],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: vec![
+                        TableChunk {
+                            first: "b".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: 1,
+                        },
+                        TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "1".repeat(64),
+                            rows: 1,
+                        },
+                    ],
+                }],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: vec![
+                        TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: 1,
+                        },
+                        TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "1".repeat(64),
+                            rows: 1,
+                        },
+                    ],
+                }],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: vec![TableChunk {
+                        first: "a".to_owned(),
+                        sha256: "../secret".to_owned(),
+                        rows: 1,
+                    }],
+                }],
+                ..IndexRoot::default()
+            },
+            IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "a".to_owned(),
+                    chunks: vec![
+                        TableChunk {
+                            first: "a".to_owned(),
+                            sha256: "0".repeat(64),
+                            rows: u64::MAX,
+                        },
+                        TableChunk {
+                            first: "b".to_owned(),
+                            sha256: "1".repeat(64),
+                            rows: 1,
+                        },
+                    ],
+                }],
+                ..IndexRoot::default()
+            },
+        ];
+        for bad in bad_roots {
+            let mut published = Published::default();
+            let root_hex = store_obj(&mut published, serde_json::to_vec(&bad).unwrap());
+            point_root(&mut published, root_hex);
+            let r = resolver("");
+            let (res, fault) = lookup(&r, &published, &get("/listings/jp/canonical"), 0);
+            assert_eq!(res.status, 500, "{bad:?}");
+            assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)), "{bad:?}");
+            assert_eq!(r.usage().index_bytes, 0, "{bad:?}");
+        }
+
+        // Fast-fail on oversized declared table.assets without reading any listing chunk.
+        {
+            let mut published = Published::default();
+            let too_many = ((64u64 << 20) / (std::mem::size_of::<ListingEntry>() as u64)) + 1;
+            let root = IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "huge".to_owned(),
+                    chunks: vec![TableChunk {
+                        first: "a".to_owned(),
+                        sha256: "0".repeat(64),
+                        rows: too_many,
+                    }],
+                }],
+                ..IndexRoot::default()
+            };
+            let root_hex = store_obj(&mut published, serde_json::to_vec(&root).unwrap());
+            point_root(&mut published, root_hex);
+            let (res, fault) = lookup(
+                &resolver(""),
+                &published,
+                &get("/listings/jp/canonical/huge"),
+                0,
+            );
+            assert_eq!(res.status, 500);
+            assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)));
+            assert_eq!(published.reads(), ["pointer", "index_root"]);
+        }
+
+        // 2. Bad ListingChunk cases: wrong format, wrong version, empty rows, unsorted/duplicate
+        //    rows within a chunk, row count mismatch, first key mismatch, cross-chunk disorder
+        //    and cross-chunk duplicate.
+        let bad_chunks = [
+            (
+                vec![
+                    serde_json::to_vec(&IndexChunk {
+                        format: "other".to_owned(),
+                        version: PUBLICATION_VERSION,
+                        rows: vec![entry("a", 1)],
+                    })
+                    .unwrap(),
+                ],
+                vec![("a", 1)],
+            ),
+            (
+                vec![
+                    serde_json::to_vec(&IndexChunk {
+                        format: "index-chunk".to_owned(),
+                        version: PUBLICATION_VERSION + 1,
+                        rows: vec![entry("a", 1)],
+                    })
+                    .unwrap(),
+                ],
+                vec![("a", 1)],
+            ),
+            (vec![valid_chunk(vec![])], vec![("a", 1)]),
+            (
+                vec![valid_chunk(vec![entry("b", 1), entry("a", 1)])],
+                vec![("b", 2)],
+            ),
+            (
+                vec![valid_chunk(vec![entry("a", 1), entry("a", 2)])],
+                vec![("a", 2)],
+            ),
+            // Row count mismatch (chunk has 1, index root says 2).
+            (vec![valid_chunk(vec![entry("a", 1)])], vec![("a", 2)]),
+            // First row mismatch (chunk starts with "b", index root says "a").
+            (vec![valid_chunk(vec![entry("b", 1)])], vec![("a", 1)]),
+            // Cross-chunk disorder: chunk 0 ends with "c", chunk 1 starts with "b".
+            (
+                vec![
+                    valid_chunk(vec![entry("a", 1), entry("c", 1)]),
+                    valid_chunk(vec![entry("b", 1)]),
+                ],
+                vec![("a", 2), ("b", 1)],
+            ),
+            // Cross-chunk duplicate: chunk 0 ends with "b", chunk 1 starts with "b".
+            (
+                vec![
+                    valid_chunk(vec![entry("a", 1), entry("b", 1)]),
+                    valid_chunk(vec![entry("b", 2)]),
+                ],
+                vec![("a", 2), ("b", 1)],
+            ),
+        ];
+        for (chunks_bytes, meta) in bad_chunks {
+            let mut published = Published::default();
+            let table_chunks: Vec<TableChunk> = chunks_bytes
+                .into_iter()
+                .zip(meta)
+                .map(|(bytes, (first, rows))| TableChunk {
+                    first: first.to_owned(),
+                    sha256: store_obj(&mut published, bytes),
+                    rows,
+                })
+                .collect();
+            let root = IndexRoot {
+                format: "index-root".to_owned(),
+                version: PUBLICATION_VERSION,
+                published_version: "1".to_owned(),
+                revision: "r1".to_owned(),
+                listings: vec![ListingTable {
+                    form: "live2d-model".to_owned(),
+                    chunks: table_chunks,
+                }],
+                ..IndexRoot::default()
+            };
+            let root_hex = store_obj(&mut published, serde_json::to_vec(&root).unwrap());
+            point_root(&mut published, root_hex);
+            let r = resolver("");
+            // Warm the index root first so we can verify the failing chunk adds 0 bytes to cache.
+            assert_eq!(
+                answer(&r, &published, &get("/listings/jp/canonical")).status,
+                200
+            );
+            let before = r.usage().index_bytes;
+            let (res, fault) = lookup(
+                &r,
+                &published,
+                &get("/listings/jp/canonical/live2d-model"),
+                0,
+            );
+            assert_eq!(res.status, 500);
+            assert!(matches!(fault.unwrap().read, Read::ListingChunk(_)));
+            if root.listings[0].chunks.len() == 1 {
+                assert_eq!(r.usage().index_bytes, before);
+            } else {
+                // Chunk 0 succeeded and was cached; chunk 1 failed and must NOT be cached.
+                published.reads();
+                let (again, _) = lookup(
+                    &r,
+                    &published,
+                    &get("/listings/jp/canonical/live2d-model"),
+                    0,
+                );
+                assert_eq!(again.status, 500);
+                assert_eq!(published.reads(), ["listing_chunk"]);
+            }
+        }
+    }
+
+    #[test]
+    fn pointer_root_aliasing_path_index_fails_without_poisoning_paths() {
+        let mut published = Published::default();
+        published.publish("jp/canonical", "1", &files(&["a.png"]), 8192);
+        let mut ptr: Pointer =
+            serde_json::from_slice(&published.pointers["jp/canonical/current.json"]).unwrap();
+        ptr.root = ptr.paths.clone();
+        published.make_current("jp/canonical", &ptr);
+
+        let resolver = resolver("");
+        // Populate PathIndex cache first.
+        assert_eq!(
+            answer(&resolver, &published, &get("/jp/canonical/a.png")).status,
+            200
+        );
+        // Form listing must fail with 500 (wrong format) without corrupting PathIndex cache.
+        let (res, fault) = lookup(&resolver, &published, &get("/listings/jp/canonical"), 0);
+        assert_eq!(res.status, 500);
+        assert!(matches!(fault.unwrap().read, Read::IndexRoot(_)));
+        // File lookup still works from cached PathIndex.
+        assert_eq!(
+            answer(&resolver, &published, &get("/jp/canonical/a.png")).status,
+            200
+        );
+    }
+
+    #[test]
+    fn form_listings_respect_cache_limits_and_singleflight_resume() {
+        let (published, _, _) = sample();
+
+        // Read limits are 64 KiB for pointer and 64 MiB for index root and listing chunks.
+        let lim_resolver = resolver("");
+        let mut step =
+            lim_resolver.lookup(&get("/listings/jp/canonical/live2d-model"), Duration::ZERO);
+        let mut limits_seen = Vec::new();
+        while let Lookup::Read(pending) = step {
+            limits_seen.push(pending.read().limit());
+            let fetched = published.fetch(pending.read());
+            step = pending.supply(fetched, Duration::ZERO);
+        }
+        assert_eq!(limits_seen, [64 << 10, 64 << 20, 64 << 20, 64 << 20]);
+        assert!(matches!(step, Lookup::Done(res) if res.status == 200));
+        published.reads();
+
+        // Zero-budget resolver still answers without keeping anything.
+        let zero = Resolver::new(
+            routes(""),
+            Limits {
+                pointers: 0,
+                index_bytes: 0,
+            },
+        );
+        for _ in 0..2 {
+            assert_eq!(
+                answer(
+                    &zero,
+                    &published,
+                    &get("/listings/jp/canonical/live2d-model")
+                )
+                .status,
+                200
+            );
+            assert_eq!(
+                published.reads(),
+                ["pointer", "index_root", "listing_chunk", "listing_chunk"]
+            );
+        }
+        assert_eq!(zero.usage().index_bytes, 0);
+
+        // Tight budget stays within limit across many form reads.
+        let tight = Resolver::new(
+            routes(""),
+            Limits {
+                pointers: 16,
+                index_bytes: 1024,
+            },
+        );
+        for path in [
+            "/listings/jp/canonical",
+            "/listings/jp/canonical/live2d-model",
+            "/listings/jp/canonical/live2d-motions",
+        ] {
+            assert_eq!(answer(&tight, &published, &get(path)).status, 200);
+            assert!(tight.usage().index_bytes <= 1024);
+        }
+
+        // Singleflight resume on IndexRoot and ListingChunk (including waking after Listed cached).
+        let r = resolver("");
+        let waiting_for = |pred: fn(&Read) -> bool| -> Pending<'_> {
+            let mut l = r.lookup(&get("/listings/jp/canonical/live2d-model"), Duration::ZERO);
+            loop {
+                l = match l {
+                    Lookup::Read(p) if pred(p.read()) => return p,
+                    Lookup::Read(p) => {
+                        let f = published.fetch(p.read());
+                        p.supply(f, Duration::ZERO)
+                    }
+                    other => panic!("unexpected: {other:?}"),
+                };
+            }
+        };
+        published.reads();
+        let reader_root = waiting_for(|read| matches!(read, Read::IndexRoot(_)));
+        let waiter_root = waiting_for(|read| matches!(read, Read::IndexRoot(_)));
+        // Finish reader completely (caches IndexRoot, chunks, and Listed).
+        let mut l = {
+            let f = published.fetch(reader_root.read());
+            reader_root.supply(f, Duration::ZERO)
+        };
+        while let Lookup::Read(p) = l {
+            let f = published.fetch(p.read());
+            l = p.supply(f, Duration::ZERO);
+        }
+        assert!(matches!(l, Lookup::Done(res) if res.status == 200));
+        published.reads();
+        // Waiter resumes on IndexRoot and hits cached Listed directly with 0 reads.
+        let Lookup::Done(res) = waiter_root.resume(Duration::ZERO) else {
+            panic!("waiter did not finish from cache");
+        };
+        assert_eq!(res.status, 200);
+        assert_eq!(published.reads(), [""; 0]);
+
+        // Also test resume on ListingChunk directly (both cached hit and 0-budget re-read).
+        fn waiting_chunk<'a>(r: &'a Resolver, published: &Published) -> Pending<'a> {
+            let mut l = r.lookup(&get("/listings/jp/canonical/live2d-model"), Duration::ZERO);
+            loop {
+                l = match l {
+                    Lookup::Read(p) if matches!(p.read(), Read::ListingChunk(_)) => return p,
+                    Lookup::Read(p) => {
+                        let f = published.fetch(p.read());
+                        p.supply(f, Duration::ZERO)
+                    }
+                    other => panic!("unexpected: {other:?}"),
+                };
+            }
+        }
+        let r2 = resolver("");
+        let reader_chunk = waiting_chunk(&r2, &published);
+        let waiter_chunk = waiting_chunk(&r2, &published);
+        let mut l = {
+            let f = published.fetch(reader_chunk.read());
+            reader_chunk.supply(f, Duration::ZERO)
+        };
+        while let Lookup::Read(p) = l {
+            let f = published.fetch(p.read());
+            l = p.supply(f, Duration::ZERO);
+        }
+        assert!(matches!(l, Lookup::Done(res) if res.status == 200));
+        published.reads();
+        let Lookup::Done(res) = waiter_chunk.resume(Duration::ZERO) else {
+            panic!("chunk waiter did not finish from cache");
+        };
+        assert_eq!(res.status, 200);
+        assert_eq!(published.reads(), [""; 0]);
+
+        let uncached = Resolver::new(
+            routes(""),
+            Limits {
+                index_bytes: 0,
+                ..Limits::default()
+            },
+        );
+        let reader_zero = waiting_chunk(&uncached, &published);
+        let waiter_zero = waiting_chunk(&uncached, &published);
+        let expected_chunk = waiter_zero.read().clone();
+        let f = published.fetch(reader_zero.read());
+        let _ = reader_zero.supply(f, Duration::ZERO);
+        let Lookup::Read(again) = waiter_zero.resume(Duration::ZERO) else {
+            panic!("uncached chunk waiter did not re-ask for its chunk");
+        };
+        assert_eq!(again.read(), &expected_chunk);
     }
 }

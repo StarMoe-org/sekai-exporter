@@ -263,7 +263,10 @@ impl Host {
     async fn read(&self, read: &Read) -> Result<Option<Vec<u8>>, String> {
         let path = match read {
             Read::Pointer(name) => self.published.join(name),
-            Read::Root(object) | Read::Chunk(object) => self.store.join(object.path()),
+            Read::Root(object)
+            | Read::Chunk(object)
+            | Read::IndexRoot(object)
+            | Read::ListingChunk(object) => self.store.join(object.path()),
         };
         match read_up_to(&path, read.limit()).await {
             Ok(bytes) => Ok(Some(bytes)),

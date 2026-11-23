@@ -26,7 +26,7 @@ pub struct Target {
     pub entry: Entry,
 }
 
-/// A file, a directory, or a document that the pointer of a view names.
+/// A file, a directory, a document that the pointer of a view names, or a form listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Entry {
     /// The path in the view: of a file, or of a directory when it is empty, for the root, or
@@ -34,6 +34,8 @@ pub enum Entry {
     Path(String),
     /// A document of the publication.
     Document(Document),
+    /// The listing of a form (`Some`), or the list of forms of the view (`None`).
+    Listing(Option<String>),
 }
 
 /// A document that the pointer of a publication names.
@@ -100,12 +102,13 @@ pub struct Routes {
     pub(crate) cors: Option<String>,
 }
 
-/// A placeholder that names a region, a view or a version.
+/// A placeholder that names a region, a view, a version or a form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Region,
     View,
     Version,
+    Form,
 }
 
 /// A part of a segment of a pattern.
@@ -122,16 +125,19 @@ enum Ending {
     Path,
     /// A document of the publication, after which the URL path ends.
     Document(Document),
+    /// The form listings of the view, after which the URL path ends.
+    Listing,
 }
 
 /// A pattern and the names it fixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Route {
-    /// The segments before `{path}`, or all of them in a route to a document.
+    /// The segments before `{path}`, or all of them in a route to a document or listing.
     segments: Vec<Vec<Piece>>,
     ending: Ending,
     region: Option<String>,
     view: Option<String>,
+    form: Option<String>,
 }
 
 /// The names a request gives.
@@ -140,6 +146,7 @@ struct Captures<'a> {
     region: Option<&'a str>,
     view: Option<&'a str>,
     version: Option<&'a str>,
+    form: Option<&'a str>,
 }
 
 impl<'a> Captures<'a> {
@@ -148,6 +155,7 @@ impl<'a> Captures<'a> {
             Field::Region => &mut self.region,
             Field::View => &mut self.view,
             Field::Version => &mut self.version,
+            Field::Form => &mut self.form,
         };
         *slot = Some(value);
     }
@@ -171,6 +179,7 @@ struct RouteFile {
     pattern: String,
     region: Option<String>,
     view: Option<String>,
+    form: Option<String>,
     /// Whether the route names the directory tree of the view, with a pattern without `{path}`.
     #[serde(default)]
     tree: bool,
@@ -180,24 +189,28 @@ struct RouteFile {
     /// Whether the route names the changes of the version, with a pattern without `{path}`.
     #[serde(default)]
     changes: bool,
+    /// Whether the route names the form listings of the view, with a pattern without `{path}`.
+    #[serde(default)]
+    listings: bool,
 }
 
 impl RouteFile {
-    /// The document the route names, if it names one. Fails when it names more than one.
-    fn document(&self) -> Result<Option<Document>, &'static str> {
+    /// The non-path target the route names, if it names one. Fails when it names more than one.
+    fn ending(&self) -> Result<Option<Ending>, &'static str> {
         let named = [
-            (self.tree, Document::Tree),
-            (self.history, Document::History),
-            (self.changes, Document::Changes),
+            (self.tree, Ending::Document(Document::Tree)),
+            (self.history, Ending::Document(Document::History)),
+            (self.changes, Ending::Document(Document::Changes)),
+            (self.listings, Ending::Listing),
         ];
         let mut named = named
             .into_iter()
-            .filter_map(|(on, document)| on.then_some(document));
-        let document = named.next();
+            .filter_map(|(on, ending)| on.then_some(ending));
+        let ending = named.next();
         if named.next().is_some() {
-            return Err("it names more than one of tree, history and changes");
+            return Err("it names more than one of tree, history, changes and listings");
         }
-        Ok(document)
+        Ok(ending)
     }
 }
 
@@ -278,25 +291,29 @@ impl Route {
             .ok_or_else(|| error("it does not start with /"))?
             .split('/')
             .collect();
-        let document = file.document().map_err(error)?;
-        let (before, ending) = match (texts.split_last(), document) {
-            (Some((&"{path}", _)), Some(_)) => {
+        let ending = file.ending().map_err(error)?;
+        let (before, ending) = match (texts.split_last(), ending) {
+            (Some((&"{path}", _)), Some(Ending::Document(_))) => {
                 return Err(error("a route to a document has no {path}"));
+            }
+            (Some((&"{path}", _)), Some(Ending::Listing)) => {
+                return Err(error("a route to listings has no {path}"));
             }
             (Some((&"{path}", before)), None) => (before, Ending::Path),
             (_, None) => return Err(error("its last segment is not {path}")),
-            (_, Some(document)) => (texts.as_slice(), Ending::Document(document)),
+            (_, Some(ending)) => (texts.as_slice(), ending),
         };
         let segments = before
             .iter()
             .map(|segment| pieces(segment).map_err(|message| error(&message)))
             .collect::<Result<Vec<_>, _>>()?;
-        check_names(&segments, &file).map_err(|message| error(&message))?;
+        check_names(&segments, &file, ending).map_err(|message| error(&message))?;
         Ok(Self {
             segments,
             ending,
             region: file.region,
             view: file.view,
+            form: file.form,
         })
     }
 
@@ -310,6 +327,9 @@ impl Route {
         let entry = match (self.ending, parts.next()) {
             (Ending::Path, Some(path)) => Entry::Path(percent_decode(path)?),
             (Ending::Document(document), None) => Entry::Document(document),
+            (Ending::Listing, None) => {
+                Entry::Listing(captures.form.or(self.form.as_deref()).map(str::to_owned))
+            }
             _ => return None,
         };
         Some(Target {
@@ -322,8 +342,9 @@ impl Route {
 }
 
 /// Whether the placeholders of `segments` and the names that `file` fixes give each of the
-/// region and the view once, and the version at most once.
-fn check_names(segments: &[Vec<Piece>], file: &RouteFile) -> Result<(), String> {
+/// region and the view once, the version at most once, and a form at most once on listings
+/// routes only.
+fn check_names(segments: &[Vec<Piece>], file: &RouteFile, ending: Ending) -> Result<(), String> {
     let fields: Vec<Field> = segments
         .iter()
         .flatten()
@@ -347,6 +368,20 @@ fn check_names(segments: &[Vec<Piece>], file: &RouteFile) -> Result<(), String> 
             (false, None) => return Err(format!("neither it nor the route gives the {name}")),
         }
     }
+    match (
+        ending == Ending::Listing,
+        fields.contains(&Field::Form),
+        &file.form,
+    ) {
+        (false, true, _) => return Err("{form} is only for listings".to_owned()),
+        (false, false, Some(_)) => return Err("form is only for listings".to_owned()),
+        (false, false, None) => {}
+        (true, true, Some(_)) => return Err("both it and the route give the form".to_owned()),
+        (true, false, Some(value)) if !is_request_name(value) => {
+            return Err(format!("{value:?} is not a form"));
+        }
+        (true, _, _) => {}
+    }
     Ok(())
 }
 
@@ -365,6 +400,7 @@ fn pieces(segment: &str) -> Result<Vec<Piece>, String> {
                     "region" => Field::Region,
                     "view" => Field::View,
                     "version" => Field::Version,
+                    "form" => Field::Form,
                     "path" => return Err("{path} is not the last segment".to_owned()),
                     other => return Err(format!("{{{other}}} is not a placeholder")),
                 })

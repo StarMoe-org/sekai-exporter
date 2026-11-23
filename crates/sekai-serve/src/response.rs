@@ -130,6 +130,22 @@ impl ObjectId {
         }
     }
 
+    /// An index root of a publication, `<aa>/<sha256>.json`.
+    pub(crate) fn index_root(sha256: [u8; 32]) -> Self {
+        Self {
+            sha256,
+            extension: "json".to_owned(),
+        }
+    }
+
+    /// A chunk of a form listing, `<aa>/<sha256>.json`.
+    pub(crate) fn listing_chunk(sha256: [u8; 32]) -> Self {
+        Self {
+            sha256,
+            extension: "json".to_owned(),
+        }
+    }
+
     /// A document of a publication, `<aa>/<sha256>.<extension>`.
     fn document(sha256: [u8; 32], extension: &str) -> Self {
         Self {
@@ -245,7 +261,7 @@ impl Routes {
         }
     }
 
-    /// The response to `request` with `listed`, the listing of a directory.
+    /// The response to `request` with `listed`, the listing of a directory or form.
     pub(crate) fn listing(&self, request: &Request<'_>, listed: &Listed) -> Response {
         let etag = &listed.etag;
         let cache_control = format!("public, max-age={}", self.max_age);

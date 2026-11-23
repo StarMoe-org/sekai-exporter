@@ -153,6 +153,10 @@ fn exported(name: &str) -> (PathBuf, PathBuf) {
     std::fs::write(
         &routes,
         r#"{ "routes": [
+            { "pattern": "/listings/{region}/{view}@{version}/{form}", "listings": true },
+            { "pattern": "/listings/{region}/{view}/{form}", "listings": true },
+            { "pattern": "/listings/{region}/{view}@{version}", "listings": true },
+            { "pattern": "/listings/{region}/{view}", "listings": true },
             { "pattern": "/{region}@{version}/{path}", "view": "canonical" },
             { "pattern": "/{region}/{path}", "view": "canonical" }
         ] }"#,
@@ -204,11 +208,44 @@ fn published_paths_are_served_with_their_bytes() {
         "/local/none.png",
         "/other/a.png",
         "/local@0.0.0-none/a.png",
+        "/listings/local/canonical/no-such-form",
         "/",
     ] {
         assert_eq!(server.request("GET", missing, &[]).status, 404, "{missing}");
     }
     assert_eq!(server.request("DELETE", "/local/a.png", &[]).status, 405);
+
+    // Every exported form is listed and every listed asset has its served `.asset.json`.
+    let forms_reply = server.request("GET", "/listings/local/canonical", &[]);
+    assert_eq!(forms_reply.status, 200);
+    assert_eq!(forms_reply.header("content-type"), "application/json");
+    let forms_doc: serde_json::Value = serde_json::from_slice(&forms_reply.body).unwrap();
+    assert_eq!(forms_doc["format"], "form-listings");
+    assert_eq!(forms_doc["version"], 1);
+    assert_eq!(forms_doc["view"], "canonical");
+    assert_eq!(forms_doc["published_version"], version);
+    let forms = forms_doc["forms"].as_array().unwrap();
+    assert!(!forms.is_empty());
+    for listed in forms {
+        let form = listed["form"].as_str().unwrap();
+        let count = listed["assets"].as_u64().unwrap();
+        let reply = server.request(
+            "GET",
+            &format!("/listings/local/canonical@{version}/{form}"),
+            &[],
+        );
+        assert_eq!(reply.status, 200, "{form}");
+        let doc: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(doc["format"], "form-listing", "{form}");
+        assert_eq!(doc["form"], form);
+        let assets = doc["assets"].as_array().unwrap();
+        assert_eq!(assets.len() as u64, count, "{form}");
+        for asset in assets {
+            let name = asset["name"].as_str().unwrap();
+            let doc_path = format!("{name}.asset.json");
+            assert!(files.contains_key(&doc_path), "{form}: missing {doc_path}");
+        }
+    }
 }
 
 #[test]

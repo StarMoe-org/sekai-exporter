@@ -46,7 +46,8 @@ A pattern starts with `/` and is a sequence of `/`-separated segments. A segment
 | `{region}` | The region. Either a placeholder or the route's `region` key gives it, never both |
 | `{view}` | The view. Either a placeholder or the route's `view` key gives it, never both |
 | `{version}` | Optional. A published version: the path is resolved in that version instead of the current one |
-| `{path}` | Required, and the last segment. The rest of the URL path, percent-decoded, is the path in the view. A path that is empty or ends with `/` names a [directory](#directories) |
+| `{form}` | Only on a `"listings": true` route. Optional: an asset form; either a placeholder or the route's `form` key may give it, never both |
+| `{path}` | Required on a path route, and the last segment. The rest of the URL path, percent-decoded, is the path in the view. A path that is empty or ends with `/` names a [directory](#directories) |
 
 A region, view or version without a publication is not found.
 
@@ -57,9 +58,9 @@ A region, view or version without a publication is not found.
 | `max_age` | How many seconds a response may be cached, for the current version and for a named one. Default 60 |
 | `cors` | When present, the value of `Access-Control-Allow-Origin` |
 
-A route with `"tree": true` names the [directory tree](#directory-trees) of a view instead of its paths. Its pattern has no `{path}`, and a URL path matches it only when nothing follows its last segment, such as `{ "pattern": "/trees/{region}/{view}", "tree": true }` for `/trees/jp/storage`. In the same way, a route with `"history": true` names the [version history](#version-histories) of a view, and a route with `"changes": true` the changes of a version, such as `{ "pattern": "/changes/{region}/{view}@{version}", "changes": true }` for `/changes/jp/storage@6.1.0`. A route names at most one of these documents.
+A route with `"tree": true` names the [directory tree](#directory-trees) of a view instead of its paths. Its pattern has no `{path}`, and a URL path matches it only when nothing follows its last segment, such as `{ "pattern": "/trees/{region}/{view}", "tree": true }` for `/trees/jp/storage`. In the same way, a route with `"history": true` names the [version history](#version-histories) of a view, a route with `"changes": true` the changes of a version, such as `{ "pattern": "/changes/{region}/{view}@{version}", "changes": true }` for `/changes/jp/storage@6.1.0`, and a route with `"listings": true` the [form listings](#form-listings) of a view, such as `{ "pattern": "/listings/{region}/{view}/{form}", "listings": true }` for `/listings/jp/canonical/live2d-model` or `{ "pattern": "/listings/{region}/{view}", "listings": true }` for the list of forms. A route names at most one of these.
 
-A routes file with another key, an invalid pattern, or a route that gives the region or the view twice or not at all is refused when the resolver starts.
+A routes file with another key, an invalid pattern, or a route that gives the region or the view twice or not at all, or gives `{form}` or `form` outside `"listings": true` or twice, is refused when the resolver starts.
 
 ## Responses
 
@@ -115,17 +116,44 @@ Every publication of a view also has a [version history](spec/version-history.md
 
 A route to the history or to the changes answers them as the [tree](#directory-trees) is answered: the object that the pointer names under `history` or `changes`, with `Content-Type: application/gzip` and the file name `version-history.json.gz` or `version-changes.json.gz`. A route without `{version}` answers for the current version, and one with it for the named version, whose history ends with that version. A publication whose pointer names no history or no changes has none, and the request is `404`.
 
+## Form listings
+
+Every publication in the `index` layout (such as `canonical`) names an [index root](spec/publication.md#2-contents) under `root`, which holds a chunked listing for each asset form. A route with `"listings": true` exposes those listings directly as `200` `application/json` documents, in the current version or a named one, so a reader such as a Live2D viewer can discover every exact asset name of a form in one request instead of walking directories.
+
+When the route names a form (through `{form}` in its pattern or its `form` key), the document lists every asset of that form in byte order of `name`:
+
+| Key | Value |
+|---|---|
+| `format` | `"form-listing"` |
+| `version` | `1` |
+| `view` | The view named by the route |
+| `published_version`, `revision` | Those of the publication, from its index root |
+| `form` | The requested asset form, such as `"live2d-model"` |
+| `assets` | `{ "name", "fingerprint", "size" }` for each asset of the form, in byte order of `name` |
+
+When the route names no form, the document lists the forms the publication carries, in byte order of `form`:
+
+| Key | Value |
+|---|---|
+| `format` | `"form-listings"` |
+| `version` | `1` |
+| `view` | The view named by the route |
+| `published_version`, `revision` | Those of the publication, from its index root |
+| `forms` | `{ "form", "assets" }` for each form listed in the index root, where `assets` is the number of assets of that form |
+
+A publication whose pointer names no `root` (such as the `storage` view) has no form listings, and the request is `404`; a form not listed in the index root is also `404`. As with [directory listings](#directories), the `ETag` is `"<sha256>"` of the document, with `Cache-Control`, `If-None-Match` and `HEAD` as for a file, and the response is sent as JSON even under `"delivery": "redirect"`. Listing all forms reads only the index root; listing one form reads its index root and the chunks of that form, and remembers the decoded objects and the finished document within the [index cache limit](#limits).
+
 ## What the resolver checks
 
 The resolver takes neither a request nor a publication at its word.
 
-A request names files only through the routes. Its region, view and version are names, so the pointer they name, `<region>/<view>/current.json` or `<region>/<view>/versions/<version>.json`, is a file below the published root. Its path is looked up in a path index and never becomes part of a file name: the file that is opened is the object the index names, `<aa>/<sha256>.<extension>`.
+A request names files only through the routes. Its region, view, version and form are names, so the pointer they name, `<region>/<view>/current.json` or `<region>/<view>/versions/<version>.json`, is a file below the published root. Its path is looked up in a path index and never becomes part of a file name: the file that is opened is the object the index names, `<aa>/<sha256>.<extension>`.
 
 A publication is used only as far as it is what it says. A request is `500`, and the host logs the reason, when:
 
-- the pointer cannot be read, is not a pointer document, or names its path index, its directory tree, its version history or its changes by something other than a SHA-256;
-- the root or a chunk of the path index is missing or cannot be read, does not have the hash it is named by, or does not follow its format;
-- a pointer is longer than 64 KiB, or a root or a chunk is longer than 64 MiB;
+- the pointer cannot be read, is not a pointer document, or names its index root, its path index, its directory tree, its version history or its changes by something other than a SHA-256;
+- the root or a chunk of the path index, or the index root or a chunk of a form listing, is missing or cannot be read, does not have the hash it is named by, does not match the pointer's version and revision (for an index root), or does not follow its format;
+- a pointer is longer than 64 KiB, or an index root, path index root, chunk or assembled form listing is longer than 64 MiB;
 - the index gives the file an extension that is not a name, or a media type that cannot be the value of a header;
 - the object of the file is missing, or is not a file of the size the index gives. The server finds this out before it sends the first byte, so a truncated object is an error and not a response that breaks off. The bytes of an object are not hashed when they are sent.
 
@@ -138,7 +166,7 @@ What the resolver remembers does not grow with what requests name. When a limit 
 | Remembered | Limit |
 |---|---|
 | Pointers, whether they exist or not | 1024 |
-| Decoded roots and chunks of path indexes, and the directory listings made from them | 512 MiB, set by `--cache` |
+| Decoded roots and chunks of path indexes and index roots, and the directory and form listings made from them | 512 MiB, set by `--cache` |
 
 A decoded path index takes 72 bytes and the length of its path for each file, so a view of a million files whose paths are 60 bytes long takes about 126 MiB. A cache that holds the indexes of the views that are asked for answers every lookup without a read; a smaller one reads the chunks it dropped again.
 
@@ -172,4 +200,4 @@ docker run -p 8080:8080 -v /path/to/output:/data:ro -v /path/to/routes.json:/rou
 
 ## Other hosts
 
-The core is a `Resolver`: the routes, the checks, what is remembered, and the responses. A host starts a lookup for each request (`Resolver::lookup`) with the time of its own clock, and makes the reads the lookup asks for: the pointer of a view, the root of its path index and a chunk for a file, or the chunks of a [listing](#directories) for a directory, each with the most bytes it may give. The lookup ends with a response: a status, headers, and either no body, a short text, a document such as a listing, or a byte range of an object with the size the object must have. A host supplies the reads and the clock and writes the response, so every host checks, remembers and answers alike. The server of `sekai-exporter serve` is one host, `sekai_serve::server` behind the `server` feature of the crate, which another program can run as well. An edge worker in front of a bucket reads from the bucket and caches objects by their hash, so every path of every view that names one object shares one cached copy.
+The core is a `Resolver`: the routes, the checks, what is remembered, and the responses. A host starts a lookup for each request (`Resolver::lookup`) with the time of its own clock, and makes the reads the lookup asks for: the pointer of a view, the root of its path index and a chunk for a file, the chunks of a [listing](#directories) for a directory, or the index root and form listing chunks for a [form listing](#form-listings), each with the most bytes it may give. The lookup ends with a response: a status, headers, and either no body, a short text, a document such as a listing, or a byte range of an object with the size the object must have. A host supplies the reads and the clock and writes the response, so every host checks, remembers and answers alike. The server of `sekai-exporter serve` is one host, `sekai_serve::server` behind the `server` feature of the crate, which another program can run as well. An edge worker in front of a bucket reads from the bucket and caches objects by their hash, so every path of every view that names one object shares one cached copy.

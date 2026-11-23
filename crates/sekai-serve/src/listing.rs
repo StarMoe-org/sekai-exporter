@@ -40,7 +40,7 @@ pub(crate) struct Listed {
 }
 
 impl Listed {
-    fn new(document: Vec<u8>) -> Self {
+    pub(crate) fn new(document: Vec<u8>) -> Self {
         let etag = format!("\"{}\"", hex(&Sha256::digest(&document)));
         Self {
             document: document.into(),

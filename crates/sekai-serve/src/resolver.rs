@@ -2,9 +2,11 @@
 //!
 //! A lookup is a short sequence of reads that the host makes: the pointer of the view, the root
 //! of the path index the pointer names, and the chunk of the index that holds the path, or, for a
-//! directory, each chunk in which a file or a subdirectory of it starts. The directory tree, the
-//! version history and the changes of a publication need only the pointer, which names them. The resolver remembers what the reads gave,
-//! within fixed limits, so most lookups read nothing.
+//! directory, each chunk in which a file or a subdirectory of it starts; for form listings, the
+//! index root the pointer names and the chunks of the requested form's listing. The directory
+//! tree, the version history and the changes of a publication need only the pointer, which names
+//! them. The resolver remembers what the reads gave, within fixed limits, so most lookups read
+//! nothing.
 
 use std::fmt;
 use std::mem::size_of;
@@ -16,6 +18,7 @@ use sekai_format::publication::{ObjectReference, Pointer};
 use sha2::{Digest, Sha256};
 
 use crate::cache::Lru;
+use crate::forms::{self, FormChunk, FormGathering, FormIndex};
 use crate::listing::{self, Listed, Listing};
 use crate::response::{ObjectId, Request, Response};
 use crate::routes::{Document, Entry, Routes, Target};
@@ -26,8 +29,8 @@ const MAX_PATH_BYTES: usize = 8 << 10;
 /// The most bytes a host reads for a pointer.
 const POINTER_BYTES: u64 = 64 << 10;
 
-/// The most bytes a host reads for the root or a chunk of a path index.
-const INDEX_BYTES: u64 = 64 << 20;
+/// The most bytes a host reads for the root or a chunk of an index.
+pub(crate) const INDEX_BYTES: u64 = 64 << 20;
 
 /// How much a resolver remembers between requests. Nothing a request names makes it remember
 /// more.
@@ -69,6 +72,10 @@ pub enum Read {
     Root(ObjectId),
     /// A chunk of a path index, an object of the store.
     Chunk(ObjectId),
+    /// The index root of a publication, an object of the store.
+    IndexRoot(ObjectId),
+    /// A chunk of a form listing, an object of the store.
+    ListingChunk(ObjectId),
 }
 
 impl Read {
@@ -77,7 +84,9 @@ impl Read {
     pub fn limit(&self) -> u64 {
         match self {
             Self::Pointer(_) => POINTER_BYTES,
-            Self::Root(_) | Self::Chunk(_) => INDEX_BYTES,
+            Self::Root(_) | Self::Chunk(_) | Self::IndexRoot(_) | Self::ListingChunk(_) => {
+                INDEX_BYTES
+            }
         }
     }
 }
@@ -88,6 +97,8 @@ impl fmt::Display for Read {
             Self::Pointer(name) => write!(f, "pointer {name}"),
             Self::Root(object) => write!(f, "path index root {object}"),
             Self::Chunk(object) => write!(f, "path index chunk {object}"),
+            Self::IndexRoot(object) => write!(f, "index root {object}"),
+            Self::ListingChunk(object) => write!(f, "listing chunk {object}"),
         }
     }
 }
@@ -182,16 +193,27 @@ struct State {
 }
 
 /// What a pointer named when it was read.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Pointed {
     /// When it was read.
     read_at: Duration,
     named: Named,
 }
 
+/// The version and revision a pointer names.
+#[derive(Debug)]
+struct PublishedMeta {
+    published_version: String,
+    revision: String,
+}
+
 /// What lookups go on from in a pointer; nothing when nothing is published under it.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 struct Named {
+    /// The version and revision of the publication.
+    meta: Option<Arc<PublishedMeta>>,
+    /// The index root of the publication.
+    index_root: Option<[u8; 32]>,
     /// The root of the path index.
     root: Option<[u8; 32]>,
     /// The directory tree.
@@ -229,13 +251,15 @@ impl Pointed {
     }
 }
 
-/// What the resolver keeps of path indexes: a decoded object, named by its hash, or a listing
-/// made from one, named by [`listing::key`].
+/// What the resolver keeps of indexes: a decoded object, named by its hash, or a listing
+/// made from one, named by [`listing::key`], [`forms::forms_key`] or [`forms::form_key`].
 #[derive(Debug, Clone)]
 enum Indexed {
     Root(Arc<PathIndex>),
     Chunk(Arc<Chunk>),
     Listing(Arc<Listed>),
+    IndexRoot(Arc<FormIndex>),
+    ListingChunk(Arc<FormChunk>),
 }
 
 impl Resolver {
@@ -291,6 +315,7 @@ impl Resolver {
             request: *request,
             target,
             started: now,
+            meta: None,
             gathering: None,
         };
         asked.pointer(now)
@@ -311,7 +336,7 @@ impl Resolver {
 
     /// The last reading of the pointer at `name`, if it is remembered.
     fn reading(&self, name: &str) -> Option<Pointed> {
-        self.state().pointers.get(name).copied()
+        self.state().pointers.get(name).cloned()
     }
 
     /// The decoded root or chunk with the hash `sha256`, if it is remembered.
@@ -336,7 +361,7 @@ fn shaped(request: &Request<'_>, response: Response) -> Response {
     }
 }
 
-/// A request and the file or directory it names.
+/// A request and the file, directory, document or form listing it names.
 #[derive(Debug)]
 struct Asked<'a> {
     resolver: &'a Resolver,
@@ -344,9 +369,18 @@ struct Asked<'a> {
     target: Target,
     /// When the lookup started.
     started: Duration,
-    /// The listing of the directory the target names, while it is gathered. It is boxed, as it
-    /// grows with the directory while a lookup is moved from read to read.
-    gathering: Option<Box<Gathering>>,
+    /// The version and revision from the pointer, set once the pointer is read.
+    meta: Option<Arc<PublishedMeta>>,
+    /// The listing the target names, while it is gathered. It is boxed, as it grows with the
+    /// listing while a lookup is moved from read to read.
+    gathering: Option<Box<Gather>>,
+}
+
+/// A directory or form listing while its chunks are gathered.
+#[derive(Debug)]
+enum Gather {
+    Directory(Gathering),
+    Form(FormGathering),
 }
 
 /// The listing of a directory, and the path index it is gathered from.
@@ -389,9 +423,10 @@ impl<'a> Asked<'a> {
         }
     }
 
-    /// Goes on from what the pointer names: to the root of the path index for a path, or to the
-    /// answer for a document.
-    fn pointed(self, named: Named) -> Lookup<'a> {
+    /// Goes on from what the pointer names: to the root of the path index for a path, to the
+    /// index root for form listings, or to the answer for a document.
+    fn pointed(mut self, named: Named) -> Lookup<'a> {
+        self.meta = named.meta.clone();
         match &self.target.entry {
             Entry::Path(_) => match named.root {
                 Some(root) => self.root(root),
@@ -399,6 +434,10 @@ impl<'a> Asked<'a> {
             },
             &Entry::Document(document) => match named.document(document) {
                 Some(stored) => self.document(document, stored),
+                None => self.not_found(),
+            },
+            Entry::Listing(_) => match named.index_root {
+                Some(root) => self.index_root(root),
                 None => self.not_found(),
             },
         }
@@ -431,11 +470,11 @@ impl<'a> Asked<'a> {
                 return self.listed(&listed);
             }
             let listing = Listing::new(path);
-            return self.gather(Box::new(Gathering {
+            return self.gather(Box::new(Gather::Directory(Gathering {
                 root,
                 index,
                 listing,
-            }));
+            })));
         }
         match index.chunk_of(path) {
             Some(at) => self.named_chunk(root, chunk_sha256(&index, at)),
@@ -454,12 +493,15 @@ impl<'a> Asked<'a> {
 
     /// Goes on with the listing of `gathering`: to the chunk it reads next, or to the response
     /// once it has looked at every path under the directory.
-    fn gather(mut self, gathering: Box<Gathering>) -> Lookup<'a> {
-        let Gathering {
+    fn gather(mut self, gathering: Box<Gather>) -> Lookup<'a> {
+        let Gather::Directory(Gathering {
             root,
             index,
             listing,
-        } = &*gathering;
+        }) = &*gathering
+        else {
+            return self.not_found();
+        };
         if let Some(at) = listing.wanted(index) {
             let (root, named) = (*root, chunk_sha256(index, at));
             self.gathering = Some(gathering);
@@ -481,7 +523,181 @@ impl<'a> Asked<'a> {
         }
     }
 
-    /// Answers with `listed`, the listing of the directory.
+    /// Goes on from the index root of a publication: a cached listing, a decoded index root, or
+    /// by reading it.
+    fn index_root(self, sha256: [u8; 32]) -> Lookup<'a> {
+        if let Some(key) = self.form_listing_key(&sha256)
+            && let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key)
+        {
+            return self.listed(&listed);
+        }
+        match self.resolver.decoded(&sha256) {
+            Some(Indexed::IndexRoot(index)) => self.form_indexed(sha256, index),
+            _ => self.read(Read::IndexRoot(ObjectId::index_root(sha256))),
+        }
+    }
+
+    /// Cache key for the form listing or list of forms of the target under `root`, when the
+    /// pointer metadata is known.
+    fn form_listing_key(&self, root: &[u8; 32]) -> Option<[u8; 32]> {
+        let meta = self.meta.as_deref()?;
+        match &self.target.entry {
+            Entry::Listing(None) => Some(forms::forms_key(
+                root,
+                &self.target.view,
+                &meta.published_version,
+                &meta.revision,
+            )),
+            Entry::Listing(Some(form)) => Some(forms::form_key(
+                root,
+                &self.target.view,
+                &meta.published_version,
+                &meta.revision,
+                form,
+            )),
+            _ => None,
+        }
+    }
+
+    /// Checks that `index` describes the version and revision that the pointer named.
+    fn check_index_meta(&self, index: &FormIndex) -> Result<(), String> {
+        let Some(meta) = self.meta.as_deref() else {
+            return Err("the pointer has no metadata".to_owned());
+        };
+        if index.published_version != meta.published_version || index.revision != meta.revision {
+            return Err(format!(
+                "it describes version {:?} revision {:?}, not {:?} {:?}",
+                index.published_version, index.revision, meta.published_version, meta.revision
+            ));
+        }
+        Ok(())
+    }
+
+    /// Goes on from `index`, the decoded index root `root`: checks it against the pointer, then
+    /// lists all forms or begins gathering the chunks of the requested form.
+    fn form_indexed(self, root: [u8; 32], index: Arc<FormIndex>) -> Lookup<'a> {
+        if let Err(reason) = self.check_index_meta(&index) {
+            return self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason);
+        }
+        let Some(meta) = self.meta.as_deref() else {
+            return self.not_found();
+        };
+        match &self.target.entry {
+            Entry::Listing(None) => {
+                let key = forms::forms_key(
+                    &root,
+                    &self.target.view,
+                    &meta.published_version,
+                    &meta.revision,
+                );
+                if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
+                    return self.listed(&listed);
+                }
+                match index.listed_forms(&self.target.view) {
+                    Ok(listed) => {
+                        let listed = Arc::new(listed);
+                        let weight = listed.weight();
+                        self.resolver
+                            .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+                        self.listed(&listed)
+                    }
+                    Err(reason) => self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
+                }
+            }
+            Entry::Listing(Some(form)) => {
+                let key = forms::form_key(
+                    &root,
+                    &self.target.view,
+                    &meta.published_version,
+                    &meta.revision,
+                    form,
+                );
+                if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
+                    return self.listed(&listed);
+                }
+                match FormGathering::new(root, index, form) {
+                    Ok(Some(gathering)) => self.gather_form(Box::new(Gather::Form(gathering))),
+                    Ok(None) => self.not_found(),
+                    Err(reason) => self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
+                }
+            }
+            _ => self.not_found(),
+        }
+    }
+
+    /// Goes on gathering a form listing: to its next chunk, or to the response once every chunk
+    /// has been gathered.
+    fn gather_form(mut self, gathering: Box<Gather>) -> Lookup<'a> {
+        let Gather::Form(form_gathering) = &*gathering else {
+            return self.not_found();
+        };
+        if let Some(sha256) = form_gathering.wanted() {
+            self.gathering = Some(gathering);
+            return self.listing_chunk(sha256);
+        }
+        let root = *form_gathering.root();
+        let listed = match form_gathering.listed(&self.target.view) {
+            Ok(listed) => Arc::new(listed),
+            Err(reason) => return self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
+        };
+        if let Some(meta) = self.meta.as_deref() {
+            let key = forms::form_key(
+                &root,
+                &self.target.view,
+                &meta.published_version,
+                &meta.revision,
+                form_gathering.form(),
+            );
+            let weight = listed.weight();
+            self.resolver
+                .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+        }
+        self.listed(&listed)
+    }
+
+    /// Goes on from a chunk of a form listing: a cached finished listing, a decoded chunk, or by
+    /// reading it.
+    fn listing_chunk(self, sha256: [u8; 32]) -> Lookup<'a> {
+        if let Some(Gather::Form(form_gathering)) = self.gathering.as_deref()
+            && let Some(key) = self.form_listing_key(form_gathering.root())
+            && let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key)
+        {
+            return self.listed(&listed);
+        }
+        match self.resolver.decoded(&sha256) {
+            Some(Indexed::ListingChunk(chunk)) => self.form_chunk_found(sha256, chunk, false),
+            _ => self.read(Read::ListingChunk(ObjectId::listing_chunk(sha256))),
+        }
+    }
+
+    /// Appends `chunk` to the form listing being gathered and, when `keep` is set and the chunk
+    /// passes validation, remembers it in the cache before moving on.
+    fn form_chunk_found(
+        mut self,
+        sha256: [u8; 32],
+        chunk: Arc<FormChunk>,
+        keep: bool,
+    ) -> Lookup<'a> {
+        let Some(mut gathering) = self.gathering.take() else {
+            return self.not_found();
+        };
+        let Gather::Form(form_gathering) = &mut *gathering else {
+            return self.not_found();
+        };
+        match form_gathering.push(Arc::clone(&chunk)) {
+            Ok(()) => {
+                if keep {
+                    let weight = chunk.weight();
+                    self.resolver
+                        .keep(sha256, Indexed::ListingChunk(chunk), weight);
+                }
+                self.gather_form(gathering)
+            }
+            Err(reason) => self.failed(Read::ListingChunk(ObjectId::listing_chunk(sha256)), reason),
+        }
+    }
+
+    /// Answers with `listed`, the listing of a directory or form.
     fn listed(&self, listed: &Listed) -> Lookup<'a> {
         self.done(self.resolver.routes.listing(&self.request, listed))
     }
@@ -498,7 +714,10 @@ impl<'a> Asked<'a> {
     /// path in it, if it has one.
     fn found(mut self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
         if let Some(mut gathering) = self.gathering.take() {
-            gathering.listing.gather(&gathering.index, chunk);
+            let Gather::Directory(directory) = &mut *gathering else {
+                return self.not_found();
+            };
+            directory.listing.gather(&directory.index, chunk);
             return self.gather(gathering);
         }
         let Entry::Path(path) = &self.target.entry else {
@@ -533,6 +752,8 @@ impl<'a> Pending<'a> {
             Read::Pointer(_) => asked.pointer(now),
             Read::Root(object) => asked.root(*object.sha256()),
             Read::Chunk(object) => asked.chunk(*object.sha256()),
+            Read::IndexRoot(object) => asked.index_root(*object.sha256()),
+            Read::ListingChunk(object) => asked.listing_chunk(*object.sha256()),
         }
     }
 
@@ -568,7 +789,7 @@ impl<'a> Pending<'a> {
                 Ok(named) => {
                     let pointed = Pointed {
                         read_at: now,
-                        named,
+                        named: named.clone(),
                     };
                     resolver.remember(name, pointed);
                     asked.pointed(named)
@@ -595,12 +816,29 @@ impl<'a> Pending<'a> {
                 }
                 Err(reason) => asked.failed(Read::Chunk(object), reason),
             },
+            Read::IndexRoot(object) => match decoded_index_root(&object, bytes) {
+                Ok(index) => {
+                    if let Err(reason) = asked.check_index_meta(&index) {
+                        return asked.failed(Read::IndexRoot(object), reason);
+                    }
+                    let index = Arc::new(index);
+                    let sha256 = *object.sha256();
+                    let weight = index.weight();
+                    resolver.keep(sha256, Indexed::IndexRoot(Arc::clone(&index)), weight);
+                    asked.form_indexed(sha256, index)
+                }
+                Err(reason) => asked.failed(Read::IndexRoot(object), reason),
+            },
+            Read::ListingChunk(object) => match decoded_listing_chunk(&object, bytes) {
+                Ok(chunk) => asked.form_chunk_found(*object.sha256(), Arc::new(chunk), true),
+                Err(reason) => asked.failed(Read::ListingChunk(object), reason),
+            },
         }
     }
 }
 
-/// What the pointer in `bytes` names: the root of its path index and its documents, each if it
-/// names one.
+/// What the pointer in `bytes` names: its index root, the root of its path index and its
+/// documents, each if it names one.
 fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
     let pointer: Pointer = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
     if pointer.format != "pointer" {
@@ -618,8 +856,15 @@ fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
         };
         document.map(object).transpose()
     };
+    let index_root = pointer.root.map(|root| hash("index root", &root));
     let root = pointer.paths.map(|paths| hash("path index", &paths));
+    let meta = Arc::new(PublishedMeta {
+        published_version: pointer.published_version,
+        revision: pointer.revision,
+    });
     Ok(Named {
+        meta: Some(meta),
+        index_root: index_root.transpose()?,
         root: root.transpose()?,
         tree: stored("directory tree", pointer.tree)?,
         history: stored("version history", pointer.history)?,
@@ -646,6 +891,16 @@ fn decoded_chunk(object: &ObjectId, bytes: &[u8]) -> Result<Chunk, String> {
     Chunk::decode(bytes).map_err(|e| e.to_string())
 }
 
+fn decoded_index_root(object: &ObjectId, bytes: &[u8]) -> Result<FormIndex, String> {
+    verified(object, bytes)?;
+    FormIndex::from_bytes(bytes)
+}
+
+fn decoded_listing_chunk(object: &ObjectId, bytes: &[u8]) -> Result<FormChunk, String> {
+    verified(object, bytes)?;
+    FormChunk::from_bytes(bytes)
+}
+
 /// The hash of the chunk at `at` of `index`.
 fn chunk_sha256(index: &PathIndex, at: usize) -> Result<[u8; 32], String> {
     parse_sha256(&index.chunks[at].sha256)
@@ -653,7 +908,7 @@ fn chunk_sha256(index: &PathIndex, at: usize) -> Result<[u8; 32], String> {
 }
 
 /// The 32 bytes that `text` gives as 64 lowercase hexadecimal digits.
-fn parse_sha256(text: &str) -> Option<[u8; 32]> {
+pub(crate) fn parse_sha256(text: &str) -> Option<[u8; 32]> {
     let digit = |byte: u8| match byte {
         b'0'..=b'9' => Some(byte - b'0'),
         b'a'..=b'f' => Some(byte - b'a' + 10),

@@ -15,6 +15,11 @@ fn sample() -> Routes {
                 { "pattern": "/trees/{region}@{version}/{view}", "tree": true },
                 { "pattern": "/history/{region}/{view}", "history": true },
                 { "pattern": "/changes/{region}/{view}@{version}", "changes": true },
+                { "pattern": "/listings/{region}/{view}@{version}/{form}", "listings": true },
+                { "pattern": "/listings/{region}/{view}/{form}", "listings": true },
+                { "pattern": "/listings/{region}/{view}@{version}", "listings": true },
+                { "pattern": "/listings/{region}/{view}", "listings": true },
+                { "pattern": "/live2d/{region}/models", "view": "canonical", "form": "live2d-model", "listings": true },
                 { "pattern": "/files/{region}-{view}/{path}" },
                 { "pattern": "/jp-storage/{path}", "region": "jp", "view": "storage" },
                 { "pattern": "/{region}@{version}/{path}", "view": "canonical" },
@@ -163,6 +168,95 @@ fn routes_name_the_version_history_and_the_changes_of_a_version() {
 }
 
 #[test]
+fn routes_name_the_form_listings_of_a_view() {
+    let routes = sample();
+    let cases = [
+        (
+            "/listings/jp/canonical",
+            named("jp", "canonical", None, Entry::Listing(None)),
+        ),
+        (
+            "/listings/jp/canonical@6.1.0",
+            named("jp", "canonical", Some("6.1.0"), Entry::Listing(None)),
+        ),
+        (
+            "/listings/jp/canonical/live2d-model",
+            named(
+                "jp",
+                "canonical",
+                None,
+                Entry::Listing(Some("live2d-model".to_owned())),
+            ),
+        ),
+        (
+            "/listings/jp/canonical@6.1.0/live2d-motions",
+            named(
+                "jp",
+                "canonical",
+                Some("6.1.0"),
+                Entry::Listing(Some("live2d-motions".to_owned())),
+            ),
+        ),
+        (
+            "/live2d/jp/models",
+            named(
+                "jp",
+                "canonical",
+                None,
+                Entry::Listing(Some("live2d-model".to_owned())),
+            ),
+        ),
+        // Trailing slashes, extra segments, and invalid form names do not match listings routes.
+        (
+            "/listings/jp/canonical/",
+            target("listings", "canonical", None, "jp/canonical/"),
+        ),
+        (
+            "/listings/jp/canonical/live2d-model/",
+            target("listings", "canonical", None, "jp/canonical/live2d-model/"),
+        ),
+        (
+            "/listings/jp/canonical/live2d-model/extra",
+            target(
+                "listings",
+                "canonical",
+                None,
+                "jp/canonical/live2d-model/extra",
+            ),
+        ),
+        (
+            "/listings/jp/canonical/..",
+            target("listings", "canonical", None, "jp/canonical/.."),
+        ),
+        (
+            "/listings/jp/canonical/nul",
+            target("listings", "canonical", None, "jp/canonical/nul"),
+        ),
+        (
+            "/listings/jp/canonical/live2d%2Dmodel",
+            target("listings", "canonical", None, "jp/canonical/live2d-model"),
+        ),
+    ];
+    for (path, expected) in cases {
+        assert_eq!(routes.resolve(path), expected, "{path}");
+    }
+    assert!(!Entry::Listing(None).is_directory());
+    assert!(!Entry::Listing(Some("live2d-model".to_owned())).is_directory());
+
+    let long_form = "a".repeat(201);
+    let long_path = format!("/listings/jp/canonical/{long_form}");
+    assert_eq!(
+        routes.resolve(&long_path),
+        target(
+            "listings",
+            "canonical",
+            None,
+            &format!("jp/canonical/{long_form}")
+        )
+    );
+}
+
+#[test]
 fn names_that_cannot_name_a_file_match_nothing() {
     let routes = sample();
     for path in [
@@ -249,6 +343,21 @@ fn invalid_routes_are_refused() {
         one(r#"{ "pattern": "/trees/{region}", "tree": true }"#),
         one(r#"{ "pattern": "/{region}/{view}/{path}", "history": true }"#),
         one(r#"{ "pattern": "/{region}/{view}", "tree": true, "changes": true }"#),
+        one(r#"{ "pattern": "/{region}/{view}/{path}", "listings": true }"#),
+        one(r#"{ "pattern": "/", "region": "jp", "view": "canonical", "listings": true }"#),
+        one(r#"{ "pattern": "/listings/{region}/{view}", "tree": true, "listings": true }"#),
+        one(r#"{ "pattern": "/listings/{region}/{view}", "history": true, "listings": true }"#),
+        one(r#"{ "pattern": "/listings/{region}/{view}", "changes": true, "listings": true }"#),
+        one(r#"{ "pattern": "/{region}/{view}/{form}/{path}" }"#),
+        one(r#"{ "pattern": "/{region}/{view}/{path}", "form": "live2d-model" }"#),
+        one(r#"{ "pattern": "/trees/{region}/{view}/{form}", "tree": true }"#),
+        one(r#"{ "pattern": "/trees/{region}/{view}", "tree": true, "form": "live2d-model" }"#),
+        one(
+            r#"{ "pattern": "/listings/{region}/{view}/{form}", "form": "live2d-model", "listings": true }"#,
+        ),
+        one(r#"{ "pattern": "/listings/{region}/{view}/{form}/{form}", "listings": true }"#),
+        one(r#"{ "pattern": "/listings/{region}/{view}", "form": "../bad", "listings": true }"#),
+        one(r#"{ "pattern": "/listings/{region}/{view}", "form": "nul", "listings": true }"#),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "delivery": "redirect" }"#
             .to_owned(),
         r#"{ "routes": [{ "pattern": "/{region}/{view}/{path}" }], "store_url": "https://a" }"#

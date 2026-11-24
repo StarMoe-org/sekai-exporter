@@ -115,8 +115,8 @@ bytes ──unpack──▶ object graph ──convert──▶ assets ──vie
 
 If your runtime needs a form this repository does not have, contributions are welcome. The architecture is built so that a new form is a small change:
 
-1. **Start from object documents.** Export the bundles you care about and read the object documents to see which objects make up your asset.
-2. **Write the specification first**: which runtime it is for, what the asset contains, which objects and tables it comes from, which container it uses, and why the result is correct for that runtime.
+1. **Research the asset.** Read how your runtime loads and uses it, then export the bundles you care about and read the object documents to see which objects make up your asset. Justify each choice from the source that owns it.
+2. **Write the specification before the code**: which runtime it is for, what the asset contains, which objects and tables it comes from, which container it uses, and why the result is correct for that runtime.
 3. **Add a converter** as its own module behind its own feature. It receives a root object and a context for fetching referenced objects and game tables, and returns the asset. It does not read files, pick output paths or write to the catalog; the framework does that.
 4. **Reuse existing converters.** A form for a new runtime is often an existing converter with different choices for materials, animation or coordinates.
 5. **Test with synthetic data.** Tests and fixtures must not contain game data, so build the inputs yourself (see the contributing guide).

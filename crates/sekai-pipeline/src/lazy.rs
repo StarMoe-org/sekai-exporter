@@ -9,9 +9,10 @@ use std::io;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use sekai_catalog::Derived;
+use sekai_format::SourceObject;
 
 use crate::canonical::Files;
-use crate::eval::{self, Output, RootKey};
+use crate::eval::{self, Output, RootKey, Subject, source_objects};
 use crate::stream::{Entry, Inputs, PARSED_BYTES, Root, Stream, Units, plan_unit};
 use crate::version::{BundleError, Parsed, Version};
 
@@ -42,6 +43,17 @@ struct Opened<'a> {
     roots: Vec<Root<'a>>,
     unnamed: Vec<(String, RootKey)>,
     errors: Vec<BundleError>,
+}
+
+/// An asset of a bundle, as planned before it is converted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlannedAsset {
+    /// The name of the asset.
+    pub name: String,
+    /// The asset form.
+    pub form: &'static str,
+    /// Where the asset starts in its bundle.
+    pub root: RootKey,
 }
 
 /// Evaluates the assets of the bundles of a manifest one request at a time.
@@ -126,14 +138,17 @@ impl<'a> Lazy<'a> {
         self.units.entries.iter().map(|entry| entry.name.as_str())
     }
 
-    /// The names of the assets of `bundle`, in order. Empty for a bundle the manifest does not
-    /// list.
-    pub fn names(&self, bundle: &str) -> io::Result<Vec<String>> {
+    /// The assets of `bundle`, in name order. Empty for a bundle the manifest does not list.
+    pub fn assets(&self, bundle: &str) -> io::Result<Vec<PlannedAsset>> {
         let Some(opened) = self.bundle(bundle)? else {
             return Ok(Vec::new());
         };
-        let names = opened.roots.iter().map(|root| root.planned.name.clone());
-        Ok(names.collect())
+        let assets = opened.roots.iter().map(|root| PlannedAsset {
+            name: root.planned.name.clone(),
+            form: root.planned.converter.name(),
+            root: root.key.clone(),
+        });
+        Ok(assets.collect())
     }
 
     /// Roots of `bundle` that cannot be told apart from another root by name, as
@@ -155,6 +170,27 @@ impl<'a> Lazy<'a> {
 
     /// The asset `name`, computed if it has not been. `None` if no bundle has such an asset.
     pub fn asset(&self, name: &str) -> io::Result<Option<Output>> {
+        match self.find(name)? {
+            Some((opened, position)) => self.output(&opened, position),
+            None => Ok(None),
+        }
+    }
+
+    /// The objects the conversion of the asset `name` may read: its root first, then every object
+    /// the root reaches. Empty for an asset whose root is a file of a bundle; `None` if no bundle
+    /// has such an asset. Nothing is converted.
+    pub fn closure(&self, name: &str) -> io::Result<Option<Vec<SourceObject>>> {
+        let Some((opened, position)) = self.find(name)? else {
+            return Ok(None);
+        };
+        Ok(Some(match &opened.roots[position].planned.subject {
+            Subject::Object(objects) => source_objects(opened.version.index(), objects),
+            Subject::File(_) => Vec::new(),
+        }))
+    }
+
+    /// The window that plans the asset `name`, and the position of the asset among its roots.
+    fn find(&self, name: &str) -> io::Result<Option<(Arc<Opened<'a>>, usize)>> {
         // An asset is named under the directory of its bundle, so its name starts with the
         // bundle name; the longest bundle name comes first.
         let ends = name
@@ -172,7 +208,7 @@ impl<'a> Lazy<'a> {
                 .roots
                 .binary_search_by(|root| root.planned.name.as_str().cmp(name));
             if let Ok(position) = found {
-                return self.output(&opened, position);
+                return Ok(Some((opened, position)));
             }
         }
         Ok(None)

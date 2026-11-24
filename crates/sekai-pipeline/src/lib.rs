@@ -22,6 +22,6 @@ pub mod tables;
 pub mod version;
 
 pub use eval::{Evaluation, Fusion, Options, Output, RootKey, parallel};
-pub use lazy::Lazy;
+pub use lazy::{Lazy, PlannedAsset};
 pub use sekai_catalog::{BundleIndexes, Derivations, Derived, MemoryDerivations, NoBundleIndexes};
 pub use version::{BundleError, BundleInput, Version};

@@ -49,6 +49,7 @@ This page lists every part of the exporter with its state, so that anyone can se
 | S3-compatible stores | Done | [Publishing](publishing.md#s3-compatible-buckets) |
 | WebAssembly core, compared with the native build in continuous integration | Done | |
 | Lazy evaluator as a library | Done | [Architecture](architecture.md) |
+| A WebAssembly session that keeps bundles open, reads browser files a range at a time and lists, converts and closes assets on request | Done | |
 | Path indexes and the `serve` resolver | Done | [Serving](serving.md), [Path index](spec/path-index.md) |
 | Directory listings and a directory tree per publication, for file browsers | Done | [Serving](serving.md#directory-trees), [Directory tree](spec/directory-tree.md) |
 | A version history per view and the changes of each version | Done | [Serving](serving.md#version-histories), [Version history](spec/version-history.md) |

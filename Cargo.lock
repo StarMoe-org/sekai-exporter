@@ -1487,8 +1487,11 @@ dependencies = [
  "sekai-mysekai",
  "sekai-pipeline",
  "sekai-unity",
+ "serde",
+ "serde_json",
  "sha2",
  "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

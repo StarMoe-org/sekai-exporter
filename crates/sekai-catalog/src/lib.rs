@@ -12,8 +12,8 @@ pub mod pack;
 pub mod store;
 
 pub use derivation::{
-    BundleIndexes, Derivations, Derived, MemoryDerivations, MemoryUnitRecords, NoBundleIndexes,
-    UnitRecords,
+    BundleIndexes, Derivations, Derived, MemoryBundleIndexes, MemoryDerivations, MemoryUnitRecords,
+    NoBundleIndexes, UnitRecords,
 };
 pub use holdings::{Holdings, MemoryHoldings, NoHoldings, NoRemote, Objects, Remote};
 pub use store::{Key, LocalStore, MemoryStore, Store};

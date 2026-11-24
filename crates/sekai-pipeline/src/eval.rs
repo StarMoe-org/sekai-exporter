@@ -512,19 +512,6 @@ fn build_document(
             file: file.clone(),
         })
         .collect();
-    let sources = objects
-        .iter()
-        .filter_map(|id| {
-            let bundle = &index.bundles()[id.bundle];
-            let position = index.position(*id)?;
-            Some(SourceObject {
-                bundle: bundle.name.clone(),
-                file: named_file(bundle, id.file).map(str::to_owned),
-                path_id: id.path_id,
-                class: bundle.files[id.file].objects[position].class.clone(),
-            })
-        })
-        .collect();
     AssetDocument {
         format: FORMAT.to_owned(),
         version: VERSION,
@@ -532,12 +519,28 @@ fn build_document(
         form: plan.converter.name().to_owned(),
         form_version: plan.converter.version(),
         fingerprint: hex(&plan.fingerprint),
-        sources,
+        sources: source_objects(index, objects),
         resources,
         members,
         references: Vec::new(),
         error,
     }
+}
+
+/// The objects `objects` of `index` as asset documents list them. Objects the index does not
+/// hold are left out.
+pub(crate) fn source_objects(index: &VersionIndex, objects: &[ObjectId]) -> Vec<SourceObject> {
+    let source = |id: &ObjectId| {
+        let bundle = &index.bundles()[id.bundle];
+        let position = index.position(*id)?;
+        Some(SourceObject {
+            bundle: bundle.name.clone(),
+            file: named_file(bundle, id.file).map(str::to_owned),
+            path_id: id.path_id,
+            class: bundle.files[id.file].objects[position].class.clone(),
+        })
+    };
+    objects.iter().filter_map(source).collect()
 }
 
 /// An estimate of the time a derivation takes, in arbitrary units.

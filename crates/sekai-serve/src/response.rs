@@ -114,8 +114,9 @@ impl ObjectId {
         })
     }
 
-    /// The root of a path index, `<aa>/<sha256>.json`.
-    pub(crate) fn root(sha256: [u8; 32]) -> Self {
+    /// A JSON object of the store, `<aa>/<sha256>.json`: the root of a path index, an index root
+    /// or a chunk of a form listing.
+    pub(crate) fn json(sha256: [u8; 32]) -> Self {
         Self {
             sha256,
             extension: "json".to_owned(),
@@ -127,22 +128,6 @@ impl ObjectId {
         Self {
             sha256,
             extension: "paths".to_owned(),
-        }
-    }
-
-    /// An index root of a publication, `<aa>/<sha256>.json`.
-    pub(crate) fn index_root(sha256: [u8; 32]) -> Self {
-        Self {
-            sha256,
-            extension: "json".to_owned(),
-        }
-    }
-
-    /// A chunk of a form listing, `<aa>/<sha256>.json`.
-    pub(crate) fn listing_chunk(sha256: [u8; 32]) -> Self {
-        Self {
-            sha256,
-            extension: "json".to_owned(),
         }
     }
 

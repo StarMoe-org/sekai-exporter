@@ -200,20 +200,11 @@ struct Pointed {
     named: Named,
 }
 
-/// The version and revision a pointer names.
-#[derive(Debug)]
-struct PublishedMeta {
-    published_version: String,
-    revision: String,
-}
-
 /// What lookups go on from in a pointer; nothing when nothing is published under it.
 #[derive(Debug, Clone, Default)]
 struct Named {
-    /// The version and revision of the publication.
-    meta: Option<Arc<PublishedMeta>>,
     /// The index root of the publication.
-    index_root: Option<[u8; 32]>,
+    index_root: Option<Arc<NamedIndexRoot>>,
     /// The root of the path index.
     root: Option<[u8; 32]>,
     /// The directory tree.
@@ -235,6 +226,38 @@ impl Named {
     }
 }
 
+/// The index root a pointer names, with the version and revision the pointer gives it.
+#[derive(Debug)]
+struct NamedIndexRoot {
+    sha256: [u8; 32],
+    published_version: String,
+    revision: String,
+}
+
+impl NamedIndexRoot {
+    /// The read of the index root.
+    fn read(&self) -> Read {
+        Read::IndexRoot(ObjectId::json(self.sha256))
+    }
+
+    /// Checks that `index`, the index root, describes the version and revision of the pointer.
+    fn check(&self, index: &FormIndex) -> Result<(), String> {
+        if index.published_version == self.published_version && index.revision == self.revision {
+            return Ok(());
+        }
+        Err(format!(
+            "it describes version {:?} revision {:?}, not {:?} {:?}",
+            index.published_version, index.revision, self.published_version, self.revision
+        ))
+    }
+
+    /// The key under which the listing of `form` in `view`, or the list of its forms, is kept.
+    fn listing_key(&self, view: &str, form: Option<&str>) -> [u8; 32] {
+        let (version, revision) = (&self.published_version, &self.revision);
+        forms::key(&self.sha256, view, version, revision, form)
+    }
+}
+
 /// A document of a publication, an object of the store.
 #[derive(Debug, Clone, Copy)]
 struct Stored {
@@ -252,7 +275,7 @@ impl Pointed {
 }
 
 /// What the resolver keeps of indexes: a decoded object, named by its hash, or a listing
-/// made from one, named by [`listing::key`], [`forms::forms_key`] or [`forms::form_key`].
+/// made from one, named by [`listing::key`] or [`forms::key`].
 #[derive(Debug, Clone)]
 enum Indexed {
     Root(Arc<PathIndex>),
@@ -315,8 +338,7 @@ impl Resolver {
             request: *request,
             target,
             started: now,
-            meta: None,
-            gathering: None,
+            carried: None,
         };
         asked.pointer(now)
     }
@@ -369,18 +391,23 @@ struct Asked<'a> {
     target: Target,
     /// When the lookup started.
     started: Duration,
-    /// The version and revision from the pointer, set once the pointer is read.
-    meta: Option<Arc<PublishedMeta>>,
-    /// The listing the target names, while it is gathered. It is boxed, as it grows with the
-    /// listing while a lookup is moved from read to read.
-    gathering: Option<Box<Gather>>,
+    /// What the lookup carries from a read to the next, once it carries anything. It is boxed,
+    /// as a listing grows with what it lists while a lookup is moved from read to read.
+    carried: Option<Box<Carried>>,
 }
 
-/// A directory or form listing while its chunks are gathered.
+/// What a lookup carries from a read to the next.
 #[derive(Debug)]
-enum Gather {
+enum Carried {
+    /// The listing of a directory, while the chunks of the path index are read.
     Directory(Gathering),
-    Form(FormGathering),
+    /// The index root that the pointer names, while it is read.
+    IndexRoot(Arc<NamedIndexRoot>),
+    /// The listing of a form, while its chunks are read.
+    Form {
+        index_root: Arc<NamedIndexRoot>,
+        gathering: FormGathering,
+    },
 }
 
 /// The listing of a directory, and the path index it is gathered from.
@@ -425,8 +452,7 @@ impl<'a> Asked<'a> {
 
     /// Goes on from what the pointer names: to the root of the path index for a path, to the
     /// index root for form listings, or to the answer for a document.
-    fn pointed(mut self, named: Named) -> Lookup<'a> {
-        self.meta = named.meta.clone();
+    fn pointed(self, named: Named) -> Lookup<'a> {
         match &self.target.entry {
             Entry::Path(_) => match named.root {
                 Some(root) => self.root(root),
@@ -437,7 +463,7 @@ impl<'a> Asked<'a> {
                 None => self.not_found(),
             },
             Entry::Listing(_) => match named.index_root {
-                Some(root) => self.index_root(root),
+                Some(index_root) => self.index_root(index_root),
                 None => self.not_found(),
             },
         }
@@ -454,7 +480,7 @@ impl<'a> Asked<'a> {
     fn root(self, sha256: [u8; 32]) -> Lookup<'a> {
         match self.resolver.decoded(&sha256) {
             Some(Indexed::Root(index)) => self.indexed(sha256, index),
-            _ => self.read(Read::Root(ObjectId::root(sha256))),
+            _ => self.read(Read::Root(ObjectId::json(sha256))),
         }
     }
 
@@ -470,11 +496,11 @@ impl<'a> Asked<'a> {
                 return self.listed(&listed);
             }
             let listing = Listing::new(path);
-            return self.gather(Box::new(Gather::Directory(Gathering {
+            return self.gather(Gathering {
                 root,
                 index,
                 listing,
-            })));
+            });
         }
         match index.chunk_of(path) {
             Some(at) => self.named_chunk(root, chunk_sha256(&index, at)),
@@ -487,214 +513,157 @@ impl<'a> Asked<'a> {
     fn named_chunk(self, root: [u8; 32], named: Result<[u8; 32], String>) -> Lookup<'a> {
         match named {
             Ok(sha256) => self.chunk(sha256),
-            Err(reason) => self.failed(Read::Root(ObjectId::root(root)), reason),
+            Err(reason) => self.failed(Read::Root(ObjectId::json(root)), reason),
         }
     }
 
     /// Goes on with the listing of `gathering`: to the chunk it reads next, or to the response
     /// once it has looked at every path under the directory.
-    fn gather(mut self, gathering: Box<Gather>) -> Lookup<'a> {
-        let Gather::Directory(Gathering {
+    fn gather(mut self, gathering: Gathering) -> Lookup<'a> {
+        let Gathering {
             root,
             index,
             listing,
-        }) = &*gathering
-        else {
-            return self.not_found();
-        };
+        } = &gathering;
         if let Some(at) = listing.wanted(index) {
             let (root, named) = (*root, chunk_sha256(index, at));
-            self.gathering = Some(gathering);
+            self.carried = Some(Box::new(Carried::Directory(gathering)));
             return self.named_chunk(root, named);
         }
         if !listing.is_found() {
             return self.not_found();
         }
         match listing.listed(index) {
-            Ok(listed) => {
-                let listed = Arc::new(listed);
-                let key = listing::key(root, listing.directory());
-                let weight = listed.weight();
-                self.resolver
-                    .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
-                self.listed(&listed)
-            }
-            Err(reason) => self.failed(Read::Root(ObjectId::root(*root)), reason),
+            Ok(listed) => self.keep_listed(listing::key(root, listing.directory()), listed),
+            Err(reason) => self.failed(Read::Root(ObjectId::json(*root)), reason),
         }
     }
 
-    /// Goes on from the index root of a publication: a cached listing, a decoded index root, or
-    /// by reading it.
-    fn index_root(self, sha256: [u8; 32]) -> Lookup<'a> {
-        if let Some(key) = self.form_listing_key(&sha256)
-            && let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key)
-        {
+    /// Goes on from the index root that the pointer names: to the listing kept from an earlier
+    /// lookup, to the decoded index root, or by reading it.
+    fn index_root(mut self, index_root: Arc<NamedIndexRoot>) -> Lookup<'a> {
+        let key = index_root.listing_key(&self.target.view, self.form());
+        if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
             return self.listed(&listed);
         }
-        match self.resolver.decoded(&sha256) {
-            Some(Indexed::IndexRoot(index)) => self.form_indexed(sha256, index),
-            _ => self.read(Read::IndexRoot(ObjectId::index_root(sha256))),
+        match self.resolver.decoded(&index_root.sha256) {
+            Some(Indexed::IndexRoot(index)) => self.form_indexed(index_root, index),
+            _ => {
+                let read = index_root.read();
+                self.carried = Some(Box::new(Carried::IndexRoot(index_root)));
+                self.read(read)
+            }
         }
     }
 
-    /// Cache key for the form listing or list of forms of the target under `root`, when the
-    /// pointer metadata is known.
-    fn form_listing_key(&self, root: &[u8; 32]) -> Option<[u8; 32]> {
-        let meta = self.meta.as_deref()?;
-        match &self.target.entry {
-            Entry::Listing(None) => Some(forms::forms_key(
-                root,
-                &self.target.view,
-                &meta.published_version,
-                &meta.revision,
-            )),
-            Entry::Listing(Some(form)) => Some(forms::form_key(
-                root,
-                &self.target.view,
-                &meta.published_version,
-                &meta.revision,
-                form,
-            )),
+    /// Goes on from `index`, the index root that the lookup carries, once it is read. It is kept
+    /// only when it describes what the pointer names.
+    fn index_root_read(mut self, index: Arc<FormIndex>) -> Lookup<'a> {
+        let Some(index_root) = self.carried_index_root() else {
+            return self.not_found();
+        };
+        if index_root.check(&index).is_ok() {
+            let weight = index.weight();
+            let kept = Indexed::IndexRoot(Arc::clone(&index));
+            self.resolver.keep(index_root.sha256, kept, weight);
+        }
+        self.form_indexed(index_root, index)
+    }
+
+    /// The index root that the lookup carries, taken from it.
+    fn carried_index_root(&mut self) -> Option<Arc<NamedIndexRoot>> {
+        match *self.carried.take()? {
+            Carried::IndexRoot(index_root) => Some(index_root),
             _ => None,
         }
     }
 
-    /// Checks that `index` describes the version and revision that the pointer named.
-    fn check_index_meta(&self, index: &FormIndex) -> Result<(), String> {
-        let Some(meta) = self.meta.as_deref() else {
-            return Err("the pointer has no metadata".to_owned());
-        };
-        if index.published_version != meta.published_version || index.revision != meta.revision {
-            return Err(format!(
-                "it describes version {:?} revision {:?}, not {:?} {:?}",
-                index.published_version, index.revision, meta.published_version, meta.revision
-            ));
-        }
-        Ok(())
-    }
-
-    /// Goes on from `index`, the decoded index root `root`: checks it against the pointer, then
-    /// lists all forms or begins gathering the chunks of the requested form.
-    fn form_indexed(self, root: [u8; 32], index: Arc<FormIndex>) -> Lookup<'a> {
-        if let Err(reason) = self.check_index_meta(&index) {
-            return self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason);
-        }
-        let Some(meta) = self.meta.as_deref() else {
-            return self.not_found();
-        };
+    /// The form whose listing the target names; `None` for the list of the forms.
+    fn form(&self) -> Option<&str> {
         match &self.target.entry {
-            Entry::Listing(None) => {
-                let key = forms::forms_key(
-                    &root,
-                    &self.target.view,
-                    &meta.published_version,
-                    &meta.revision,
-                );
-                if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
-                    return self.listed(&listed);
-                }
-                match index.listed_forms(&self.target.view) {
-                    Ok(listed) => {
-                        let listed = Arc::new(listed);
-                        let weight = listed.weight();
-                        self.resolver
-                            .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
-                        self.listed(&listed)
-                    }
-                    Err(reason) => self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
-                }
-            }
-            Entry::Listing(Some(form)) => {
-                let key = forms::form_key(
-                    &root,
-                    &self.target.view,
-                    &meta.published_version,
-                    &meta.revision,
-                    form,
-                );
-                if let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key) {
-                    return self.listed(&listed);
-                }
-                match FormGathering::new(root, index, form) {
-                    Ok(Some(gathering)) => self.gather_form(Box::new(Gather::Form(gathering))),
-                    Ok(None) => self.not_found(),
-                    Err(reason) => self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
-                }
-            }
-            _ => self.not_found(),
+            Entry::Listing(form) => form.as_deref(),
+            _ => None,
         }
     }
 
-    /// Goes on gathering a form listing: to its next chunk, or to the response once every chunk
-    /// has been gathered.
-    fn gather_form(mut self, gathering: Box<Gather>) -> Lookup<'a> {
-        let Gather::Form(form_gathering) = &*gathering else {
-            return self.not_found();
+    /// Goes on from `index`, the decoded index root that `index_root` names: once it is checked
+    /// against the pointer, to the list of the forms, or to gathering the listing of the form.
+    fn form_indexed(self, index_root: Arc<NamedIndexRoot>, index: Arc<FormIndex>) -> Lookup<'a> {
+        if let Err(reason) = index_root.check(&index) {
+            return self.failed(index_root.read(), reason);
+        }
+        let Some(form) = self.form() else {
+            let key = index_root.listing_key(&self.target.view, None);
+            return match index.listed_forms(&self.target.view) {
+                Ok(listed) => self.keep_listed(key, listed),
+                Err(reason) => self.failed(index_root.read(), reason),
+            };
         };
-        if let Some(sha256) = form_gathering.wanted() {
-            self.gathering = Some(gathering);
+        match FormGathering::new(index, form) {
+            Ok(Some(gathering)) => self.gather_form(index_root, gathering),
+            Ok(None) => self.not_found(),
+            Err(reason) => self.failed(index_root.read(), reason),
+        }
+    }
+
+    /// Goes on with the listing of a form: to the chunk it reads next, or to the response once it
+    /// has every chunk.
+    fn gather_form(
+        mut self,
+        index_root: Arc<NamedIndexRoot>,
+        gathering: FormGathering,
+    ) -> Lookup<'a> {
+        if let Some(sha256) = gathering.wanted() {
+            let carried = Carried::Form {
+                index_root,
+                gathering,
+            };
+            self.carried = Some(Box::new(carried));
             return self.listing_chunk(sha256);
         }
-        let root = *form_gathering.root();
-        let listed = match form_gathering.listed(&self.target.view) {
-            Ok(listed) => Arc::new(listed),
-            Err(reason) => return self.failed(Read::IndexRoot(ObjectId::index_root(root)), reason),
-        };
-        if let Some(meta) = self.meta.as_deref() {
-            let key = forms::form_key(
-                &root,
-                &self.target.view,
-                &meta.published_version,
-                &meta.revision,
-                form_gathering.form(),
-            );
-            let weight = listed.weight();
-            self.resolver
-                .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+        let key = index_root.listing_key(&self.target.view, self.form());
+        match gathering.listed(&self.target.view) {
+            Ok(listed) => self.keep_listed(key, listed),
+            Err(reason) => self.failed(index_root.read(), reason),
         }
-        self.listed(&listed)
     }
 
-    /// Goes on from a chunk of a form listing: a cached finished listing, a decoded chunk, or by
-    /// reading it.
+    /// Goes on from a chunk of the listing of a form: a decoded one, or by reading it.
     fn listing_chunk(self, sha256: [u8; 32]) -> Lookup<'a> {
-        if let Some(Gather::Form(form_gathering)) = self.gathering.as_deref()
-            && let Some(key) = self.form_listing_key(form_gathering.root())
-            && let Some(Indexed::Listing(listed)) = self.resolver.decoded(&key)
-        {
-            return self.listed(&listed);
-        }
         match self.resolver.decoded(&sha256) {
-            Some(Indexed::ListingChunk(chunk)) => self.form_chunk_found(sha256, chunk, false),
-            _ => self.read(Read::ListingChunk(ObjectId::listing_chunk(sha256))),
+            Some(Indexed::ListingChunk(chunk)) => self.form_chunk(sha256, chunk),
+            _ => self.read(Read::ListingChunk(ObjectId::json(sha256))),
         }
     }
 
-    /// Appends `chunk` to the form listing being gathered and, when `keep` is set and the chunk
-    /// passes validation, remembers it in the cache before moving on.
-    fn form_chunk_found(
-        mut self,
-        sha256: [u8; 32],
-        chunk: Arc<FormChunk>,
-        keep: bool,
-    ) -> Lookup<'a> {
-        let Some(mut gathering) = self.gathering.take() else {
+    /// Goes on with `chunk`, the next chunk of the listing of the form that the lookup carries.
+    /// It is kept only when it fits the listing.
+    fn form_chunk(mut self, sha256: [u8; 32], chunk: Arc<FormChunk>) -> Lookup<'a> {
+        let Some(Carried::Form {
+            index_root,
+            mut gathering,
+        }) = self.carried.take().map(|carried| *carried)
+        else {
             return self.not_found();
         };
-        let Gather::Form(form_gathering) = &mut *gathering else {
-            return self.not_found();
-        };
-        match form_gathering.push(Arc::clone(&chunk)) {
+        let weight = chunk.weight();
+        match gathering.push(Arc::clone(&chunk)) {
             Ok(()) => {
-                if keep {
-                    let weight = chunk.weight();
-                    self.resolver
-                        .keep(sha256, Indexed::ListingChunk(chunk), weight);
-                }
-                self.gather_form(gathering)
+                let kept = Indexed::ListingChunk(chunk);
+                self.resolver.keep(sha256, kept, weight);
+                self.gather_form(index_root, gathering)
             }
-            Err(reason) => self.failed(Read::ListingChunk(ObjectId::listing_chunk(sha256)), reason),
+            Err(reason) => self.failed(Read::ListingChunk(ObjectId::json(sha256)), reason),
         }
+    }
+
+    /// Keeps `listed`, the listing of a directory or form, under `key`, and answers with it.
+    fn keep_listed(&self, key: [u8; 32], listed: Listed) -> Lookup<'a> {
+        let listed = Arc::new(listed);
+        let weight = listed.weight();
+        self.resolver
+            .keep(key, Indexed::Listing(Arc::clone(&listed)), weight);
+        self.listed(&listed)
     }
 
     /// Answers with `listed`, the listing of a directory or form.
@@ -713,11 +682,9 @@ impl<'a> Asked<'a> {
     /// Goes on from `chunk`: with the listing that reads it, or by answering with the file of the
     /// path in it, if it has one.
     fn found(mut self, sha256: [u8; 32], chunk: &Chunk) -> Lookup<'a> {
-        if let Some(mut gathering) = self.gathering.take() {
-            let Gather::Directory(directory) = &mut *gathering else {
-                return self.not_found();
-            };
-            directory.listing.gather(&directory.index, chunk);
+        if let Some(Carried::Directory(mut gathering)) = self.carried.take().map(|carried| *carried)
+        {
+            gathering.listing.gather(&gathering.index, chunk);
             return self.gather(gathering);
         }
         let Entry::Path(path) = &self.target.entry else {
@@ -747,12 +714,15 @@ impl<'a> Pending<'a> {
     /// remembered, and the lookup goes on from it. When it is not remembered, the lookup asks
     /// for the read again.
     pub fn resume(self, now: Duration) -> Lookup<'a> {
-        let Self { asked, read } = self;
+        let Self { mut asked, read } = self;
         match read {
             Read::Pointer(_) => asked.pointer(now),
             Read::Root(object) => asked.root(*object.sha256()),
             Read::Chunk(object) => asked.chunk(*object.sha256()),
-            Read::IndexRoot(object) => asked.index_root(*object.sha256()),
+            Read::IndexRoot(_) => match asked.carried_index_root() {
+                Some(index_root) => asked.index_root(index_root),
+                None => asked.not_found(),
+            },
             Read::ListingChunk(object) => asked.listing_chunk(*object.sha256()),
         }
     }
@@ -817,20 +787,11 @@ impl<'a> Pending<'a> {
                 Err(reason) => asked.failed(Read::Chunk(object), reason),
             },
             Read::IndexRoot(object) => match decoded_index_root(&object, bytes) {
-                Ok(index) => {
-                    if let Err(reason) = asked.check_index_meta(&index) {
-                        return asked.failed(Read::IndexRoot(object), reason);
-                    }
-                    let index = Arc::new(index);
-                    let sha256 = *object.sha256();
-                    let weight = index.weight();
-                    resolver.keep(sha256, Indexed::IndexRoot(Arc::clone(&index)), weight);
-                    asked.form_indexed(sha256, index)
-                }
+                Ok(index) => asked.index_root_read(Arc::new(index)),
                 Err(reason) => asked.failed(Read::IndexRoot(object), reason),
             },
             Read::ListingChunk(object) => match decoded_listing_chunk(&object, bytes) {
-                Ok(chunk) => asked.form_chunk_found(*object.sha256(), Arc::new(chunk), true),
+                Ok(chunk) => asked.form_chunk(*object.sha256(), Arc::new(chunk)),
                 Err(reason) => asked.failed(Read::ListingChunk(object), reason),
             },
         }
@@ -856,15 +817,17 @@ fn pointer_names(bytes: &[u8]) -> Result<Named, String> {
         };
         document.map(object).transpose()
     };
-    let index_root = pointer.root.map(|root| hash("index root", &root));
+    let index_root = match pointer.root {
+        Some(root) => Some(Arc::new(NamedIndexRoot {
+            sha256: hash("index root", &root)?,
+            published_version: pointer.published_version,
+            revision: pointer.revision,
+        })),
+        None => None,
+    };
     let root = pointer.paths.map(|paths| hash("path index", &paths));
-    let meta = Arc::new(PublishedMeta {
-        published_version: pointer.published_version,
-        revision: pointer.revision,
-    });
     Ok(Named {
-        meta: Some(meta),
-        index_root: index_root.transpose()?,
+        index_root,
         root: root.transpose()?,
         tree: stored("directory tree", pointer.tree)?,
         history: stored("version history", pointer.history)?,

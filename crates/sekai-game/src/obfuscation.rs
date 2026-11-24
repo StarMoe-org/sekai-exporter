@@ -15,6 +15,9 @@ const INVERTED: [u8; 4] = [0x10, 0, 0, 0];
 const PREFIXED: [u8; 4] = [0x20, 0, 0, 0];
 const INVERTED_LEN: usize = 128;
 
+/// The stored bytes that decide and contain the obfuscation.
+pub const HEAD_LEN: usize = 4 + INVERTED_LEN;
+
 /// The bundle starts with none of the known markers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnknownObfuscation {
@@ -30,31 +33,75 @@ impl fmt::Display for UnknownObfuscation {
 
 impl std::error::Error for UnknownObfuscation {}
 
+/// How the stored bytes of a bundle differ from its UnityFS bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Obfuscation {
+    /// The bundle is stored as it is.
+    None,
+    /// A marker comes before the UnityFS bytes.
+    Prefixed,
+    /// A marker comes before the UnityFS bytes, and the first five of every eight of their first
+    /// 128 bytes are inverted.
+    Inverted,
+}
+
+impl Obfuscation {
+    /// The obfuscation of a bundle whose stored bytes start with `stored`, which holds at least
+    /// the first [`HEAD_LEN`] bytes, or the whole bundle when it is shorter.
+    pub fn of(stored: &[u8]) -> Result<Self, UnknownObfuscation> {
+        let head = &stored[..stored.len().min(HEAD_LEN)];
+        let unknown = || UnknownObfuscation {
+            head: head.iter().take(8).copied().collect(),
+        };
+        let marker = head.get(..4).unwrap_or_default();
+        let obfuscation = if head.starts_with(SIGNATURE) {
+            Self::None
+        } else if marker == PREFIXED {
+            Self::Prefixed
+        } else if marker == INVERTED && head.len() >= HEAD_LEN {
+            Self::Inverted
+        } else {
+            return Err(unknown());
+        };
+        let mut signature = head[obfuscation.marker_len()..].to_vec();
+        obfuscation.restore(&mut signature, 0);
+        if signature.starts_with(SIGNATURE) {
+            Ok(obfuscation)
+        } else {
+            Err(unknown())
+        }
+    }
+
+    /// The number of stored bytes before the UnityFS bytes.
+    pub fn marker_len(self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Prefixed | Self::Inverted => 4,
+        }
+    }
+
+    /// The number of leading UnityFS bytes that are stored changed.
+    pub fn changed_len(self) -> u64 {
+        match self {
+            Self::None | Self::Prefixed => 0,
+            Self::Inverted => INVERTED_LEN as u64,
+        }
+    }
+
+    /// Restores `bytes`, stored at `offset` of the UnityFS bytes, to what the bundle holds there.
+    pub fn restore(self, bytes: &mut [u8], offset: u64) {
+        let inverted = (offset..self.changed_len()).zip(bytes);
+        for (_, byte) in inverted.filter(|(at, _)| at % 8 < 5) {
+            *byte = !*byte;
+        }
+    }
+}
+
 /// Restores a downloaded bundle to its UnityFS bytes, in place.
 pub fn deobfuscate(data: &mut Vec<u8>) -> Result<(), UnknownObfuscation> {
-    if data.starts_with(SIGNATURE) {
-        return Ok(());
-    }
-    let marker = data.get(..4).unwrap_or_default();
-    if marker == PREFIXED {
-        data.drain(..4);
-    } else if marker == INVERTED && data.len() >= 4 + INVERTED_LEN {
-        data.drain(..4);
-        for (i, b) in data[..INVERTED_LEN].iter_mut().enumerate() {
-            if i % 8 < 5 {
-                *b = !*b;
-            }
-        }
-    } else {
-        return Err(UnknownObfuscation {
-            head: data.iter().take(8).copied().collect(),
-        });
-    }
-    if !data.starts_with(SIGNATURE) {
-        return Err(UnknownObfuscation {
-            head: data.iter().take(8).copied().collect(),
-        });
-    }
+    let obfuscation = Obfuscation::of(data)?;
+    data.drain(..obfuscation.marker_len());
+    obfuscation.restore(data, 0);
     Ok(())
 }
 
@@ -64,9 +111,6 @@ pub struct Deobfuscating<W> {
     head: Vec<u8>,
     released: bool,
 }
-
-/// The bytes that decide and contain the obfuscation.
-const HEAD_LEN: usize = 4 + INVERTED_LEN;
 
 impl<W: Write> Deobfuscating<W> {
     /// Writes the restored bundle to `inner`.
@@ -143,6 +187,20 @@ mod tests {
         );
         deobfuscate(&mut obfuscated).unwrap();
         assert_eq!(obfuscated, plain);
+    }
+
+    #[test]
+    fn restores_any_range_on_its_own() {
+        let plain = bundle();
+        let stored = obfuscated(&plain);
+        let obfuscation = Obfuscation::of(&stored[..HEAD_LEN]).unwrap();
+        assert_eq!(obfuscation, Obfuscation::Inverted);
+        let unity = &stored[obfuscation.marker_len()..];
+        for (start, end) in [(0, 8), (3, 70), (125, 140), (128, 200), (0, plain.len())] {
+            let mut range = unity[start..end].to_vec();
+            obfuscation.restore(&mut range, start as u64);
+            assert_eq!(range, plain[start..end], "bytes {start}..{end}");
+        }
     }
 
     #[test]

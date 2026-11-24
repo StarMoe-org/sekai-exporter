@@ -165,7 +165,7 @@ fn the_in_memory_object_documents_are_those_of_a_native_run() {
 }
 
 #[test]
-fn converters_cover_every_default_form_and_absent_rule() {
+fn converters_cover_every_form() {
     let forms: Vec<&str> = converters().iter().map(|c| c.name()).collect();
     assert_eq!(
         forms,
@@ -190,6 +190,7 @@ fn converters_cover_every_default_form_and_absent_rule() {
             "virtual-live-timeline",
             "action-set",
             "scenario-background",
+            "scenario-prefab",
             "costume-model",
             "costume-motion",
         ]

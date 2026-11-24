@@ -193,7 +193,7 @@ pub trait Converter: Send + Sync {
 
 ## 作为库使用
 
-各 crate 分层组织，每一个都可以单独使用（[架构](docs/architecture.zh-CN.md#crate)）：`sekai-unity` 解包 Unity 文件，`sekai-codec` 解码贴图与 CRI 音视频，`sekai-pipeline` 以预先或惰性的方式求值一个版本，`sekai-serve` 解析已发布视图的路径而自身不做任何 I/O，因此同一份代码可以运行在其他宿主中，`sekai-format` 则提供每种发布文档的 serde 类型，供读取输出的程序使用。`sekai-wasm` 把核心以 `evaluate` 与 `objects` 暴露给 JavaScript。
+各 crate 分层组织，每一个都可以单独使用（[架构](docs/architecture.zh-CN.md#crate)）：`sekai-unity` 解包 Unity 文件，`sekai-codec` 解码贴图与 CRI 音视频，`sekai-pipeline` 以预先或惰性的方式求值一个版本，`sekai-serve` 解析已发布视图的路径而自身不做任何 I/O，因此同一份代码可以运行在其他宿主中，`sekai-format` 则提供每种发布文档的 serde 类型，供读取输出的程序使用。`sekai-wasm` 把核心以 `evaluate` 与 `objects` 暴露给 JavaScript，另有 `Explorer` 类：它让一组资源包保持打开，按区间读取浏览器中的文件，每次回答一个问题：一个包的对象文档、它规划的资产、按请求转换的资产，以及一个资产的转换可能读取的对象。
 
 ## 状态
 

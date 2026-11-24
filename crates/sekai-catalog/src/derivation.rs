@@ -59,6 +59,21 @@ impl BundleIndexes for NoBundleIndexes {
     }
 }
 
+/// [`BundleIndexes`] held in memory.
+#[derive(Debug, Default)]
+pub struct MemoryBundleIndexes(Mutex<BTreeMap<[u8; 32], Vec<u8>>>);
+
+impl BundleIndexes for MemoryBundleIndexes {
+    fn get(&self, bundle: &[u8; 32]) -> io::Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().unwrap().get(bundle).cloned())
+    }
+
+    fn put(&self, bundle: [u8; 32], index: Vec<u8>) -> io::Result<()> {
+        self.0.lock().unwrap().insert(bundle, index);
+        Ok(())
+    }
+}
+
 /// [`Derivations`] held in memory.
 #[derive(Debug, Default)]
 pub struct MemoryDerivations(Mutex<BTreeMap<[u8; 32], Derived>>);

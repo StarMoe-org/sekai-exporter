@@ -97,7 +97,7 @@ fn names(lazy: &Lazy<'_>) -> Vec<String> {
     let bundles: Vec<String> = lazy.bundles().map(str::to_owned).collect();
     let mut names = Vec::new();
     for bundle in bundles {
-        names.extend(lazy.names(&bundle).unwrap());
+        names.extend(lazy.assets(&bundle).unwrap().into_iter().map(|a| a.name));
     }
     names
 }
@@ -167,10 +167,46 @@ fn lazy_results_are_the_streamed_results() {
         }
     }
     assert!(lazy.asset("no/such/asset").unwrap().is_none());
-    assert!(lazy.names("no such bundle").unwrap().is_empty());
+    assert!(lazy.assets("no such bundle").unwrap().is_empty());
     assert!(lazy.errors().is_empty());
     drop(streamed_store);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_planned_asset_names_its_form_root_and_closure() {
+    let converters = converters();
+    let manifest = manifest();
+    let memory = MemoryStore::default();
+    let derivations = MemoryDerivations::default();
+    let lazy = Lazy::new(
+        &manifest,
+        &Fixtures,
+        context(
+            &converters,
+            &memory,
+            &derivations,
+            &NoBundleIndexes,
+            &NoRecorder,
+        ),
+    );
+    let mut planned = lazy
+        .bundles()
+        .flat_map(|bundle| lazy.assets(bundle).unwrap());
+    let planned = planned.next().unwrap();
+    assert_eq!(planned.form, "texture");
+    let closure = lazy.closure(&planned.name).unwrap().unwrap();
+    let output = lazy.asset(&planned.name).unwrap().unwrap();
+    let document = AssetDocument::from_bytes(&memory.read(&output.document).unwrap()).unwrap();
+    let root = &document.sources[0];
+    let key = RootKey::Object {
+        file: root.file.clone(),
+        path_id: root.path_id,
+    };
+    assert_eq!(planned.root, key);
+    assert_eq!(closure[0], *root);
+    assert!(document.sources.iter().all(|read| closure.contains(read)));
+    assert!(lazy.closure("no/such/asset").unwrap().is_none());
 }
 
 #[test]
@@ -415,12 +451,12 @@ fn alternating_bundles_reuse_cached_windows_and_forward_fusion_and_batched_flush
     assert!(bundle_list.len() >= 2);
     // Warm the window cache across bundles, then alternate repeatedly without re-opening inputs.
     for b in &bundle_list {
-        let _ = lazy.names(b).unwrap();
+        let _ = lazy.assets(b).unwrap();
     }
     let opens_after_warm = open_counter.0.load(Ordering::SeqCst);
     for _ in 0..4 {
         for b in &bundle_list {
-            let _ = lazy.names(b).unwrap();
+            let _ = lazy.assets(b).unwrap();
         }
     }
     assert_eq!(

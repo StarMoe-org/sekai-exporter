@@ -4,14 +4,18 @@
 //! [`run`] evaluates bundles given as bytes, in memory, one bundle after another, and hands the
 //! files of each bundle's assets over once they are written. On `wasm32` it is exported to
 //! JavaScript as `evaluate`. [`objects`] writes the object document of every bundle, as the
-//! `objects` command of the native program does; it is exported as `objects`.
+//! `objects` command of the native program does; it is exported as `objects`. An
+//! [`Explorer`](explorer::Explorer) keeps a set of bundles open and answers questions about them
+//! one at a time; it is exported as the class `Explorer`.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::sync::Arc;
 
-use sekai_catalog::{Key, MemoryDerivations, MemoryStore, NoBundleIndexes};
+use sekai_catalog::{
+    BundleIndexes, Derivations, Key, MemoryDerivations, MemoryStore, NoBundleIndexes, Store,
+};
 use sekai_convert::Converter;
 use sekai_game::obfuscation::deobfuscate;
 use sekai_pipeline::metrics::NoRecorder;
@@ -19,21 +23,21 @@ use sekai_pipeline::objects::{self as documents, Source};
 use sekai_pipeline::stream::{self, Entry, InBundle, Inputs, Segment, Stream};
 use sekai_pipeline::{BundleInput, Options, Output};
 use sekai_unity::document::Payloads;
-use sekai_unity::{BoundedBlockCache, NoClasses};
+use sekai_unity::{BlockCache, BoundedBlockCache, NoClasses};
 use sha2::{Digest, Sha256};
+
+pub mod explorer;
+pub mod stored;
 
 /// The most memory one asset may be estimated to need: half of the 32-bit address space.
 const MEMORY_LIMIT: u64 = 1 << 31;
+/// The most memory decompressed blocks may take.
 const BLOCK_CACHE_BYTES: usize = 64 << 20;
 
 /// The converters of the core, in the order the command line uses them.
 pub fn converters() -> Vec<Box<dyn Converter>> {
-    use sekai_convert::roots::Absent;
+    use sekai_moesekai::scenario_prefab::ScenarioPrefab;
     use sekai_moesekai::story_data::{ActionSetForm, ScenarioBackgroundForm};
-    use sekai_mysekai::roots::{
-        emoticon, facial_table, field_camera, fixture_meta, fixture_model, fixture_reactions,
-        site_model,
-    };
     vec![
         Box::new(sekai_convert::image::Texture),
         Box::new(sekai_convert::image::Sprite),
@@ -43,21 +47,49 @@ pub fn converters() -> Vec<Box<dyn Converter>> {
         Box::new(sekai_convert::text::Font),
         Box::new(sekai_convert::live2d::Model),
         Box::new(sekai_convert::live2d::Motions),
-        Absent::boxed("emoticon", emoticon),
-        Absent::boxed("facial-table", facial_table),
-        Absent::boxed("field-camera", field_camera),
-        Absent::boxed("fixture-meta", fixture_meta),
-        Absent::boxed("fixture-model", fixture_model),
-        Absent::boxed("fixture-reactions", fixture_reactions),
-        Absent::boxed("site-model", site_model),
+        Box::new(sekai_mysekai::emoticon::Emoticon),
+        Box::new(sekai_mysekai::facial::FacialTable),
+        Box::new(sekai_mysekai::field_camera::FieldCamera),
+        Box::new(sekai_mysekai::fixture_areas::FixtureMeta),
+        Box::new(sekai_mysekai::fixture_model::FixtureModel),
+        Box::new(sekai_mysekai::fixture_reactions::FixtureReactions),
+        Box::new(sekai_mysekai::site_model::SiteModel),
         Box::new(sekai_moesekai::scenario::Scenario),
         Box::new(sekai_moesekai::virtual_live::VirtualLiveScript),
         Box::new(sekai_moesekai::virtual_live::VirtualLiveTimeline),
         Box::new(ActionSetForm),
         Box::new(ScenarioBackgroundForm),
+        Box::new(ScenarioPrefab),
         Box::new(sekai_moesekai::costume::CostumeModel),
         Box::new(sekai_moesekai::costume::CostumeMotion),
     ]
+}
+
+/// How the core evaluates: on one thread, each bundle's assets named under its own directory,
+/// with what `store`, `derivations`, `indexes` and `cache` keep.
+fn evaluation<'a>(
+    converters: &'a [Box<dyn Converter>],
+    store: &'a dyn Store,
+    derivations: &'a dyn Derivations,
+    indexes: &'a dyn BundleIndexes,
+    cache: &'a dyn BlockCache,
+) -> Stream<'a> {
+    Stream {
+        converters,
+        naming: &InBundle,
+        loose: &[],
+        store,
+        derivations,
+        indexes,
+        cache,
+        classes: &NoClasses,
+        recorder: &NoRecorder,
+        fusion: None,
+        options: Options::threads(1),
+        segment: Segment { units: 1, bytes: 0 },
+        ledger: None,
+        limit: Some(MEMORY_LIMIT),
+    }
 }
 
 /// What an evaluation produced.
@@ -149,22 +181,7 @@ pub fn run(
     let streamed = stream::evaluate_in_segments(
         &manifest,
         &inputs,
-        &Stream {
-            converters: &converters,
-            naming: &InBundle,
-            loose: &[],
-            store: &store,
-            derivations: &derivations,
-            indexes: &NoBundleIndexes,
-            cache: &cache,
-            classes: &NoClasses,
-            recorder: &NoRecorder,
-            fusion: None,
-            options: Options::threads(1),
-            segment: Segment { units: 1, bytes: 0 },
-            ledger: None,
-            limit: Some(MEMORY_LIMIT),
-        },
+        &evaluation(&converters, &store, &derivations, &NoBundleIndexes, &cache),
         &mut || {
             for (key, bytes) in store.drain() {
                 on_file(&key, &bytes)?;
@@ -185,6 +202,11 @@ pub fn run(
         }
     }
     Ok(report)
+}
+
+/// `sha256` as lowercase hexadecimal.
+fn hex(sha256: &[u8; 32]) -> String {
+    sha256.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Payloads too large to inline, by their SHA-256.
@@ -225,7 +247,7 @@ pub fn objects(
         }
     }
     for (sha256, bytes) in &payloads.0 {
-        let hex: String = sha256.iter().map(|b| format!("{b:02x}")).collect();
+        let hex = hex(sha256);
         on_file(&format!("_payloads/{}/{hex}.bin", &hex[..2]), bytes)?;
     }
     failed.sort();
@@ -245,74 +267,4 @@ pub fn row(output: &Output) -> String {
 
 /// The interface for JavaScript.
 #[cfg(target_arch = "wasm32")]
-pub mod javascript {
-    use std::io;
-
-    use js_sys::{Function, Uint8Array};
-    use wasm_bindgen::prelude::*;
-
-    fn failed(error: JsValue) -> io::Error {
-        io::Error::other(format!("{error:?}"))
-    }
-
-    /// Evaluates bundles given as parallel lists of names and bytes. `on_file(path, bytes)`
-    /// receives each file of the store and `on_asset(row)` each row of the list of assets.
-    /// Returns the report.
-    #[wasm_bindgen]
-    pub fn evaluate(
-        names: Vec<String>,
-        bundles: Vec<Uint8Array>,
-        on_file: &Function,
-        on_asset: &Function,
-    ) -> Result<String, JsError> {
-        let bundles = names
-            .into_iter()
-            .zip(bundles.iter().map(Uint8Array::to_vec))
-            .collect();
-        let report = super::run(
-            bundles,
-            &mut |key, bytes| {
-                let path = JsValue::from(key.relative_path());
-                let bytes = JsValue::from(Uint8Array::from(bytes));
-                on_file
-                    .call2(&JsValue::NULL, &path, &bytes)
-                    .map(drop)
-                    .map_err(failed)
-            },
-            &mut |output| {
-                on_asset
-                    .call1(&JsValue::NULL, &JsValue::from(super::row(output)))
-                    .map(drop)
-                    .map_err(failed)
-            },
-        )?;
-        Ok(report.to_string())
-    }
-
-    /// Writes the object documents of bundles given as parallel lists of names and bytes.
-    /// `on_file(path, bytes)` receives each file, at the path the native `objects` command
-    /// writes it to. Returns the bundles that failed, one `<name>\t<reason>` line each.
-    #[wasm_bindgen]
-    pub fn objects(
-        names: Vec<String>,
-        bundles: Vec<Uint8Array>,
-        on_file: &Function,
-    ) -> Result<String, JsError> {
-        let bundles = names
-            .into_iter()
-            .zip(bundles.iter().map(Uint8Array::to_vec))
-            .collect();
-        let errors = super::objects(bundles, &mut |path, bytes| {
-            let path = JsValue::from(path);
-            let bytes = JsValue::from(Uint8Array::from(bytes));
-            on_file
-                .call2(&JsValue::NULL, &path, &bytes)
-                .map(drop)
-                .map_err(failed)
-        })?;
-        Ok(errors
-            .iter()
-            .map(|(name, reason)| format!("{name}\t{reason}\n"))
-            .collect())
-    }
-}
+pub mod javascript;

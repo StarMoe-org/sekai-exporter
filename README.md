@@ -193,7 +193,7 @@ Start from the object documents of the bundles you care about to see which objec
 
 ## Using it as a library
 
-The crates are layered so that each can be used on its own ([Architecture](docs/architecture.md#crates)): `sekai-unity` unpacks Unity files, `sekai-codec` decodes textures and CRI audio and video, `sekai-pipeline` evaluates a version eagerly or lazily, `sekai-serve` resolves the paths of a published view without doing any I/O of its own, so the same code can run in other hosts, and `sekai-format` holds the serde types of every published document for programs that read the output. `sekai-wasm` exposes the core to JavaScript as `evaluate` and `objects`.
+The crates are layered so that each can be used on its own ([Architecture](docs/architecture.md#crates)): `sekai-unity` unpacks Unity files, `sekai-codec` decodes textures and CRI audio and video, `sekai-pipeline` evaluates a version eagerly or lazily, `sekai-serve` resolves the paths of a published view without doing any I/O of its own, so the same code can run in other hosts, and `sekai-format` holds the serde types of every published document for programs that read the output. `sekai-wasm` exposes the core to JavaScript as `evaluate` and `objects`, and as the class `Explorer`, which keeps a set of bundles open, reads browser files a range at a time and answers one question at a time: the object document of a bundle, the assets it plans, an asset converted on request, and the objects an asset's conversion may read.
 
 ## Status
 

@@ -49,6 +49,7 @@
 | S3 兼容存储 | 已完成 | [发布](publishing.zh-CN.md#s3-兼容存储桶) |
 | WebAssembly 核心，持续集成中与原生构建比对 | 已完成 | |
 | 惰性求值器（作为库） | 已完成 | [架构](architecture.zh-CN.md) |
+| WebAssembly 会话：让资源包保持打开，按区间读取浏览器中的文件，按请求列出、转换资产并给出其闭包 | 已完成 | |
 | 路径索引与 `serve` 解析器 | 已完成 | [服务](serving.zh-CN.md)、[路径索引](spec/path-index.zh-CN.md) |
 | 目录列表，以及每次发布一份供文件浏览器使用的目录树 | 已完成 | [服务](serving.zh-CN.md#目录树)、[目录树](spec/directory-tree.zh-CN.md) |
 | 每个视图的版本历史与每个版本的改动 | 已完成 | [服务](serving.zh-CN.md#版本历史)、[版本历史](spec/version-history.zh-CN.md) |

@@ -9,9 +9,11 @@ use sekai_publish::lease::{Holder, Periods};
 use sekai_publish::s3::{Bucket, Credentials, S3};
 use sekai_testkit::s3::{ACCESS_KEY, REGION, SECRET_KEY, Server};
 
-/// Short periods, so that keeping and waiting happen within a test.
+/// Short periods, so that keeping and waiting happen within a test. The age of a lease comes from
+/// HTTP dates, which count whole seconds, so the lease lasts a few of them: a lease written just
+/// before a second turns is then still held when it is read just after.
 const QUICK: Periods = Periods {
-    lease: Duration::from_millis(600),
+    lease: Duration::from_secs(3),
     keep: Duration::from_millis(20),
     wait: Duration::from_millis(20),
 };

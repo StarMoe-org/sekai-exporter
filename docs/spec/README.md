@@ -11,4 +11,4 @@ Each asset form and each published document format has a specification in this d
 5. **Correctness**: why the result is correct for that runtime, and how it is checked.
 6. **Version**: the version of the form. A change to any of the above changes the version, and the version enters the fingerprint of every asset of the form.
 
-Specifications are written in English.
+Every specification has an English version and a Chinese version (`<form>.zh-CN.md`) with the same content.

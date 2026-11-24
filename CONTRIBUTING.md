@@ -16,7 +16,9 @@ Contributions are welcome, from fixes to whole new asset forms. Start with [Obje
 ## Rules
 
 - **No game data in the repository.** That covers bundles, extracted images, audio, models, tables and decompiled code, including in tests, fixtures and issue attachments. Tests build their inputs synthetically, or use files that are explicitly redistributable.
-- **Specification first.** A new asset form comes with a document that says what is exported, from which objects and tables, in which format, and why the result is correct.
+- **Research, then specification, then code.** A new asset form starts from what its runtime needs and from the game objects and tables that hold the data, each choice justified by the source that owns it. Its [specification](docs/spec/README.md) says what is exported, from which objects and tables, in which format, and why the result is correct, and is settled before the converter is written.
+- **Keep stored results valid.** A new version of a form, table converter, encoder or published document format, or a new revision of units, makes every deployment convert or publish the affected assets again. Such a change is made only when a correct result needs it, and its pull request says what is converted again.
+- **Documents in both languages.** Every document has an English and a Chinese version. A change updates the documents that describe it, in both languages, in the same pull request.
 - **Fail loudly.** If a converter cannot produce a correct asset, it reports a named error for that asset. It never writes a guessed value.
 - **No `#[cfg]` inside function bodies.** Features gate whole modules or optional dependencies.
 - **Deterministic output.** The same input gives the same bytes, whatever the thread count.
@@ -31,9 +33,10 @@ cargo fmt --all --check
 cargo clippy --workspace --all-features -- -D warnings
 cargo test --workspace --all-features
 cargo hack check --workspace --each-feature
+python3 tools/check-layers.py
 ```
 
-The last command builds every feature on its own, so a feature cannot depend on another one by accident.
+`cargo hack` builds every feature on its own, so a feature cannot depend on another one by accident. `check-layers.py` checks that every dependency between workspace crates points to a lower layer of [the architecture](docs/architecture.md).
 
 ## Commits
 

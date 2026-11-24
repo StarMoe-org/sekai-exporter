@@ -113,13 +113,11 @@ impl FormIndex {
         })
     }
 
-    /// The table of `form`, if the publication lists it.
-    pub(crate) fn table(&self, form: &str) -> Option<&FormTable> {
-        let at = self
-            .forms
+    /// The position of the table of `form`, if the publication lists it.
+    fn position(&self, form: &str) -> Option<usize> {
+        self.forms
             .binary_search_by(|table| table.form.as_str().cmp(form))
-            .ok()?;
-        Some(&self.forms[at])
+            .ok()
     }
 
     /// The memory the decoded index takes.
@@ -222,10 +220,9 @@ fn row_bytes(row: &ListingEntry) -> usize {
 /// The listing of one form, while its chunks are gathered as shared [`Arc<FormChunk>`] handles.
 #[derive(Debug)]
 pub(crate) struct FormGathering {
-    /// The hash of the index root.
-    root: [u8; 32],
     index: Arc<FormIndex>,
-    form: String,
+    /// The position of the table of the form in `index`.
+    at: usize,
     /// The chunks gathered so far, in name order.
     chunks: Vec<Arc<FormChunk>>,
     /// Estimated row bytes gathered so far, bounded by [`MAX_LISTING_BYTES`].
@@ -237,15 +234,11 @@ impl FormGathering {
     ///
     /// Returns `Ok(None)` when the publication does not list `form`, or `Err` when the declared
     /// asset count cannot fit within [`MAX_LISTING_BYTES`] even at the minimum size per entry.
-    pub(crate) fn new(
-        root: [u8; 32],
-        index: Arc<FormIndex>,
-        form: &str,
-    ) -> Result<Option<Self>, String> {
-        let Some(table) = index.table(form) else {
+    pub(crate) fn new(index: Arc<FormIndex>, form: &str) -> Result<Option<Self>, String> {
+        let Some(at) = index.position(form) else {
             return Ok(None);
         };
-        if table
+        if index.forms[at]
             .assets
             .saturating_mul(size_of::<ListingEntry>() as u64)
             > MAX_LISTING_BYTES as u64
@@ -255,31 +248,22 @@ impl FormGathering {
             ));
         }
         Ok(Some(Self {
-            root,
             index,
-            form: form.to_owned(),
+            at,
             chunks: Vec::new(),
             bytes: 0,
         }))
     }
 
-    /// The hash of the index root.
-    pub(crate) fn root(&self) -> &[u8; 32] {
-        &self.root
-    }
-
-    /// The form being listed.
-    pub(crate) fn form(&self) -> &str {
-        &self.form
+    /// The table of the form being listed.
+    fn table(&self) -> &FormTable {
+        &self.index.forms[self.at]
     }
 
     /// The SHA-256 of the next chunk to read, or `None` once every chunk has been gathered.
     pub(crate) fn wanted(&self) -> Option<[u8; 32]> {
-        let table = self.index.table(&self.form)?;
-        table
-            .chunks
-            .get(self.chunks.len())
-            .map(|chunk| chunk.sha256)
+        let next = self.table().chunks.get(self.chunks.len())?;
+        Some(next.sha256)
     }
 
     /// Appends `chunk`, the chunk that [`FormGathering::wanted`] named, checking that it matches
@@ -291,9 +275,9 @@ impl FormGathering {
 
     fn push_within(&mut self, chunk: Arc<FormChunk>, limit: usize) -> Result<(), String> {
         let expected = self
-            .index
-            .table(&self.form)
-            .and_then(|table| table.chunks.get(self.chunks.len()))
+            .table()
+            .chunks
+            .get(self.chunks.len())
             .ok_or_else(|| "unexpected listing chunk".to_owned())?;
         if chunk.rows.len() as u64 != expected.rows {
             return Err(format!(
@@ -342,7 +326,7 @@ impl FormGathering {
             view,
             published_version: &self.index.published_version,
             revision: &self.index.revision,
-            form: &self.form,
+            form: &self.table().form,
             assets: ChunkAssets(&self.chunks),
         };
         let document = serialize_within(&document, limit)?;
@@ -405,37 +389,24 @@ impl io::Write for LimitedWriter {
     }
 }
 
-/// The key under which the list of forms of `view` in the index root `root` (at
-/// `published_version` and `revision`) is kept.
-pub(crate) fn forms_key(
+/// The key under which the listing of `form` in `view`, or the list of the forms of `view` when
+/// `form` is `None`, is kept. The index root `root` is described by `published_version` and
+/// `revision`, as the pointer that names it gives them.
+pub(crate) fn key(
     root: &[u8; 32],
     view: &str,
     published_version: &str,
     revision: &str,
+    form: Option<&str>,
 ) -> [u8; 32] {
+    let tag: &[u8] = match form {
+        Some(_) => b"form-listing\n",
+        None => b"form-listings\n",
+    };
     let mut hasher = Sha256::new();
-    hasher.update(b"form-listings\n");
+    hasher.update(tag);
     hasher.update(root);
-    for part in [view, published_version, revision] {
-        hasher.update((part.len() as u64).to_be_bytes());
-        hasher.update(part.as_bytes());
-    }
-    hasher.finalize().into()
-}
-
-/// The key under which the listing of `form` in `view` of the index root `root` (at
-/// `published_version` and `revision`) is kept.
-pub(crate) fn form_key(
-    root: &[u8; 32],
-    view: &str,
-    published_version: &str,
-    revision: &str,
-    form: &str,
-) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(b"form-listing\n");
-    hasher.update(root);
-    for part in [view, published_version, revision, form] {
+    for part in [view, published_version, revision].into_iter().chain(form) {
         hasher.update((part.len() as u64).to_be_bytes());
         hasher.update(part.as_bytes());
     }
@@ -523,9 +494,7 @@ mod tests {
             }],
         });
         let one_row = row_bytes(&chunk_a.rows[0]);
-        let mut gathering = FormGathering::new([0; 32], index, "live2d-model")
-            .unwrap()
-            .unwrap();
+        let mut gathering = FormGathering::new(index, "live2d-model").unwrap().unwrap();
         assert!(gathering.push_within(chunk_a, one_row).is_ok());
         assert!(gathering.push_within(chunk_b, one_row).is_err());
     }
@@ -546,7 +515,7 @@ mod tests {
                 }],
             }],
         });
-        assert!(FormGathering::new([0; 32], index, "huge").is_err());
+        assert!(FormGathering::new(index, "huge").is_err());
     }
 
     #[test]
@@ -578,9 +547,7 @@ mod tests {
                 size: 2,
             }],
         });
-        let mut gathering = FormGathering::new([0; 32], index, "live2d-model")
-            .unwrap()
-            .unwrap();
+        let mut gathering = FormGathering::new(index, "live2d-model").unwrap().unwrap();
         gathering.push(chunk_a).unwrap();
         gathering.push(chunk_b).unwrap();
         let full = gathering.listed("canonical").unwrap();
